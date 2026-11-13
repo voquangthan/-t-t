@@ -1,6 +1,6 @@
 # 05 — Lộ trình và nghiệm thu
 
-Các phase dưới đây là đề xuất. Product Owner và System Architect duyệt trước khi bắt đầu triển khai.
+Các phase dưới đây là đề xuất. Theo chỉ đạo hiện tại của Product Owner, tiếp tục triển khai tuần tự và tự chủ sau khi cổng nghiệm thu phase trước đạt; không cần dừng xin duyệt từng thay đổi kỹ thuật thông thường. Các điều kiện cần quyền/tài khoản/quota bên ngoài vẫn phải được thỏa mãn trước khi dùng dữ liệu hoặc dịch vụ đó. Không bỏ qua lỗi nghiêm trọng để chuyển phase.
 
 | Phase | Phạm vi | Độ khó và phụ thuộc | Tiêu chí nghiệm thu |
 |---|---|---|---|
@@ -14,4 +14,4 @@ Các phase dưới đây là đề xuất. Product Owner và System Architect du
 
 **Xác minh OpenClaw tại commit ghim và chốt hợp đồng MVP chỉ đọc.** Ưu tiên hoàn tất clone và đối chiếu SHA, đọc chuỗi Gateway → agent runtime → tool executor, rà luồng policy/MCP và kiểm tra release Hub tương thích. Giao sơ đồ dữ liệu, ma trận RPC/scope, danh sách tool MVP, biên bản license/advisory và bộ tiêu chí nghiệm thu. Nếu hai bên duyệt chạy thử trong môi trường cô lập, dùng dữ liệu giả và mock provider để kiểm tra chat streaming, tool schema, job và restore. Thử model thật, tài khoản Google hoặc quyền Windows cần phê duyệt phạm vi tương ứng.
 
-TASK 001 dừng tại báo cáo. Chờ Product Owner và System Architect duyệt.
+TASK 001 dừng tại báo cáo. Cổng Milestone 1 hiện vẫn FAIL theo báo cáo remediation số 12; không bắt đầu Milestone 2 cho tới khi đạt các tiêu chí bắt buộc. Sau khi đạt, tiếp tục phase 2 theo thứ tự roadmap, giữ dữ liệu giả cho đến khi các điều kiện bảo mật và quyền truy cập của phase đó được kiểm chứng.

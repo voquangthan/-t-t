@@ -2,17 +2,19 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
-import { zstdDecompressSync } from "node:zlib";
+import { gunzipSync, zstdDecompressSync } from "node:zlib";
 
 const lab = resolve(import.meta.dirname, "..");
 const runtime = process.env.DETOT_TEST_OPENCLAW_ENTRY
   ? resolve(process.env.DETOT_TEST_OPENCLAW_ENTRY)
   : resolve(lab, ".local/openclaw-registry/node_modules/openclaw/openclaw.mjs");
+try { await access(runtime); }
+catch { throw new Error("OpenClaw candidate runtime is missing: " + runtime + ". Install the locked candidate before running this suite."); }
 const scratch = await mkdtemp(resolve(lab, ".local/m1-"));
 const base = JSON.parse(await readFile(resolve(lab, "gateway.lab.json"), "utf8"));
 const token = randomBytes(32).toString("hex");
@@ -292,6 +294,7 @@ async function retentionBaseline() {
   let expiredId;
   let controlId;
   let deletionId;
+  let relatedIds = [];
   let sessionKey;
   const canary = "DETOT-M1-DELETE-7E39";
   const privateCanary = "DETOT-M1-INCOGNITO-9F12";
@@ -318,6 +321,66 @@ async function retentionBaseline() {
       return row ? { ...JSON.parse(row.value_json), expiresAt: row.expires_at } : undefined;
     } finally { db.close(); }
   }
+  function mappingsForSession(key) {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      return db.prepare("SELECT entry_key, value_json, expires_at FROM plugin_state_entries WHERE plugin_id = ? AND namespace = ?")
+        .all("core:openresponses", "response-sessions")
+        .filter(row => JSON.parse(row.value_json).sessionKey === key)
+        .map(row => ({ id: row.entry_key, ...JSON.parse(row.value_json), expiresAt: row.expires_at }));
+    } finally { db.close(); }
+  }
+  function databaseLeaks(dbFile, needles) {
+    const db = new DatabaseSync(dbFile, { readOnly: true });
+    const found = [];
+    try {
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all();
+      for (const { name } of tables) {
+        const quoted = '"' + name.replaceAll('"', '""') + '"';
+        const columns = db.prepare("PRAGMA table_info(" + quoted + ")").all();
+        if (!columns.length) continue;
+        const projection = columns.map(column => '"' + column.name.replaceAll('"', '""') + '"').join(", ");
+        for (const row of db.prepare("SELECT " + projection + " FROM " + quoted).iterate()) {
+          for (const value of Object.values(row)) {
+            if (typeof value === "string" && needles.some(needle => value.includes(needle))) {
+              found.push({ table: name });
+              break;
+            }
+          }
+        }
+      }
+    } finally { db.close(); }
+    return found;
+  }
+  async function storageLeaks(root, needles) {
+    const entries = await readdir(root, { recursive: true, withFileTypes: true });
+    const found = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const path = resolve(entry.parentPath, entry.name);
+      const bytes = await readFile(path);
+      let text;
+      try {
+        text = entry.name.endsWith(".zst") ? zstdDecompressSync(bytes).toString("utf8")
+          : entry.name.endsWith(".gz") ? gunzipSync(bytes).toString("utf8")
+          : bytes.toString("utf8");
+      }
+      catch { continue; }
+      if (needles.some(needle => text.includes(needle))) found.push(entry.name);
+    }
+    return found;
+  }
+  async function sqliteLeaks(root, needles) {
+    const entries = await readdir(root, { recursive: true, withFileTypes: true });
+    const found = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.(?:sqlite3?|db3?)$/i.test(entry.name)) continue;
+      const path = resolve(entry.parentPath, entry.name);
+      try { found.push(...databaseLeaks(path, needles).map(item => ({ file: entry.name, table: item.table }))); }
+      catch { found.push({ file: entry.name, table: "unreadable-database" }); }
+    }
+    return found;
+  }
   try {
     await test("Retention Gateway readiness", () => waitReady(url, gateway));
     if (results.at(-1).status !== "PASS") return;
@@ -343,6 +406,7 @@ async function retentionBaseline() {
       assert.equal(deletion.status, 200);
       deletionId = (await deletion.json()).id;
       assert.equal(mapping(deletionId)?.sessionKey, sessionKey);
+      relatedIds = [expiredId, deletionId];
       return { positiveTtl: true, storedMappings: 3 };
     });
     if (results.at(-1).status !== "PASS") return;
@@ -363,19 +427,35 @@ async function retentionBaseline() {
       assert.equal(control.status, 200);
       return { expiredHttp: expired.status, validHttp: control.status };
     });
-    await test("Cross-store deletion of ordinary synthetic session", async () => {
+    await test("Cross-store deletion and restart revocation of ordinary synthetic session", async () => {
+      const controlMappings = mappingsForSession(mapping(controlId).sessionKey);
+      assert(controlMappings.some(item => item.id === controlId), "control continuation must exist before deletion");
+      const preDeleteMappings = mappingsForSession(sessionKey);
+      relatedIds = [...new Set([...relatedIds, ...preDeleteMappings.map(item => item.id)])];
+      assert(relatedIds.length >= 2, "test must exercise multiple continuation IDs for one session");
+      assert((await storageLeaks(profile.state, [canary])).length > 0, "canary must be present in persisted files before deletion");
+      assert((await sqliteLeaks(profile.state, [canary])).length > 0, "canary must be present in indexed/database storage before deletion");
       await cli(profile, ["sessions", "delete", sessionKey, "--yes", "--json"]);
-      const retainedMapping = Boolean(mapping(deletionId));
-      const response = await request(marker, { previous: deletionId });
-      const entries = await readdir(profile.state, { recursive: true, withFileTypes: true });
-      const archives = entries.filter(entry => entry.isFile() && entry.name.includes(".jsonl.deleted."));
-      for (const entry of archives) {
-        const bytes = await readFile(resolve(entry.parentPath, entry.name));
-        const content = (entry.name.endsWith(".zst") ? zstdDecompressSync(bytes) : bytes).toString("utf8");
-        if (content.includes(canary)) fail("Deleted-session archive retained the synthetic canary; continuation HTTP " + response.status);
+      const retainedMappings = mappingsForSession(sessionKey).map(item => item.id);
+      const remainingSessions = await cli(profile, ["sessions", "--json"]);
+      if (remainingSessions.includes(sessionKey)) fail("Deleted session key remains listed");
+      const responseStatuses = [];
+      for (const id of relatedIds) responseStatuses.push((await request(marker, { previous: id })).status);
+      const archiveRoot = profile.state;
+      const diskLeaks = await storageLeaks(archiveRoot, [canary]);
+      const dbLeaks = await sqliteLeaks(archiveRoot, [canary, ...relatedIds]);
+      const restartedContinuationStatuses = [];
+      await stopChild(gateway);
+      gateway = launchGateway();
+      await waitReady(url, gateway);
+      for (const id of relatedIds) restartedContinuationStatuses.push((await request(marker, { previous: id })).status);
+      const survivingControl = await request(marker, { previous: controlId });
+      if (survivingControl.status !== 200) fail("Unrelated control continuation did not survive deletion/restart");
+      if (retainedMappings.length || responseStatuses.some(status => status !== 400) || restartedContinuationStatuses.some(status => status !== 400)) {
+        fail("Deleted session mappings=" + retainedMappings.length + "; before-restart continuation statuses=" + responseStatuses.join(",") + "; after-restart=" + restartedContinuationStatuses.join(","));
       }
-      if (retainedMapping || response.status !== 400) fail("Deleted session mapping retained=" + retainedMapping + "; continuation HTTP " + response.status);
-      fail("No matching archive observed; transcript, FTS, memory and backup purge still unverified");
+      if (diskLeaks.length || dbLeaks.length) fail("Deleted content remains in files=" + diskLeaks.length + "; SQLite tables=" + dbLeaks.map(item => item.table).join(","));
+      return { revokedContinuationIds: relatedIds.length, allRejectedBeforeAndAfterRestart: true, diskCanaryLeaks: 0, sqliteLeaks: 0, unrelatedControlSurvived: true };
     });
   } finally { await stopChild(gateway); }
 }

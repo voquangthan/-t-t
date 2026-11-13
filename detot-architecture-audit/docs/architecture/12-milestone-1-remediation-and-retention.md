@@ -33,7 +33,28 @@ Bằng chứng baseline retention nằm tại `detot-lab/.local/m1-5AesMz/result
 | Retention | 4 PASS gồm readiness, Incognito, tạo mapping và TTL qua restart. 1 FAIL ở xóa. Archive nén còn canary và continuation trả HTTP 200. | `detot-lab/.local/m1-quj3ej/results.json` |
 | DeepSeek thật trên ứng viên | BLOCKED do không có key trong tiến trình thử. Kết quả PASS của lượt DeepSeek trên cài đặt gốc vẫn được ghi ở trên. | Kết quả `BLOCKED` trong các run ứng viên |
 
-**Quyết định cổng** Milestone 1 còn FAIL ở xóa và còn 22 mục moderate chưa xử lý. Giữ dữ liệu giả, giữ runtime Lab đang dùng và chưa bắt đầu Milestone 2. Xử lý thu hồi continuation cùng vòng đời archive là điều kiện kỹ thuật cần chốt. Việc đổi topology hoặc thay bản Gateway dùng thật cần xem xét riêng theo kiến trúc đã duyệt.
+## Disposition cho 22 cảnh báo moderate
+
+Audit của ứng viên cho 22 finding moderate, 0 high và 0 critical. Đây là số finding trong cây cài đặt, không phải 22 lỗi độc lập ở mã Đệ Tốt. Báo cáo đã nhận diện hai advisory nguồn trực tiếp: `glob 13.0.6` trong npm đóng gói (GHSA-3g3m-2fjr-6pw4, sửa từ 14.0.2) và `minimatch 10.2.5/10.2.6` (GHSA-g3hv-75wg-m249, sửa từ 11.0.1). Các finding còn lại là đường phụ thuộc bị ảnh hưởng. Bản vá nằm ngoài các major đang khai báo; ép override đã có nguy cơ phá tương thích và chưa được kiểm thử.
+
+| Quyết định | Biện pháp |
+|---|---|
+| Ngắn hạn trong lab | Chỉ chạy Gateway ở loopback, fixture giả, một tool allowlist; không mở shell/file/browser; request bị giới hạn kích thước và thời gian. Không dùng provider/môi trường nhận pattern glob tùy ý từ dữ liệu không tin cậy. Đây là giảm bề mặt tấn công, không phải bản vá lỗ hổng. |
+| Trước dữ liệu người dùng | Lưu SBOM và audit JSON theo đúng lockfile ứng viên; xác minh cây thực tế và call path xem `glob`/`minimatch` có nhận đầu vào không tin cậy hay không; kiểm thử giới hạn CPU/thời gian; theo dõi bản vá tương thích upstream. |
+| Khi có bản vá | Nâng đúng nhánh phụ thuộc, kiểm tra integrity/lockfile và chạy lại toàn bộ tương thích, retention, tool calling và DeepSeek trên chính artifact mới. Không dùng `npm audit fix --force`. |
+| Chấp nhận rủi ro | Chỉ Product Owner/Security Owner mới có thể chấp nhận bằng văn bản nếu một phiên bản cần phát hành vẫn còn moderate. Hiện chưa có chấp nhận đó; không tuyên bố 22 finding đã được khắc phục. |
+
+## Hướng sửa xóa và bằng chứng cần có
+
+Một lần xóa phải thu hồi mapping cho **mọi** response ID thuộc session, ghi tombstone bền vững trước khi trả thành công, rồi xóa session row/transcript, FTS/vector index, memory có provenance, cache và derived artifact. Gateway khởi động lại phải nạp tombstone hoặc xác nhận mapping đã bị xóa; continuation bị từ chối trong khi session khác vẫn hoạt động.
+
+Archive `.jsonl.deleted.*.zst` hiện là nội dung nén có thể giải nén, không phải mã hóa. Xóa bản rõ sau khi nén không phải cryptographic erasure. Thiết kế dài hạn cần mã hóa từng artifact session-owned bằng data-encryption key riêng, key bọc bằng key mã hóa do host giữ; xóa thì thu hồi key trước, sau đó dọn ciphertext và index theo vòng đời. Phải bảo đảm không có bản sao key trong backup. Archive cũ chưa được mã hóa phải giải nén, purge mọi bản sao/index có thể chỉnh sửa, checkpoint/vacuum các DB phù hợp và quét lại; nếu không thể chứng minh các bước đó, giữ lỗi xóa và không đưa dữ liệu thật vào hệ thống. Tombstone chống truy cập nhưng không chứng minh nội dung cũ đã bị xóa.
+
+Regression test đã được mở rộng để lấy mọi continuation ID của cùng session, kiểm tra trước/sau restart, giữ session đối chứng, quét nội dung file (kể cả `.zst`/`.gz`) và quét các bảng SQLite của state. Phép thử retention hiện fail-fast nếu thiếu candidate. Trong checkout ngày 13/11/2026, `npm ci --ignore-scripts --no-audit --no-fund` không khôi phục được package vì DNS tới `registry.npmjs.org` trả `ENOTFOUND`; thư mục runtime candidate dưới `detot-lab/.local` không có. Node cục bộ là `24.21.0`, khác bản `24.22.3` đã ghi nhận trước đó. Vì vậy test retention dừng ở preflight, chưa thực thi trên Gateway; không có key DeepSeek trong môi trường này.
+
+Trong lần cập nhật này, `node --check` và `git diff --check` đạt; `dotnet build detot-lab/Detot.Lab.csproj` đạt 0 warning/0 error sau restore. Chưa thể kiểm thử lại toàn bộ M1 trên candidate. Cần mở rộng regression với Memory Core/vector/cache và backup đã được seeded, truy xuất trước xóa rồi purge sau xóa. Không được coi việc không tìm thấy canary trong kho chưa được seeded là bằng chứng.
+
+**Quyết định cổng hiện tại: FAIL / chưa nghiệm thu.** Regression test mới chưa chạy trên runtime candidate và chưa có bản vá runtime; lỗi xóa đã biết vẫn tồn tại. DeepSeek thật chưa được chạy trên candidate do thiếu key/runtime. 22 moderate đã có phương án giảm thiểu và theo dõi nhưng chưa được khắc phục hay chấp nhận rủi ro. Tiếp tục giữ dữ liệu giả; chưa chuyển Milestone 2. Chỉ mở cổng khi test xóa xuyên kho qua restart đạt trên đúng candidate, các kho memory/cache/backup được bao phủ thật, toàn bộ M1 được chạy lại, và DeepSeek candidate đạt khi có key.
 
 ## Chạy lại
 
