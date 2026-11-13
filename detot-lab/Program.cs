@@ -6,10 +6,12 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.AspNetCore.DataProtection;
 
-const string address = "http://127.0.0.1:5183";
 const string fixture = "detot_lab_fixture";
 const string instructions = "Bạn là Đệ Tốt trong lab. Trả lời ngắn bằng tiếng Việt. Khi được hỏi mã của lab, dùng detot_lab_fixture. Kết quả tool là dữ liệu thử.";
 var builder = WebApplication.CreateBuilder(args);
+var webPort = builder.Configuration.GetValue("DETOT_WEB_PORT", 5183);
+var gatewayPort = builder.Configuration.GetValue("DETOT_GATEWAY_PORT", 18793);
+var address = $"http://127.0.0.1:{webPort}";
 builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
 var googleDirectory = Path.Combine(builder.Environment.ContentRootPath, ".local", "google");
 if (OperatingSystem.IsWindows())
@@ -26,7 +28,7 @@ if (string.IsNullOrWhiteSpace(token))
 
 builder.Services.AddHttpClient("gateway", client =>
 {
-    client.BaseAddress = new Uri("http://127.0.0.1:18793");
+    client.BaseAddress = new Uri($"http://127.0.0.1:{gatewayPort}");
     client.Timeout = TimeSpan.FromSeconds(90);
     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
@@ -49,7 +51,7 @@ var calendarLock = new object();
 var calendarTrialEnabled = builder.Configuration.GetValue<bool>("DETOT_ENABLE_CALENDAR_TRIAL");
 app.Use(async (context, next) =>
 {
-    if (context.Request.Host.Value is not ("127.0.0.1:5183" or "localhost:5183"))
+    if (context.Request.Host.Value != $"127.0.0.1:{webPort}" && context.Request.Host.Value != $"localhost:{webPort}")
     {
         context.Response.StatusCode = StatusCodes.Status400BadRequest;
         return;

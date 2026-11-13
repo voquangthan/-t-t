@@ -1,5 +1,7 @@
 ﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
-    [string]$ImportGoogleOAuth, [string]$RestoredState)
+    [string]$ImportGoogleOAuth, [string]$RestoredState,
+    [ValidateRange(1024,65535)][int]$WebPort = 5183,
+    [ValidateRange(1024,65535)][int]$GatewayPort = 18793)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
@@ -59,12 +61,15 @@ $candidate = Join-Path $root 'tests/runtime-candidate/node_modules/openclaw/open
 if (Test-Path -LiteralPath $candidate -PathType Leaf) { $gateway = $candidate }
 if (!(Test-Path -LiteralPath $node -PathType Leaf)) { $node = (Get-Command node.exe -ErrorAction Stop).Source }
 if (!(Test-Path -LiteralPath $dotnet -PathType Leaf)) { $dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source }
-$app = Join-Path $root 'bin/Debug/net10.0/Detot.Lab.dll'
+$isolatedPorts = $WebPort -ne 5183 -or $GatewayPort -ne 18793
+if ($WebPort -eq $GatewayPort) { throw 'Backend and Gateway ports must differ.' }
+$buildDir = if ($isolatedPorts) { Join-Path $root ".local/build-$WebPort-$GatewayPort" } else { Join-Path $root 'bin/Debug/net10.0' }
+$app = Join-Path $buildDir 'Detot.Lab.dll'
 foreach ($path in $node, $dotnet, $gateway) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing lab dependency: $path" }
 }
 
-foreach ($port in 18793, 5183) {
+foreach ($port in $GatewayPort, $WebPort) {
     $socket = [Net.Sockets.TcpClient]::new()
     $connected = $false
     try {
@@ -86,7 +91,7 @@ if ($gateway -eq $candidate) {
     & $node (Join-Path $root 'tests/runtime-candidate/apply-retention-fix.mjs') $gateway
     if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
 }
-& $dotnet build (Join-Path $root 'Detot.Lab.csproj')
+& $dotnet build (Join-Path $root 'Detot.Lab.csproj') -o $buildDir
 if ($LASTEXITCODE -ne 0) { throw 'Backend build failed.' }
 & npm.cmd --prefix (Join-Path $root 'frontend') run build
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
@@ -113,14 +118,27 @@ finally {
     $rng.Dispose()
 }
 $token = [BitConverter]::ToString($bytes).Replace("-", "")
-$state = if ($RestoredState) { (Resolve-Path -LiteralPath $RestoredState).Path } else { Join-Path $root '.state' }
+$state = if ($RestoredState) { (Resolve-Path -LiteralPath $RestoredState).Path } elseif ($isolatedPorts) {
+    Join-Path $root ".local/state-$WebPort-$GatewayPort"
+} else { Join-Path $root '.state' }
 $authority = Join-Path $root '.local/copy-authority'
 if ($RestoredState -and !(Test-Path -LiteralPath $authority -PathType Container)) {
     throw 'Restore requires the existing external revocation authority.'
 }
 if ($gateway -ne $candidate) { throw 'Install the locked Gateway candidate before launching this lab.' }
 if (!$RestoredState) { New-Item -ItemType Directory -Path $authority -Force | Out-Null }
+if ($RestoredState) {
+    & $node (Join-Path $root 'tests/runtime-candidate/check-restored-state.mjs') $state $authority
+    if ($LASTEXITCODE -ne 0) { throw 'Restore rejected before starting Gateway or backend.' }
+}
 New-Item -ItemType Directory -Path $state -Force | Out-Null
+$configPath = Join-Path $root 'gateway.lab.json'
+if ($isolatedPorts) {
+    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    $config.gateway.port = $GatewayPort
+    $configPath = Join-Path $root ".local/gateway-$WebPort-$GatewayPort.json"
+    [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 30))
+}
 
 function ConvertTo-LabProcessArgument([string]$Argument) {
     # Windows argv parsing doubles backslashes before a quote or the closing delimiter.
@@ -166,7 +184,7 @@ try {
         DEEPSEEK_API_KEY = $provider.Password.Trim()
         OPENCLAW_GATEWAY_TOKEN = $token
         OPENCLAW_STATE_DIR = $state
-        OPENCLAW_CONFIG_PATH = (Join-Path $root 'gateway.lab.json')
+        OPENCLAW_CONFIG_PATH = $configPath
         OPENCLAW_SKIP_CHANNELS = '1'
         OPENCLAW_DISABLE_BONJOUR = '1'
         DETOT_COPY_AUTHORITY_DIR = $authority
@@ -184,7 +202,7 @@ try {
         do {
             if ($gatewayProcess.HasExited) { throw "Gateway exited ($($gatewayProcess.ExitCode))." }
             try {
-                $response = $probe.GetAsync('http://127.0.0.1:18793/readyz').GetAwaiter().GetResult()
+                $response = $probe.GetAsync("http://127.0.0.1:$GatewayPort/readyz").GetAwaiter().GetResult()
                 $ready = $response.IsSuccessStatusCode
                 $response.Dispose()
             } catch {
@@ -201,7 +219,9 @@ try {
         DETOT_LAB_NODE = $node
         DETOT_LAB_RUNTIME = $gateway
         OPENCLAW_STATE_DIR = $state
-        OPENCLAW_CONFIG_PATH = (Join-Path $root 'gateway.lab.json')
+        OPENCLAW_CONFIG_PATH = $configPath
+        DETOT_WEB_PORT = [string]$WebPort
+        DETOT_GATEWAY_PORT = [string]$GatewayPort
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_RELEASE_ENABLED')) {
@@ -220,10 +240,11 @@ try {
             $googleSecret.Dispose()
         }
     }
+    if ($isolatedPorts) { $backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] = 'false' }
     $appProcess = Start-LabChild $dotnet @($app) $backendVariables
     $backendVariables.Clear()
     $token = $null
-    Write-Host 'Open http://127.0.0.1:5183/workspace and send a synthetic prompt. Press Ctrl+C here to stop.'
+    Write-Host "Open http://127.0.0.1:$WebPort/workspace and send a synthetic prompt. Press Ctrl+C here to stop."
     while (!$appProcess.HasExited -and !$gatewayProcess.HasExited) {
         Start-Sleep -Seconds 1
     }
