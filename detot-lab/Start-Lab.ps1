@@ -5,8 +5,12 @@ $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $node = Join-Path $root ".local/node-v24.22.3-win-$arch/node.exe"
 $dotnet = Join-Path $root '.local/dotnet/dotnet.exe'
 $gateway = Join-Path $root '.local/openclaw-registry/node_modules/openclaw/openclaw.mjs'
+$candidate = Join-Path $root 'tests/runtime-candidate/node_modules/openclaw/openclaw.mjs'
+if (Test-Path -LiteralPath $candidate -PathType Leaf) { $gateway = $candidate }
+if (!(Test-Path -LiteralPath $node -PathType Leaf)) { $node = (Get-Command node.exe -ErrorAction Stop).Source }
+if (!(Test-Path -LiteralPath $dotnet -PathType Leaf)) { $dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source }
 $app = Join-Path $root 'bin/Debug/net10.0/Detot.Lab.dll'
-foreach ($path in $node, $dotnet, $gateway, $app) {
+foreach ($path in $node, $dotnet, $gateway) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing lab dependency: $path" }
 }
 
@@ -25,6 +29,15 @@ foreach ($port in 18793, 5183) {
         throw "Lab port $port is already in use. Stop the previous lab from its terminal before starting again."
     }
 }
+
+if ($gateway -eq $candidate) {
+    & $node (Join-Path $root 'tests/runtime-candidate/apply-retention-fix.mjs') $gateway
+    if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
+}
+& $dotnet build (Join-Path $root 'Detot.Lab.csproj')
+if ($LASTEXITCODE -ne 0) { throw 'Backend build failed.' }
+& npm.cmd --prefix (Join-Path $root 'frontend') run build
+if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
 
 # The process-local credentials are only passed to the children that need them.
 $key = Read-Host 'DeepSeek API key (hidden, this session only)' -AsSecureString
@@ -112,7 +125,7 @@ try {
     }
     $appProcess = Start-LabChild $dotnet @($app) @{ DETOT_GATEWAY_TOKEN = $token }
     $token = $null
-    Write-Host 'Open http://127.0.0.1:5183/ and send the sample prompt. Press Ctrl+C here to stop.'
+    Write-Host 'Open http://127.0.0.1:5183/workspace and send a synthetic prompt. Press Ctrl+C here to stop.'
     while (!$appProcess.HasExited -and !$gatewayProcess.HasExited) {
         Start-Sleep -Seconds 1
     }

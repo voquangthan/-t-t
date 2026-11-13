@@ -80,7 +80,14 @@ function App() {
         signal: controller.signal,
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || typeof data.reply !== "string") throw new Error(data.detail || data.error || (response.status === 429 ? "Đệ Tốt đang xử lý một yêu cầu. Hãy thử lại." : "Không nhận được phản hồi từ Gateway."));
+      if (!response.ok || typeof data.reply !== "string") {
+        const fallback = response.status === 429
+          ? "Đệ Tốt đang xử lý một yêu cầu. Hãy thử lại."
+          : response.status >= 500
+            ? "Không kết nối được với backend lab. Chạy Start-Lab.ps1, đợi Gateway sẵn sàng rồi thử lại."
+            : `API chat không trả về phản hồi hợp lệ (HTTP ${response.status}).`;
+        throw new Error(data.detail || data.error || fallback);
+      }
       const assistant: Message = { id: uid(), role: "assistant", text: data.reply,
         tool: data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
         calendarContext: data.calendarContext };
