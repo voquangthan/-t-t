@@ -1,0 +1,118 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "port": 18793,
+    "reload": { "mode": "off" },
+    "auth": {
+      "mode": "token"
+    },
+    "controlUi": {
+      "enabled": false
+    },
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "deepseek/deepseek-flash"
+      },
+      "models": {
+        "deepseek/deepseek-flash": {
+          "params": {
+            "extra_body": {
+              "thinking": { "type": "disabled" }
+            }
+          }
+        }
+      },
+      "skipBootstrap": true,
+      "heartbeat": {
+        "every": "0m"
+      }
+    }
+  },
+  "tools": {
+    "allow": [
+      "detot_lab_fixture"
+    ],
+    "deny": [
+      "exec",
+      "process",
+      "read",
+      "write",
+      "edit",
+      "apply_patch",
+      "browser",
+      "nodes",
+      "web_search",
+      "web_fetch",
+      "gateway",
+      "cron",
+      "sessions_spawn",
+      "group:runtime",
+      "group:fs",
+      "group:nodes",
+      "group:web",
+      "group:openclaw",
+      "group:plugins",
+      "canvas"
+    ],
+    "elevated": {
+      "enabled": false
+    },
+    "toolSearch": false,
+    "codeMode": false
+  },
+  "plugins": {
+    "enabled": false,
+    "slots": {
+      "memory": "none"
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "deepseek": {
+        "baseUrl": "https://api.deepseek.com",
+        "apiKey": { "source": "env", "provider": "default", "id": "DEEPSEEK_API_KEY" },
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "deepseek-flash",
+            "name": "DeepSeek V4 Flash",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 1000000,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "skills": {
+    "allowBundled": [
+      "detot-lab-no-bundled-skills"
+    ],
+    "load": {
+      "watch": false
+    }
+  },
+  "cron": {
+    "enabled": false
+  },
+  "memory": {
+    "search": {
+      "enabled": false
+    }
+  },
+  "logging": {
+    "file": "${OPENCLAW_STATE_DIR}/gateway.log"
+  }
+}

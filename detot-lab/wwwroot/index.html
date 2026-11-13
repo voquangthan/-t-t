@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đệ Tốt AI Lab</title>
+  <link rel="stylesheet" href="/lab.css">
+  <script src="/lab.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Đệ Tốt AI Lab</h1>
+    <p>Tin nhắn được gửi tới nhà cung cấp LLM. Chỉ dùng dữ liệu thử.</p>
+    <form>
+      <label for="message">Tin nhắn thử nghiệm</label>
+      <textarea id="message" maxlength="1500" rows="3" required>Đệ Tốt ơi, dùng công cụ để cho tôi biết mã kiểm thử của lab.</textarea>
+      <button>Gửi</button>
+    </form>
+    <p id="status" role="status"></p>
+    <output id="reply"></output>
+  </main>
+</body>
+</html>
