@@ -19,7 +19,9 @@ Chốt theo cấu hình Đệ Tốt một người dùng, chạy qua `Start-Lab.
 
 ## Quyết định hiện tại
 
-Chưa nghiệm thu. Regression Gateway cô lập đã có bằng chứng, nhưng giao diện hiện chỉ xóa bản lưu trình duyệt. Launcher thường chưa nối kho thu hồi và restore gate theo cấu hình sử dụng. Chưa có lượt kiểm thử đầu cuối trên cấu hình launcher dự kiến bao phủ các điểm này.
+Chưa nghiệm thu cấu hình mặc định. Đã chạy Edge trên launcher với cổng cô lập 20383/20393: gửi chat thành công, bấm Xóa nhận HTTP 204 từ Gateway, tải lại trang không còn lịch sử thử. Ca launcher restore riêng đã xác nhận state chứa dấu thu hồi bị chặn trước khi mở cổng. Ca Gateway restore đã kiểm tra đọc lại lịch sử qua RPC.
+
+Launcher cố định candidate đã vá và từ chối khởi động nếu cổng bị chiếm. Lab cũ vẫn giữ cổng mặc định và Windows từ chối quyền dừng tiến trình từ Codex. Cần dừng từ phiên sở hữu tiến trình trước khi nghiệm thu trên cổng mặc định. Không có thư mục backup được khai báo trong cấu hình launcher hiện tại. Kiểm kê theo tên trong state không thấy file archive hoặc backup, và hai vị trí `detot-lab/backups` và `backups` không tồn tại. Kết quả này chỉ áp dụng cho cấu hình trong repo.
 
 Rủi ro còn lại cần ghi nhận khi chốt là bản sao do người dùng tự xuất ngoài các vị trí đã cấu hình, dấu vết vật lý sau khi unlink và dữ liệu đã chuyển ra nhà cung cấp. Phạm vi nghiệm thu là khả năng truy xuất qua Đệ Tốt và các kho do Đệ Tốt quản lý.
 
