@@ -8,7 +8,16 @@ if ($FromClipboard -and !$ConfigureDeepSeek) { throw "Use -FromClipboard with -C
 if ($ConfigureDeepSeek) {
     $secret = if (!$FromClipboard) { Read-Host 'Nhập DeepSeek API key (ẩn)' -AsSecureString }
     try {
-        $plain = if ($FromClipboard) { ([string](Get-Clipboard -Raw)).Trim() } else { [Net.NetworkCredential]::new('', $secret).Password.Trim() }
+        if ($FromClipboard) {
+            [void](Read-Host 'Copy the API key NOW, return to this window, and press Enter without pasting')
+            $plain = ([string](Get-Clipboard -Raw)).Trim()
+            if (!$plain) { throw 'Clipboard has no text. Copy the API key after the prompt appears.' }
+            if ($plain -match 'Start-Lab\.ps1|-ConfigureDeepSeek') {
+                throw 'Clipboard contains the startup command. Copy the API key after the prompt appears.'
+            }
+        } else {
+            $plain = [Net.NetworkCredential]::new('', $secret).Password.Trim()
+        }
         if ($plain -cnotmatch '^[!-~]{8,512}$') {
             throw 'Enter the complete API key as a single value without spaces.'
         }
