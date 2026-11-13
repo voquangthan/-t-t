@@ -19,6 +19,8 @@ Chốt theo cấu hình Đệ Tốt một người dùng, chạy qua `Start-Lab.
 
 ## Quyết định hiện tại
 
+Cập nhật: Edge đã PASS trên cổng mặc định 5183/18793 với state tổng hợp riêng. Gửi chat thành công, nút Xóa trả HTTP 204 và lịch sử không xuất hiện sau reload. Bản vá restore được sửa để có thể áp dụng nhiều lần mà không chèn thêm bộ kiểm tra. State cũ `.state` vẫn chưa khởi động lại được vì Gateway không xác minh được khóa sở hữu Windows, dù cổng đã trống.
+
 Chưa nghiệm thu cấu hình mặc định. Đã chạy Edge trên launcher với cổng cô lập 20383/20393: gửi chat thành công, bấm Xóa nhận HTTP 204 từ Gateway, tải lại trang không còn lịch sử thử. Ca launcher restore riêng đã xác nhận state chứa dấu thu hồi bị chặn trước khi mở cổng. Ca Gateway restore đã kiểm tra đọc lại lịch sử qua RPC.
 
 Launcher cố định candidate đã vá và từ chối khởi động nếu cổng bị chiếm. Lab cũ vẫn giữ cổng mặc định và Windows từ chối quyền dừng tiến trình từ Codex. Cần dừng từ phiên sở hữu tiến trình trước khi nghiệm thu trên cổng mặc định. Không có thư mục backup được khai báo trong cấu hình launcher hiện tại. Kiểm kê theo tên trong state không thấy file archive hoặc backup, và hai vị trí `detot-lab/backups` và `backups` không tồn tại. Kết quả này chỉ áp dụng cho cấu hình trong repo.

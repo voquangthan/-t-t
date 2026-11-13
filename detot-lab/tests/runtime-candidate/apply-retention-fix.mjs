@@ -36,26 +36,22 @@ export { handleOpenResponsesHttpRequest, revokeOpenResponsesForDeletedSession };
 const deletionPath = join(packageRoot, "dist", "sessions-delete-DbGyBrAQ.mjs");
 await copyFile(fileURLToPath(new URL("./restore-preflight.mjs", import.meta.url)),
   join(packageRoot, "dist", "detot-restore-preflight.mjs"));
-await replaceExactly(runtime, 'import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";',
-  'import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";\n' +
+const bootAnchor = 'import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";';
+const bootEnd = 'import { access } from "node:fs/promises";';
+const bootSource = await readFile(runtime, "utf8");
+const bootStart = bootSource.indexOf(bootAnchor);
+const bootStop = bootSource.indexOf(bootEnd, bootStart);
+assert(bootStart >= 0 && bootStop > bootStart, "Cannot find restore gate insertion point.");
+const bootGap = bootSource.slice(bootStart + bootAnchor.length, bootStop);
+assert(!bootGap.replace(/\s*if \(process\.env\.DETOT_RESTORE_AUTHORITY[^\n]*\n[\s\S]*?\n\}/g, "").trim(),
+  "Unexpected code at restore gate insertion point.");
+const bootGate = bootAnchor + '\n' +
   'if (process.env.DETOT_RESTORE_AUTHORITY && process.argv.slice(2, 4).join(" ") === "gateway run") {\n' +
-  '  const path = await import("node:path");\n' +
-  '  const { verifyRestoreSnapshot } = await import("./dist/detot-restore-preflight.mjs");\n' +
-  '  const state = realpathSync(process.env.OPENCLAW_STATE_DIR);\n' +
-  '  const authority = realpathSync(process.env.DETOT_RESTORE_AUTHORITY);\n' +
-  '  const relative = path.relative(state, authority);\n' +
-  '  if (!relative || (!relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative))) throw new Error("Restore authority must be external.");\n' +
-  '  await verifyRestoreSnapshot(path.join(state, "agents/main/agent/openclaw-agent.sqlite"), authority);\n' +
-  '}',
-  "enforce restore preflight before gateway boot");
-await replaceExactly(runtime,
-  'const { verifyRestoreSnapshot } = await import("./dist/detot-restore-preflight.mjs");',
-  'const { verifyRestoreState } = await import("./dist/detot-restore-preflight.mjs");',
-  "load full-state restore verifier");
-await replaceExactly(runtime,
-  'await verifyRestoreSnapshot(path.join(state, "agents/main/agent/openclaw-agent.sqlite"), authority);',
-  'await verifyRestoreState(state, authority);',
-  "scan all staged restore files before boot");
+  '  const { verifyRestoreState } = await import("./dist/detot-restore-preflight.mjs");\n' +
+  '  await verifyRestoreState(process.env.OPENCLAW_STATE_DIR, process.env.DETOT_RESTORE_AUTHORITY);\n' +
+  '}\n';
+const updatedBoot = bootSource.slice(0, bootStart) + bootGate + bootSource.slice(bootStop);
+if (updatedBoot !== bootSource) await writeFile(runtime, updatedBoot, "utf8");
 await copyFile(fileURLToPath(new URL("./session-copies.mjs", import.meta.url)),
   join(packageRoot, "dist", "detot-session-copies.mjs"));
 const memoryCliPath = join(packageRoot, "dist", "cli.runtime-D93HQK_k.mjs");
