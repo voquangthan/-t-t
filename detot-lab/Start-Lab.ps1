@@ -7,11 +7,17 @@ $credentialPath = Join-Path $root '.local/deepseek-key.dpapi'
 if ($ConfigureDeepSeek) {
     $secret = Read-Host 'Nhập DeepSeek API key (ẩn)' -AsSecureString
     try {
-        if (!$secret.Length) { throw 'Bạn chưa nhập khóa DeepSeek.' }
+        $plain = [Net.NetworkCredential]::new('', $secret).Password.Trim()
+        if ($plain -cnotmatch '^sk-[A-Za-z0-9_-]+$') {
+            throw 'Enter only the DeepSeek API key beginning with sk-.'
+        }
+        $cleanSecret = ConvertTo-SecureString -String $plain -AsPlainText -Force
         New-Item -ItemType Directory -Path (Split-Path -Parent $credentialPath) -Force | Out-Null
-        $secret | ConvertFrom-SecureString | Set-Content -LiteralPath $credentialPath -Encoding ASCII
+        $cleanSecret | ConvertFrom-SecureString | Set-Content -LiteralPath $credentialPath -Encoding ASCII
         Write-Host 'Đã lưu khóa DeepSeek cho tài khoản Windows hiện tại.'
     } finally {
+        if ($cleanSecret) { $cleanSecret.Dispose() }
+        $plain = $null
         $secret.Dispose()
     }
     return
@@ -41,7 +47,9 @@ foreach ($port in 18793, 5183) {
         $socket.Dispose()
     }
     if ($connected) {
-        throw "Lab port $port is already in use. Stop the previous lab from its terminal before starting again."
+        $listener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        $owners = ($listener.OwningProcess | Sort-Object -Unique) -join ', '
+        throw "Lab port $port is already in use (PID: $owners). Stop the old lab with Ctrl+C before restarting."
     }
 }
 
@@ -116,8 +124,11 @@ $gatewayProcess = $null
 $appProcess = $null
 try {
     $provider = [Net.NetworkCredential]::new('', $key)
+    if ($provider.Password.Trim() -cnotmatch '^sk-[A-Za-z0-9_-]+$') {
+        throw 'Invalid DeepSeek key format. Run Start-Lab.ps1 -ConfigureDeepSeek and enter only the key beginning with sk-.'
+    }
     $gatewayProcess = Start-LabChild $node @($gateway, 'gateway', 'run') @{
-        DEEPSEEK_API_KEY = $provider.Password
+        DEEPSEEK_API_KEY = $provider.Password.Trim()
         OPENCLAW_GATEWAY_TOKEN = $token
         OPENCLAW_STATE_DIR = $state
         OPENCLAW_CONFIG_PATH = (Join-Path $root 'gateway.lab.json')
