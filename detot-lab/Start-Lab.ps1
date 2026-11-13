@@ -1,8 +1,27 @@
-﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial)
+﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
+    [string]$ImportGoogleOAuth)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
+$googleConfig = Join-Path $root '.local/google-client.json'
+if ($ImportGoogleOAuth) {
+    $web = (Get-Content -LiteralPath $ImportGoogleOAuth -Raw | ConvertFrom-Json).web
+    if (!$web.client_id -or !$web.client_secret -or
+        $web.redirect_uris -cnotcontains 'http://127.0.0.1:5183/api/google/callback') {
+        throw 'Import a Google OAuth Web client JSON with the exact Detot callback URI.'
+    }
+    $googleSecret = ConvertTo-SecureString -String $web.client_secret -AsPlainText -Force
+    try {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $googleConfig) -Force | Out-Null
+        @{ clientId = $web.client_id; protectedSecret = ($googleSecret | ConvertFrom-SecureString) } |
+            ConvertTo-Json | Set-Content -LiteralPath $googleConfig -Encoding UTF8
+        Write-Host 'Google OAuth configuration saved. Gmail release setting is unchanged.'
+    } finally {
+        $googleSecret.Dispose()
+    }
+    return
+}
 $credentialPath = Join-Path $root '.local/deepseek-key.dpapi'
 if ($FromClipboard -and !$ConfigureDeepSeek) { throw "Use -FromClipboard with -ConfigureDeepSeek." }
 if ($ConfigureDeepSeek) {
@@ -176,6 +195,18 @@ try {
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_RELEASE_ENABLED')) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value) { $backendVariables[$name] = $value }
+    }
+    if ($backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] -eq 'true' -and
+        !$backendVariables['DETOT_GOOGLE_CLIENT_ID'] -and !$backendVariables['DETOT_GOOGLE_CLIENT_SECRET'] -and
+        (Test-Path -LiteralPath $googleConfig -PathType Leaf)) {
+        $saved = Get-Content -LiteralPath $googleConfig -Raw | ConvertFrom-Json
+        $googleSecret = ConvertTo-SecureString -String $saved.protectedSecret
+        try {
+            $backendVariables['DETOT_GOOGLE_CLIENT_ID'] = $saved.clientId
+            $backendVariables['DETOT_GOOGLE_CLIENT_SECRET'] = [Net.NetworkCredential]::new('', $googleSecret).Password
+        } finally {
+            $googleSecret.Dispose()
+        }
     }
     $appProcess = Start-LabChild $dotnet @($app) $backendVariables
     $backendVariables.Clear()
