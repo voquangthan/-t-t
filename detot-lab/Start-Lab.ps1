@@ -1,16 +1,19 @@
 ﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
     [string]$ImportGoogleOAuth, [string]$RestoredState, [switch]$EnableGoogle,
+    [string]$PublicOrigin = $env:DETOT_PUBLIC_ORIGIN,
     [ValidateRange(1024,65535)][int]$WebPort = 5183,
     [ValidateRange(1024,65535)][int]$GatewayPort = 18793)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
+$PublicOrigin = $PublicOrigin.TrimEnd('/')
+$workspaceOrigin = if ($PublicOrigin) { $PublicOrigin } else { "http://127.0.0.1:$WebPort" }
 $googleConfig = Join-Path $root '.local/google-client.json'
 if ($ImportGoogleOAuth) {
     $web = (Get-Content -LiteralPath $ImportGoogleOAuth -Raw | ConvertFrom-Json).web
     if (!$web.client_id -or !$web.client_secret -or
-        $web.redirect_uris -cnotcontains 'http://127.0.0.1:5183/api/google/callback') {
+        $web.redirect_uris -cnotcontains "$workspaceOrigin/api/google/callback") {
         throw 'Import a Google OAuth Web client JSON with the exact Detot callback URI.'
     }
     $googleSecret = ConvertTo-SecureString -String $web.client_secret -AsPlainText -Force
@@ -91,10 +94,10 @@ if ($gateway -eq $candidate) {
     & $node (Join-Path $root 'tests/runtime-candidate/apply-retention-fix.mjs') $gateway
     if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
 }
-& $dotnet build (Join-Path $root 'Detot.Lab.csproj') -o $buildDir
-if ($LASTEXITCODE -ne 0) { throw 'Backend build failed.' }
 & npm.cmd --prefix (Join-Path $root 'frontend') run build
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
+& $dotnet build (Join-Path $root 'Detot.Lab.csproj') -o $buildDir
+if ($LASTEXITCODE -ne 0) { throw 'Backend build failed.' }
 
 # The process-local credentials are only passed to the children that need them.
 $key = if (Test-Path -LiteralPath $credentialPath -PathType Leaf) {
@@ -224,15 +227,15 @@ try {
         DETOT_GATEWAY_PORT = [string]$GatewayPort
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
-    foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_RELEASE_ENABLED')) {
+    foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET')) {
         $value = [Environment]::GetEnvironmentVariable($name)
-        if ($value) { $backendVariables[$name] = $value }
+        if ($value -and !$RestoredState) { $backendVariables[$name] = $value }
     }
-    if ($EnableGoogle -and !$isolatedPorts -and !$RestoredState) {
-        $backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] = 'true'
+    if ($PublicOrigin) {
+        $backendVariables['DETOT_PUBLIC_ORIGIN'] = $PublicOrigin
+        $backendVariables['DETOT_REMOTE_PASSWORD'] = $env:DETOT_REMOTE_PASSWORD
     }
-    if ($isolatedPorts -or $RestoredState) { $backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] = 'false' }
-    if ($backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] -eq 'true' -and
+    if (!$RestoredState -and
         !$backendVariables['DETOT_GOOGLE_CLIENT_ID'] -and !$backendVariables['DETOT_GOOGLE_CLIENT_SECRET'] -and
         (Test-Path -LiteralPath $googleConfig -PathType Leaf)) {
         $saved = Get-Content -LiteralPath $googleConfig -Raw | ConvertFrom-Json
@@ -244,11 +247,10 @@ try {
             $googleSecret.Dispose()
         }
     }
-    if ($isolatedPorts) { $backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] = 'false' }
     $appProcess = Start-LabChild $dotnet @($app) $backendVariables
     $backendVariables.Clear()
     $token = $null
-    Write-Host "Open http://127.0.0.1:$WebPort/workspace and send a synthetic prompt. Press Ctrl+C here to stop."
+    Write-Host "Open $workspaceOrigin/workspace. Press Ctrl+C here to stop."
     while (!$appProcess.HasExited -and !$gatewayProcess.HasExited) {
         Start-Sleep -Seconds 1
     }

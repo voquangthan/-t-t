@@ -12,6 +12,9 @@ var builder = WebApplication.CreateBuilder(args);
 var webPort = builder.Configuration.GetValue("DETOT_WEB_PORT", 5183);
 var gatewayPort = builder.Configuration.GetValue("DETOT_GATEWAY_PORT", 18793);
 var address = $"http://127.0.0.1:{webPort}";
+var publicUri = RemoteAccess.ParseOrigin(builder.Configuration["DETOT_PUBLIC_ORIGIN"]);
+var publicOrigin = publicUri?.GetLeftPart(UriPartial.Authority);
+if (publicUri is not null) builder.Services.AddMemoryCache();
 builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
 var googleDirectory = Path.Combine(builder.Environment.ContentRootPath, ".local", "google");
 if (OperatingSystem.IsWindows())
@@ -43,7 +46,18 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
-var createGoogleEvent = GoogleAccounts.Map(app, googleDirectory);
+var practice = OperatingSystem.IsWindows()
+    ? new Practice(app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("Detot.Practice.v1"),
+        Path.Combine(builder.Environment.ContentRootPath, ".local", "practice"))
+    : null;
+var chatHistory = publicUri is not null && OperatingSystem.IsWindows()
+    ? new ChatHistory(app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("Detot.ChatHistory.v1"),
+        Path.Combine(builder.Environment.ContentRootPath, ".local", "chat-history"))
+    : null;
+var remoteAccess = publicUri is null ? null : new RemoteAccess(
+    builder.Configuration["DETOT_REMOTE_PASSWORD"],
+    app.Services.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>());
+var createGoogleEvent = GoogleAccounts.Map(app, googleDirectory, publicOrigin ?? address, publicUri is not null);
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
 var deletedCalendarRequests = new HashSet<Guid>();
@@ -51,7 +65,10 @@ var calendarLock = new object();
 var calendarTrialEnabled = builder.Configuration.GetValue<bool>("DETOT_ENABLE_CALENDAR_TRIAL");
 app.Use(async (context, next) =>
 {
-    if (context.Request.Host.Value != $"127.0.0.1:{webPort}" && context.Request.Host.Value != $"localhost:{webPort}")
+    var validHost = publicUri is null
+        ? context.Request.Host.Value == $"127.0.0.1:{webPort}" || context.Request.Host.Value == $"localhost:{webPort}"
+        : string.Equals(context.Request.Host.Value, publicUri.Authority, StringComparison.OrdinalIgnoreCase);
+    if (!validHost)
     {
         context.Response.StatusCode = StatusCodes.Status400BadRequest;
         return;
@@ -59,14 +76,35 @@ app.Use(async (context, next) =>
 
     context.Response.Headers.CacheControl = "no-store";
     context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
-    await next(context);
+    if (remoteAccess is null) await next(context);
+    else
+    {
+        // The loopback-only listener sits behind the configured HTTPS proxy.
+        context.Request.Scheme = "https";
+        await remoteAccess.Handle(context, next, publicOrigin!);
+    }
 });
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
+app.MapGet("/api/practice/notes", () => practice is null
+    ? Results.StatusCode(503) : Results.Ok(new { notes = practice.Notes }));
+app.MapPut("/api/practice/notes", (Practice.NoteEdit edit, HttpContext context) =>
+{
+    if (!IsLocalMutation(context)) return Results.StatusCode(403);
+    if (practice is null) return Results.StatusCode(503);
+    if (edit.Notes is not { Length: <= 2000 } notes) return Results.BadRequest();
+    practice.SaveNotes(notes);
+    return Results.NoContent();
+}).RequireRateLimiting("chat");
+app.MapGet("/api/chat/history", () => chatHistory?.List() ?? Results.StatusCode(503));
+app.MapPut("/api/chat/history/{id:guid}", (Guid id, ChatHistory.Update update, HttpContext context) =>
+    !IsLocalMutation(context) ? Results.StatusCode(403) : chatHistory?.Save(id, update) ?? Results.StatusCode(503))
+    .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(2 * 1024 * 1024));
 app.MapDelete("/api/chat/{id:guid}", async Task<IResult> (Guid id, HttpContext context) =>
 {
     if (!IsLocalMutation(context)) return Results.StatusCode(403);
@@ -99,7 +137,11 @@ app.MapDelete("/api/chat/{id:guid}", async Task<IResult> (Guid id, HttpContext c
         {
             using var result = JsonDocument.Parse(await output);
             if (result.RootElement.TryGetProperty("deleted", out var deleted) && deleted.ValueKind == JsonValueKind.True)
+            {
+                chatHistory?.Delete(id);
+                practice?.SaveCase(id, null);
                 return Results.NoContent();
+            }
         }
         return Results.Problem("Gateway chưa xác nhận xóa. Lịch sử trên trình duyệt vẫn được giữ.", statusCode: 502);
     }
@@ -146,7 +188,7 @@ app.MapDelete("/api/calendar/{id:guid}", (Guid id, HttpContext context) =>
 });
 app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFactory factory, CancellationToken cancellationToken) =>
 {
-    if (context.Request.Headers.Origin != $"http://{context.Request.Host.Value}" || !context.Request.HasJsonContentType())
+    if (!IsLocalMutation(context) || !context.Request.HasJsonContentType())
         return Results.StatusCode(StatusCodes.Status403Forbidden);
 
     try
@@ -154,6 +196,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var request = await context.Request.ReadFromJsonAsync<ChatRequest>(cancellationToken);
         if (request?.Message is not { Length: > 0 and <= 1500 } message || string.IsNullOrWhiteSpace(message))
             return Results.BadRequest(new { error = "Nhập từ 1 đến 1500 ký tự." });
+        context.Items["conversationId"] = request.ConversationId;
 
         using var gateway = factory.CreateClient("gateway");
         if (request.ConversationId is Guid conversationId)
@@ -165,10 +208,12 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             description = "Trả mã kiểm thử cố định của Đệ Tốt AI lab.",
             parameters = new { type = "object", properties = new { }, additionalProperties = false }
         } };
-        var previous = request.CalendarContext;
+        var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
+        var practicing = request.StartPractice || caseState is not null;
+        var previous = practicing ? null : request.CalendarContext;
         if (previous is { Length: > 1500 } || (previous is not null && !IsCalendarCommand(previous)))
             return Results.BadRequest(new { error = "Ngữ cảnh tạo lịch không hợp lệ." });
-        var command = IsCalendarCommand(message) ? message : previous;
+        var command = !practicing && IsCalendarCommand(message) ? message : previous;
         var googleCalendarRequest = command is not null && IsGoogleCalendarCommand(command);
         var calendarRequest = command is not null && (googleCalendarRequest || calendarTrialEnabled);
         var calendarTool = googleCalendarRequest ? "detot_google_calendar_create" : "detot_trial_calendar_create";
@@ -181,6 +226,64 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (history.Length > 8 || history.Any(turn => turn is null ||
             turn.Role is not ("user" or "assistant") || turn.Text is not { Length: > 0 and <= 450 }))
             return Results.BadRequest(new { error = "Lịch sử trò chuyện không hợp lệ." });
+        if (practice is not null && request.ConversationId is Guid practiceId)
+        {
+            if (request.StartPractice || caseState is not null)
+            {
+                using var answer = await CallGateway(gateway, new
+                {
+                    model = "openclaw/default",
+                    instructions = Practice.Instructions + " Gửi kết quả qua công cụ " + fixture + " đúng một lần.",
+                    input = JsonSerializer.Serialize(new { message, history, caseState, learningNotes = practice.Notes }),
+                    tools = new[] { new
+                    {
+                        type = "function", name = fixture, description = "Trả kết quả ca trực cho giao diện. Không thực thi hành động.",
+                        parameters = new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                reply = new { type = "string" },
+                                caseState = new { type = new[] { "string", "null" } },
+                                learningNotes = new { type = new[] { "string", "null" } }
+                            },
+                            required = new[] { "reply", "caseState", "learningNotes" },
+                            additionalProperties = false
+                        }
+                    } }
+                }, cancellationToken);
+                var callsForPractice = answer.RootElement.GetProperty("output").EnumerateArray()
+                    .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
+                var json = callsForPractice.Length == 1 && callsForPractice[0].GetProperty("name").GetString() == fixture
+                    ? callsForPractice[0].GetProperty("arguments").GetString() ?? ""
+                    : GatewayText(answer.RootElement).Trim();
+                var objectStart = json.IndexOf('{');
+                var objectEnd = json.LastIndexOf('}');
+                var structured = objectStart >= 0 && objectEnd > objectStart && json.Contains("\"reply\"", StringComparison.OrdinalIgnoreCase);
+                Practice.Turn? turn;
+                try
+                {
+                    turn = structured
+                        ? JsonSerializer.Deserialize<Practice.Turn>(json[objectStart..(objectEnd + 1)], new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                        : new Practice.Turn(json, caseState ?? "Ca đã bắt đầu. Dùng lịch sử để giữ nguyên dữ kiện.", null);
+                }
+                catch (JsonException) when (json.Length is > 0 and <= 8000 && !json.Contains('{') && !json.Contains("caseState", StringComparison.Ordinal))
+                {
+                    // Some providers answer in prose. Retain the case and leave notes untouched.
+                    turn = new Practice.Turn(json, caseState ?? "Ca đã bắt đầu. Dùng lịch sử để giữ nguyên dữ kiện.", null);
+                }
+                catch (JsonException)
+                {
+                    return Results.Problem("Câu trả lời ca trực sai định dạng. Hãy thử lại.", statusCode: 502);
+                }
+                if (turn?.Reply is not { Length: > 0 and <= 8000 } reply || string.IsNullOrWhiteSpace(reply) ||
+                    turn.CaseState is { Length: > 3000 } || turn.LearningNotes is { Length: > 2000 })
+                    return Results.Problem("Ca trực chưa trả được câu trả lời hợp lệ. Hãy thử lại.", statusCode: 502);
+                practice.SaveCase(practiceId, turn.CaseState);
+                if (turn.LearningNotes is { } notes) practice.SaveNotes(notes);
+                return Results.Ok(new { reply });
+            }
+        }
         object gatewayInput = history.Length == 0 || calendarRequest
             ? calendarInput
             : history.Select(turn => new { type = "message", role = turn.Role, content = turn.Text })
@@ -199,7 +302,8 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             tools.Add(new
             {
                 type = "function", name = calendarTool,
-                description = "Tạo một sự kiện. Chỉ gọi khi người dùng yêu cầu tạo và cung cấp tên, giờ bắt đầu và giờ kết thúc hoặc thời lượng rõ ràng. Nếu thiếu hoặc mơ hồ, hỏi lại.",
+                description = "Tạo một sự kiện khi có tên, giờ bắt đầu và giờ kết thúc hoặc thời lượng rõ ràng. Nếu thiếu hoặc mơ hồ, hỏi lại." +
+                    (googleCalendarRequest ? " Đọc tất cả mốc nhắc được yêu cầu, kể cả trong ngữ cảnh bổ sung. Hỏi lại nếu mốc nhắc mơ hồ." : ""),
                 parameters = new
                 {
                     type = "object",
@@ -207,7 +311,10 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     {
                         title = new { type = "string" },
                         start = new { type = "string", description = "yyyy-MM-ddTHH:mm:sszzz" },
-                        end = new { type = "string", description = "yyyy-MM-ddTHH:mm:sszzz" }
+                        end = new { type = "string", description = "yyyy-MM-ddTHH:mm:sszzz" },
+                        reminderMinutes = new { type = "array", items = new { type = "integer", minimum = 0, maximum = 40320 },
+                            maxItems = 5, uniqueItems = true,
+                            description = "Chỉ dùng với Google Calendar. Số phút trước sự kiện. Bỏ trường nếu không yêu cầu nhắc, mảng rỗng nếu yêu cầu tắt nhắc." }
                     },
                     required = new[] { "title", "start", "end" },
                     additionalProperties = false
@@ -244,7 +351,17 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
 
             if (googleCalendarRequest)
             {
-                var result = await createGoogleEvent(new(title, start, end, requestId), context, factory);
+                int[]? reminders = null;
+                if (fields.TryGetProperty("reminderMinutes", out var values))
+                {
+                    if (values.ValueKind != JsonValueKind.Array || values.GetArrayLength() > 5 ||
+                        values.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)))
+                        return Results.BadRequest(new { error = "Mốc nhắc phải là số phút nguyên, tối đa 5 mốc." });
+                    reminders = values.EnumerateArray().Select(value => value.GetInt32()).ToArray();
+                    if (!GoogleAccounts.ValidReminderMinutes(reminders))
+                        return Results.BadRequest(new { error = "Chọn các mốc nhắc khác nhau từ 0 đến 40320 phút." });
+                }
+                var result = await createGoogleEvent(new(title, start, end, requestId, reminders), context, factory);
                 if (result is IValueHttpResult { Value: GoogleAccounts.CalendarConflict conflict })
                     return Results.Ok(new { reply = conflict.Reply, calendarContext = calendarInput });
                 return result;
@@ -301,12 +418,24 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         app.Logger.LogWarning("Chat failed ({ErrorType}).", error.GetType().Name);
         return Results.Problem("Gateway không trả được kết quả. Kiểm tra tiến trình lab và cấu hình provider.", statusCode: 502);
     }
+}).AddEndpointFilter(async (invocation, next) =>
+{
+    var context = invocation.HttpContext;
+    var result = await next(invocation);
+    if (chatHistory is not null && context.Items["conversationId"] is Guid id &&
+        Guid.TryParse(context.Request.Headers["X-Detot-History-Revision"], out var revision) &&
+        result is IValueHttpResult { Value: { } reply })
+    {
+        var saved = chatHistory.AppendReply(id, revision, reply);
+        if (saved is Guid updated) context.Response.Headers["X-Detot-History-Revision"] = updated.ToString();
+    }
+    return result;
 }).RequireRateLimiting("chat");
 
 app.Run();
 
 static bool IsLocalMutation(HttpContext context) =>
-    context.Request.Headers.Origin == $"http://{context.Request.Host.Value}";
+    context.Request.Headers.Origin == $"{context.Request.Scheme}://{context.Request.Host.Value}";
 
 static string ConversationKey(Guid id) => $"agent:main:detot-chat-{id:N}";
 
@@ -319,15 +448,18 @@ static async Task<JsonDocument> CallGateway(HttpClient client, object body, Canc
 
 static IResult Reply(JsonElement result, bool toolUsed, string? calendarContext = null)
 {
-    var text = string.Join("\n", result.GetProperty("output").EnumerateArray()
-        .Where(item => item.GetProperty("type").GetString() == "message")
-        .SelectMany(item => item.GetProperty("content").EnumerateArray())
-        .Where(part => part.GetProperty("type").GetString() == "output_text")
-        .Select(part => part.GetProperty("text").GetString()));
+    var text = GatewayText(result);
     return string.IsNullOrWhiteSpace(text)
         ? Results.Problem("Gateway không có câu trả lời văn bản.", statusCode: 502)
         : Results.Ok(new { reply = text, toolUsed, calendarContext = calendarContext is { Length: <= 1500 } ? calendarContext : null });
 }
+
+static string GatewayText(JsonElement result) =>
+    string.Join("\n", result.GetProperty("output").EnumerateArray()
+        .Where(item => item.GetProperty("type").GetString() == "message")
+        .SelectMany(item => item.GetProperty("content").EnumerateArray())
+        .Where(part => part.GetProperty("type").GetString() == "output_text")
+        .Select(part => part.GetProperty("text").GetString()));
 
 static bool ReadString(JsonElement fields, string key, out string value)
 {
@@ -355,6 +487,6 @@ static bool IsGoogleCalendarCommand(string message) =>
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
 record ChatTurn(string Role, string Text);
-record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History, Guid? ConversationId);
+record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History, Guid? ConversationId, bool StartPractice = false);
 record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
 record CalendarEdit(string? Title, DateTimeOffset Start, DateTimeOffset End);

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Calendar } from "./Calendar";
+import { suggestFromChat } from "./GoogleCalendar";
 import { GoogleProfiles } from "./GoogleProfiles";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
@@ -14,10 +15,13 @@ import { type Conversation, type Message, forkMessages, visibleConversations } f
 import "./style.css";
 
 const storageKey = "detot.conversations.v1";
+const remoteWorkspace = location.protocol === "https:";
+type HistoryEntry = { conversation: Conversation; revision: string };
 Object.entries({ javascript, typescript, python, json, csharp }).forEach(([name, language]) => hljs.registerLanguage(name, language));
 const uid = () => crypto.randomUUID();
 const blank = (): Conversation => ({ id: uid(), title: "Cuộc trò chuyện mới", pinned: false, messages: [] });
 const readHistory = (): Conversation[] => {
+  if (remoteWorkspace) return [];
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
     return Array.isArray(stored) ? stored.filter(item => item && typeof item.id === "string" &&
@@ -39,15 +43,18 @@ function App() {
   const [calendar, setCalendar] = useState(() => new URLSearchParams(location.search).has("calendar"));
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string | undefined>(() => {
+    if (remoteWorkspace) return undefined;
     try { return sessionStorage.getItem("detot.active-conversation") ?? undefined; }
     catch { return undefined; }
   });
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [side, setSide] = useState(false);
-  const [dark, setDark] = useState(() => localStorage.getItem("detot.theme") !== "light");
+  const [dark, setDark] = useState(() => remoteWorkspace || localStorage.getItem("detot.theme") !== "light");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [practiceNotes, setPracticeNotes] = useState<string>();
+  const revisions = useRef(new Map<string, string>());
   const request = useRef<AbortController | null>(null);
   const retry = useRef<(() => void) | null>(null);
   const end = useRef<HTMLDivElement>(null);
@@ -55,28 +62,80 @@ function App() {
   const conversation = items.find(item => item.id === active);
   const visibleItems = visibleConversations(items, query);
   useEffect(() => {
+    if (!remoteWorkspace) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/chat/history", { signal: controller.signal });
+        if (response.status === 401) { location.replace("/login"); return; }
+        if (!response.ok) throw new Error("Không tải được lịch sử từ laptop.");
+        const entries: HistoryEntry[] = await response.json();
+        if (controller.signal.aborted) return;
+        const incoming = entries.filter(entry => !revisions.current.has(entry.conversation.id));
+        for (const entry of incoming) revisions.current.set(entry.conversation.id, entry.revision);
+        setItems(old => [...old, ...incoming.map(entry => entry.conversation)
+          .filter(item => !old.some(existing => existing.id === item.id))]);
+      } catch (cause) {
+        if (!controller.signal.aborted)
+          setError(cause instanceof Error ? cause.message : "Không tải được lịch sử từ laptop.");
+      }
+    })();
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
+    if (remoteWorkspace) return;
     try {
       if (conversation) sessionStorage.setItem("detot.active-conversation", conversation.id);
       else sessionStorage.removeItem("detot.active-conversation");
     } catch { /* The current conversation remains usable without browser storage. */ }
   }, [conversation?.id]);
   useEffect(() => {
+    if (remoteWorkspace) return;
     try { localStorage.setItem(storageKey, JSON.stringify(items)); }
     catch { setError("Không thể lưu lịch sử trên trình duyệt này."); }
   }, [items]);
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
-    localStorage.setItem("detot.theme", dark ? "dark" : "light");
+    if (!remoteWorkspace) localStorage.setItem("detot.theme", dark ? "dark" : "light");
   }, [dark]);
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }); }, [active, conversation?.messages.length, busy]);
 
   const save = (value: Conversation) => setItems(old => [value, ...old.filter(item => item.id !== value.id)]);
+  async function sync(value: Conversation) {
+    if (!remoteWorkspace) return;
+    const response = await fetch(`/api/chat/history/${value.id}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation: value, revision: revisions.current.get(value.id) }),
+    });
+    if (response.status === 401) {
+      location.replace("/login");
+      throw new Error("Phiên đăng nhập đã hết hạn.");
+    }
+    if (response.status === 409) throw new Error("Lịch sử đã thay đổi trên máy khác. Tải lại trang để cập nhật.");
+    if (!response.ok) throw new Error("Không đồng bộ được lịch sử lên laptop.");
+    const entry: HistoryEntry = await response.json();
+    revisions.current.set(value.id, entry.revision);
+  }
+
+  async function updateConversation(value: Conversation) {
+    setBusy(true);
+    setError("");
+    try {
+      await sync(value);
+      save(value);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không cập nhật được cuộc trò chuyện.");
+    } finally {
+      setBusy(false);
+    }
+  }
   const select = (id?: string) => { setCalendar(false); setActive(id); setDraft(""); setSide(false); setError(""); retry.current = null; };
 
-  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string) {
+  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false) {
     if (!text.trim() || request.current) return;
     const user: Message = { id: requestId, role: "user", text: text.trim() };
-    const target = { ...base, gatewayLinked: true, title: prefix.length ? base.title : text.trim().slice(0, 52), messages: [...prefix, user] };
+    const target = { ...base, practice: startPractice || base.practice, gatewayLinked: true,
+      title: prefix.length ? base.title : text.trim().slice(0, 52), messages: [...prefix, user] };
     save(target);
     setActive(target.id);
     setDraft("");
@@ -84,11 +143,24 @@ function App() {
     setBusy(true);
     const controller = new AbortController();
     request.current = controller;
-    retry.current = () => void send(text, base, prefix, requestId, context);
+    retry.current = () => void send(text, base, prefix, requestId, context, startPractice);
     try {
+      await sync(target);
+      const suggestion = context || target.practice ? undefined : await suggestFromChat(user.text, controller.signal);
+      if (suggestion !== undefined) {
+        const assistant: Message = { id: uid(), role: "assistant", text: suggestion };
+        const completed = { ...target, messages: [...target.messages, assistant] };
+        await sync(completed);
+        save(completed);
+        retry.current = null;
+        return;
+      }
+      const revision = revisions.current.get(target.id);
       const response = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: user.text, requestId, calendarContext: context, conversationId: target.id,
+        method: "POST", headers: revision
+          ? { "Content-Type": "application/json", "X-Detot-History-Revision": revision }
+          : { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: user.text, requestId, calendarContext: context, conversationId: target.id, startPractice,
           history: prefix.slice(-8).map(message => ({ role: message.role, text: message.text.slice(0, 450) })) }),
         signal: controller.signal,
       });
@@ -104,8 +176,12 @@ function App() {
       const assistant: Message = { id: uid(), role: "assistant", text: data.reply,
         tool: data.googleCalendarCreated ? "Google Calendar" : data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
         calendarContext: data.calendarContext };
-      setItems(old => old.map(item => item.id === target.id ? { ...item, messages: [...target.messages, assistant] } : item));
+      const completed = { ...target, messages: [...target.messages, assistant] };
+      save(completed);
       retry.current = null;
+      const savedRevision = response.headers.get("X-Detot-History-Revision");
+      if (savedRevision) revisions.current.set(target.id, savedRevision);
+      else if (remoteWorkspace) throw new Error("Đã nhận câu trả lời nhưng chưa lưu được lên laptop. Tải lại để xem lịch sử đã lưu.");
     } catch (cause) {
       setError(controller.signal.aborted ? "Đã dừng yêu cầu." : cause instanceof Error ? cause.message : "Lỗi kết nối.");
     } finally {
@@ -126,16 +202,17 @@ function App() {
         {visibleItems.map(item => <div className={item.id === active ? "row selected" : "row"} key={item.id}>
           <button className="title" aria-current={!calendar && item.id === active ? "true" : undefined} disabled={busy} onClick={() => select(item.id)}>{item.pinned ? "◆ " : ""}{item.title}</button>
           <details><summary aria-label={`Thao tác với ${item.title}`}>⋯</summary><div className="menu">
-            <button disabled={busy} onClick={() => save({ ...item, pinned: !item.pinned })}>{item.pinned ? "Bỏ ghim" : "Ghim"}</button>
+            <button disabled={busy} onClick={() => void updateConversation({ ...item, pinned: !item.pinned })}>{item.pinned ? "Bỏ ghim" : "Ghim"}</button>
             <button disabled={busy} onClick={() => {
               const title = window.prompt("Tên cuộc trò chuyện", item.title)?.trim();
-              if (title) save({ ...item, title: title.slice(0, 100) });
+              if (title) void updateConversation({ ...item, title: title.slice(0, 100) });
             }}>Đổi tên</button>
             <button disabled={busy} onClick={async () => {
-              if (!window.confirm(item.gatewayLinked ? "Xóa cuộc trò chuyện khỏi Gateway và trình duyệt?" : "Xóa bản lưu cũ trên trình duyệt?")) return;
+              if (!window.confirm(remoteWorkspace ? "Xóa cuộc trò chuyện khỏi lịch sử trên laptop?" :
+                item.gatewayLinked ? "Xóa cuộc trò chuyện khỏi Gateway và trình duyệt?" : "Xóa bản lưu cũ trên trình duyệt?")) return;
               setBusy(true);
               try {
-                if (item.gatewayLinked) {
+                if (remoteWorkspace || item.gatewayLinked) {
                   const response = await fetch(`/api/chat/${encodeURIComponent(item.id)}`, { method: "DELETE" });
                   if (!response.ok) throw new Error("Gateway chưa xác nhận xóa. Hãy thử lại.");
                 }
@@ -148,10 +225,47 @@ function App() {
           </div></details>
         </div>)}
       </nav>
-      <div className="sidebar-footer"><button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setSide(false); }}>Lịch</button>{" "}<button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button></div>
+      <div className="sidebar-footer">
+        <button disabled={busy} onClick={() => { select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true); }}>Ca trực giả lập</button>{" "}
+        <button disabled={busy} onClick={async () => {
+          setBusy(true);
+          try {
+            const response = await fetch("/api/practice/notes");
+            if (!response.ok) throw new Error("Không tải được ghi chú học tập.");
+            setPracticeNotes((await response.json()).notes);
+            setCalendar(false);
+            setSide(false);
+          } catch (cause) { setCalendar(false); setError((cause as Error).message); }
+          finally { setBusy(false); }
+        }}>Ghi chú học tập</button>{" "}
+        <button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setSide(false); }}>Lịch</button>{" "}
+        <button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button>
+      </div>
     </aside>
     <main>
-      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles /></header>
+      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
+      {practiceNotes !== undefined && <section aria-label="Ghi chú học tập" className="transcript">
+        <form onSubmit={async event => {
+          event.preventDefault();
+          setBusy(true);
+          setError("");
+          try {
+            const response = await fetch("/api/practice/notes", {
+              method: "PUT", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ notes: practiceNotes }),
+            });
+            if (!response.ok) throw new Error("Không lưu được ghi chú học tập.");
+            setPracticeNotes(undefined);
+          } catch (cause) { setError((cause as Error).message); }
+          finally { setBusy(false); }
+        }}>
+          <label>Ghi chú học tập<textarea value={practiceNotes} maxLength={2000}
+            onChange={event => setPracticeNotes(event.target.value)} /></label>
+          <button disabled={busy}>Lưu</button>{" "}
+          <button type="button" disabled={busy} onClick={() => setPracticeNotes("")}>Xóa nội dung</button>{" "}
+          <button type="button" disabled={busy} onClick={() => setPracticeNotes(undefined)}>Đóng</button>
+        </form>
+      </section>}
       {calendar ? <Calendar /> : <>
       <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
         {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
@@ -184,7 +298,7 @@ function App() {
             {busy ? <button type="button" onClick={() => request.current?.abort()}>Dừng</button> : <button className="primary" disabled={!draft.trim()}>Gửi ↑</button>}
           </div>
         </form>
-        <p>Lịch sử lưu trên trình duyệt. Tin nhắn được gửi tới nhà cung cấp LLM.</p>
+        <p>{remoteWorkspace ? "Lịch sử tự lưu trên laptop." : "Lịch sử lưu trên trình duyệt."} Tin nhắn được gửi tới nhà cung cấp LLM.</p>
       </footer>
       </>}
     </main>

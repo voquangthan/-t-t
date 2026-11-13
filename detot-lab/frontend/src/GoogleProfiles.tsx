@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-type Account = { id: string; email: string };
+type Account = { id: string; email: string; notes?: Note[]; selected?: boolean };
 type Mail = { id: string; subject: string; from: string };
 type Note = { id: string; text: string };
-const key = "detot.google.active";
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch("/api/google/" + path, init);
@@ -28,45 +27,34 @@ export function GoogleProfiles() {
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<string>();
   const selected = accounts.find(account => account.id === active);
-  const canonical = location.origin === "http://127.0.0.1:5183";
+  const devWorkspace = import.meta.env.DEV;
 
-  function choose(id: string) {
-    localStorage.setItem(key, id);
-    setActive(id);
+  function choose(account?: Account) {
+    setActive(account?.id ?? "");
     setResults(undefined);
     setPreview("");
     setDraft("");
     setEditing(undefined);
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem("detot.gmail.notes." + id) ?? "[]");
-      setNotes(Array.isArray(stored) ? stored.filter(note => typeof note?.id === "string" && typeof note?.text === "string") : []);
-    } catch { setNotes([]); }
+    setNotes(account?.notes ?? []);
   }
 
-  function saveNotes(next: Note[]) {
-    try {
-      localStorage.setItem("detot.gmail.notes." + active, JSON.stringify(next));
-      setNotes(next);
-      return true;
-    } catch {
-      setMessage("Không lưu được ghi chú trên trình duyệt.");
-      return false;
-    }
+  async function saveNotes(next: Note[]) {
+    await api(`accounts/${encodeURIComponent(active)}/notes`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
+    });
+    setNotes(next);
+    setAccounts(old => old.map(account => account.id === active ? { ...account, notes: next } : account));
   }
 
   async function load() {
     setEnabled(undefined);
     const data = await api<{ enabled: boolean; accounts: Account[]; configured?: boolean; reason?: string }>("accounts");
-    setDisabledMessage(data.reason === "security_gate"
-      ? (data.configured ? "Đã lưu cấu hình Google OAuth. " : "") +
-        "Gmail thật đang chờ nghiệm thu xóa dữ liệu M1."
-      : data.reason === "platform"
+    setDisabledMessage(data.reason === "platform"
         ? "Lưu thông tin xác thực Google cần Windows."
-        : "Backend chưa nạp đủ cấu hình Google OAuth.");
+        : "Cần cấu hình Google OAuth trên máy chủ để kết nối Gmail.");
     setEnabled(data.enabled);
     setAccounts(data.accounts);
-    const saved = localStorage.getItem(key);
-    choose(data.accounts.find(account => account.id === saved)?.id ?? data.accounts[0]?.id ?? "");
+    choose(data.accounts.find(account => account.selected) ?? data.accounts[0]);
   }
 
   async function run(action: () => Promise<void>, initialMessage = "") {
@@ -108,7 +96,7 @@ export function GoogleProfiles() {
 
   return <>
     <button className="account-avatar" aria-label="Quản lý tài khoản Google" aria-haspopup="dialog"
-      onClick={() => { dialog.current?.showModal(); if (canonical && !busy) void run(load); }}>
+      onClick={() => { dialog.current?.showModal(); if (!devWorkspace && !busy) void run(load); }}>
       {selected?.email[0]?.toUpperCase() ?? "G"}
     </button>
     <dialog className="account-dialog" ref={dialog} aria-labelledby="account-heading"
@@ -117,18 +105,20 @@ export function GoogleProfiles() {
         <h2 id="account-heading">Tài khoản Google</h2>
         <form method="dialog"><button aria-label="Đóng">×</button></form>
       </div>
-      {!canonical ? <p><a href="http://127.0.0.1:5183/workspace">Mở Đệ Tốt từ backend để quản lý Gmail</a></p>
+      {devWorkspace ? <p><a href="/workspace">Mở Đệ Tốt để quản lý Gmail</a></p>
         : enabled === false && !busy && <p>{disabledMessage}</p>}
-      {canonical && enabled && <>
+      {!devWorkspace && enabled && <>
         <ul>{accounts.map(account => <li key={account.id}>
           <strong>{account.email}</strong>
           <div>
-            {active === account.id ? <span>Đang chọn</span> : <button disabled={busy} onClick={() => choose(account.id)}>Chọn</button>}
+            {active === account.id ? <span>Đang chọn</span> : <button disabled={busy} onClick={() => void run(async () => {
+              await api(`accounts/${encodeURIComponent(account.id)}/selection`, { method: "PUT" });
+              choose(account);
+            })}>Chọn</button>}
             <button disabled={busy} onClick={() => {
               if (!window.confirm(`Thu hồi quyền Google của ${account.email}?`)) return;
               void run(async () => {
                 await api(`accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
-                localStorage.removeItem("detot.gmail.notes." + account.id);
                 await load();
               });
             }}>Ngắt kết nối</button>
@@ -158,7 +148,7 @@ export function GoogleProfiles() {
         </li>)}</ul>}
         {selected && <section aria-label="Ghi chú cá nhân">
           <h3>Ghi chú cá nhân</h3>
-          <p>Chỉ ghi điều bạn muốn lưu. Ghi chú lưu trên trình duyệt và không tự gửi vào chat.</p>
+          <p>Ghi chú lưu trên máy chủ Đệ Tốt và chỉ vào chat khi bạn tự gửi.</p>
           {preview && <blockquote>{preview}</blockquote>}
           <form onSubmit={event => {
             event.preventDefault();
@@ -166,11 +156,14 @@ export function GoogleProfiles() {
             if (!value || busy) return;
             const next = editing ? notes.map(note => note.id === editing ? { ...note, text: value } : note)
               : [...notes, { id: crypto.randomUUID(), text: value }];
-            if (saveNotes(next)) { setDraft(""); setPreview(""); setEditing(undefined); }
+            void run(async () => {
+              await saveNotes(next);
+              setDraft(""); setPreview(""); setEditing(undefined);
+            });
           }}>
             <label htmlFor="gmail-note">Sở thích hoặc bối cảnh đã kiểm tra</label>
             <textarea id="gmail-note" value={draft} maxLength={500} onChange={event => setDraft(event.target.value)} />
-            <button disabled={busy || !draft.trim()}>Lưu ghi chú</button>
+            <button disabled={busy || !draft.trim() || (!editing && notes.length >= 20)}>Lưu ghi chú</button>
           </form>
           <ul>{notes.map(note => <li key={note.id}><span>{note.text}</span><div>
             <button disabled={busy} onClick={() => void run(async () => {
@@ -178,12 +171,13 @@ export function GoogleProfiles() {
               setMessage("Đã sao chép ghi chú. Bạn có thể dán vào chat. Khi gửi, nội dung sẽ được chuyển tới nhà cung cấp mô hình.");
             })}>Sao chép ghi chú</button>
             <button disabled={busy} onClick={() => { setDraft(note.text); setEditing(note.id); setPreview(""); }}>Sửa</button>
-            <button disabled={busy} onClick={() => {
-              if (saveNotes(notes.filter(item => item.id !== note.id)) && editing === note.id) {
+            <button disabled={busy} onClick={() => void run(async () => {
+              await saveNotes(notes.filter(item => item.id !== note.id));
+              if (editing === note.id) {
                 setEditing(undefined);
                 setDraft("");
               }
-            }}>Xóa</button>
+            })}>Xóa</button>
           </div></li>)}</ul>
         </section>}
       </>}

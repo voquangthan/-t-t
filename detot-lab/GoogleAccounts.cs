@@ -8,20 +8,27 @@ using Microsoft.AspNetCore.WebUtilities;
 
 static class GoogleAccounts
 {
-    private const string Callback = "http://127.0.0.1:5183/api/google/callback";
     private const string GmailScope = "https://www.googleapis.com/auth/gmail.readonly";
     private const string CalendarScope = "https://www.googleapis.com/auth/calendar.events.owned";
     private const string EventsUrl = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
-    public static Func<GoogleEventEdit, HttpContext, IHttpClientFactory, Task<IResult>> Map(WebApplication app, string directory)
+    public static Func<GoogleEventEdit, HttpContext, IHttpClientFactory, Task<IResult>> Map(
+        WebApplication app, string directory, string origin, bool secure)
     {
+        const string callbackPath = "/api/google/callback";
+        var callback = origin + callbackPath;
+        var host = new Uri(origin).Authority;
+        CookieOptions Cookie() => new()
+        {
+            HttpOnly = true, Secure = secure, SameSite = SameSiteMode.Lax,
+            Path = callbackPath
+        };
         var group = app.MapGroup("/api/google");
         var clientId = app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
         var secret = app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"];
         var configured = (!string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret))
             || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-client.json"));
-        var releaseEnabled = app.Configuration.GetValue<bool>("DETOT_GOOGLE_RELEASE_ENABLED");
-        var enabled = OperatingSystem.IsWindows() && releaseEnabled
+        var enabled = OperatingSystem.IsWindows()
             && !string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret);
         var mutex = new SemaphoreSlim(1);
         var path = Path.Combine(directory, "accounts.bin");
@@ -43,9 +50,9 @@ static class GoogleAccounts
 
         async Task<IResult> Run(HttpContext ctx, Func<Task<IResult>> action)
         {
-            if (ctx.Request.Host.Value != "127.0.0.1:5183") return Results.StatusCode(403);
+            if (!string.Equals(ctx.Request.Host.Value, host, StringComparison.OrdinalIgnoreCase)) return Results.StatusCode(403);
             if (!HttpMethods.IsGet(ctx.Request.Method) &&
-                ctx.Request.Headers.Origin != "http://127.0.0.1:5183") return Results.StatusCode(403);
+                ctx.Request.Headers.Origin != origin) return Results.StatusCode(403);
             if (!enabled) return Results.Problem("Kết nối Google đang tắt trong cấu hình lab.", statusCode: 503);
             await mutex.WaitAsync(ctx.RequestAborted);
             try { return await action(); }
@@ -62,13 +69,14 @@ static class GoogleAccounts
             {
                 enabled = false,
                 configured,
-                reason = !OperatingSystem.IsWindows() ? "platform" : !releaseEnabled ? "security_gate" : "credentials",
+                reason = !OperatingSystem.IsWindows() ? "platform" : "credentials",
                 accounts = Array.Empty<object>()
             }))
             : Run(ctx, () => Task.FromResult<IResult>(Results.Ok(new
             {
                 enabled = true,
-                accounts = Read().Where(account => !account.Calendar).Select(account => new { account.Id, account.Email })
+                accounts = Read().Where(account => !account.Calendar)
+                    .Select(account => new { account.Id, account.Email, account.Notes, account.Selected })
             }))));
 
         group.MapPost("/connect", Task<IResult> (HttpContext ctx) => Run(ctx, () =>
@@ -80,7 +88,7 @@ static class GoogleAccounts
             ctx.Response.Cookies.Append("detot_google", cookie, Cookie());
             var url = QueryHelpers.AddQueryString("https://accounts.google.com/o/oauth2/v2/auth", new Dictionary<string, string?>
             {
-                ["client_id"] = clientId, ["redirect_uri"] = Callback, ["response_type"] = "code",
+                ["client_id"] = clientId, ["redirect_uri"] = callback, ["response_type"] = "code",
                 ["scope"] = "openid email " + (calendar ? CalendarScope : GmailScope), ["access_type"] = "offline",
                 ["prompt"] = "consent select_account", ["state"] = state,
                 ["code_challenge"] = WebEncoders.Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier))),
@@ -107,7 +115,7 @@ static class GoogleAccounts
             using var tokens = await Token(http, new()
             {
                 ["grant_type"] = "authorization_code", ["code"] = code,
-                ["redirect_uri"] = Callback, ["code_verifier"] = state[1]
+                ["redirect_uri"] = callback, ["code_verifier"] = state[1]
             }, ctx.RequestAborted);
             var token = tokens.RootElement;
             var scope = Required(token, "scope");
@@ -123,10 +131,36 @@ static class GoogleAccounts
             if (!identity.RootElement.GetProperty("email_verified").GetBoolean()) return Results.BadRequest();
             var account = new Account(Required(identity.RootElement, "sub"), Required(identity.RootElement, "email"), refresh.GetString()!, scope, calendar);
             var accounts = Read();
+            var previous = accounts.Find(item => item.Id == account.Id && item.Calendar == calendar);
+            if (previous is not null)
+                account = account with { Notes = previous.Notes, Selected = previous.Selected };
             accounts.RemoveAll(item => item.Id == account.Id && item.Calendar == calendar);
             accounts.Add(account);
             Save(accounts);
             return Results.Redirect(Outcome("connected"));
+        }));
+
+        group.MapPut("/accounts/{id}/selection", (string id, HttpContext ctx) => Run(ctx, () =>
+        {
+            var accounts = Read();
+            if (!accounts.Any(item => item.Id == id && !item.Calendar))
+                return Task.FromResult<IResult>(Results.NotFound());
+            Save(accounts.Select(item => item.Calendar ? item : item with { Selected = item.Id == id }).ToList());
+            return Task.FromResult<IResult>(Results.NoContent());
+        }));
+
+        group.MapPut("/accounts/{id}/notes", (string id, Note[] notes, HttpContext ctx) => Run(ctx, () =>
+        {
+            if (notes.Length > 20 || notes.Any(note => note is null || !Guid.TryParse(note.Id, out _) ||
+                string.IsNullOrWhiteSpace(note.Text) || note.Text.Length > 500) ||
+                notes.Select(note => note.Id).Distinct().Count() != notes.Length)
+                return Task.FromResult<IResult>(Results.BadRequest());
+            var accounts = Read();
+            var index = accounts.FindIndex(item => item.Id == id && !item.Calendar);
+            if (index < 0) return Task.FromResult<IResult>(Results.NotFound());
+            accounts[index] = accounts[index] with { Notes = notes };
+            Save(accounts);
+            return Task.FromResult<IResult>(Results.NoContent());
         }));
 
         group.MapDelete("/accounts/{id}", (string id, HttpContext ctx, IHttpClientFactory factory) => Run(ctx, async () =>
@@ -208,7 +242,7 @@ static class GoogleAccounts
             {
                 ["timeMin"] = now.AddDays(-30).ToString("O"), ["timeMax"] = now.AddDays(90).ToString("O"),
                 ["singleEvents"] = "true", ["orderBy"] = "startTime", ["maxResults"] = "250",
-                ["fields"] = "nextPageToken,items(id,etag,summary,start,end,recurringEventId,eventType,organizer/self,attendees/email,locked)"
+                ["fields"] = "nextPageToken,items(id,etag,summary,start,end,recurringEventId,eventType,organizer/self,attendees/email,locked,reminders)"
             };
             var events = new List<JsonElement>();
             for (var page = 0; page < 4; page++)
@@ -258,7 +292,7 @@ static class GoogleAccounts
             if (active.Any(item => Is(item, "id", eventId) && Is(item, "summary", edit.Title!) &&
                 item.GetProperty("start").GetProperty("dateTime").GetDateTimeOffset() == edit.Start &&
                 item.GetProperty("end").GetProperty("dateTime").GetDateTimeOffset() == edit.End))
-                return CreatedReply();
+                return CreatedReply(alreadyExists: true);
             if (active.Any(item => !Is(item, "transparency", "transparent")))
                 return Results.Ok(new CalendarConflict("Khung giờ này đã có lịch bận trên Google Calendar. Bạn muốn chuyển sang giờ nào?"));
             if (data.RootElement.TryGetProperty("nextPageToken", out _))
@@ -267,9 +301,12 @@ static class GoogleAccounts
             var result = await WriteEvent(id, null, edit, ctx, factory);
             return result is IStatusCodeHttpResult { StatusCode: 204 } ? CreatedReply() : result;
 
-            IResult CreatedReply() => Results.Ok(new
+            IResult CreatedReply(bool alreadyExists = false) => Results.Ok(new
             {
-                reply = $"Đã tạo «{edit.Title}» trên Google Calendar từ {edit.Start:dd/MM/yyyy HH:mm zzz} đến {edit.End:dd/MM/yyyy HH:mm zzz}.",
+                reply = $"Đã tạo «{edit.Title}» trên Google Calendar từ {edit.Start:dd/MM/yyyy HH:mm zzz} đến {edit.End:dd/MM/yyyy HH:mm zzz}." +
+                    (alreadyExists ? " Sự kiện đã có trong lịch." :
+                    edit.ReminderMinutes is { Length: > 0 } minutes ? $" Google Calendar sẽ nhắc trước {string.Join(", ", minutes.Order())} phút." :
+                    edit.ReminderMinutes is [] ? " Đã tắt nhắc nhở cho sự kiện này." : ""),
                 googleCalendarCreated = true
             });
         });
@@ -277,7 +314,8 @@ static class GoogleAccounts
         async Task<IResult> WriteEvent(string id, string? eventId, GoogleEventEdit? edit, HttpContext ctx, IHttpClientFactory factory)
         {
             if (edit is not null && (edit.Title?.Trim() is not { Length: > 0 and <= 120 } ||
-                edit.Start == default || edit.End <= edit.Start || (eventId is null && edit.RequestId == Guid.Empty)))
+                edit.Start == default || edit.End <= edit.Start || (eventId is null && edit.RequestId == Guid.Empty) ||
+                !ValidReminderMinutes(edit.ReminderMinutes)))
                 return Results.BadRequest();
             if (eventId is not null)
             {
@@ -305,6 +343,8 @@ static class GoogleAccounts
                 fields["summary"] = edit.Title!.Trim();
                 fields["start"] = new { dateTime = edit.Start };
                 fields["end"] = new { dateTime = edit.End };
+                if (edit.ReminderMinutes is { } minutes)
+                    fields["reminders"] = new { useDefault = false, overrides = minutes.Order().Select(value => new { method = "popup", minutes = value }) };
                 if (eventId is null) fields["id"] = "detot" + edit.RequestId.ToString("N");
             }
             using var response = await CalendarCall(id, eventId is null ? HttpMethod.Post :
@@ -356,10 +396,6 @@ static class GoogleAccounts
     private static string RandomToken() => WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
     private static string Required(JsonElement value, string key) =>
         value.GetProperty(key).GetString() ?? throw new JsonException();
-    private static CookieOptions Cookie() => new()
-    {
-        HttpOnly = true, SameSite = SameSiteMode.Lax, Path = "/api/google/callback", MaxAge = TimeSpan.FromMinutes(5)
-    };
     private static IResult CalendarError(HttpResponseMessage response) => (int)response.StatusCode switch
     {
         409 or 412 => Results.Problem("Sự kiện đã thay đổi hoặc đã tồn tại. Hãy tải lại lịch.", statusCode: 409),
@@ -377,8 +413,12 @@ static class GoogleAccounts
             grants.All(grant => grant == expected || grant is "openid" or "email" or "https://www.googleapis.com/auth/userinfo.email");
     }
 
-    private sealed record Account(string Id, string Email, string RefreshToken, string? Scope = null, bool Calendar = false);
-    internal sealed record GoogleEventEdit(string? Title, DateTimeOffset Start, DateTimeOffset End, Guid RequestId);
+    private sealed record Account(string Id, string Email, string RefreshToken, string? Scope = null, bool Calendar = false,
+        Note[]? Notes = null, bool Selected = false);
+    private sealed record Note(string Id, string Text);
+    internal static bool ValidReminderMinutes(int[]? minutes) => minutes is null ||
+        (minutes.Length <= 5 && minutes.All(value => value is >= 0 and <= 40320) && minutes.Distinct().Count() == minutes.Length);
+    internal sealed record GoogleEventEdit(string? Title, DateTimeOffset Start, DateTimeOffset End, Guid RequestId, int[]? ReminderMinutes = null);
     internal sealed record CalendarConflict(string Reply);
     internal sealed record GmailQuery(string? Query);
 }

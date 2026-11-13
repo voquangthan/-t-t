@@ -16,6 +16,31 @@ Lịch sử nằm trong trình duyệt. Xóa bản lưu chỉ xóa bản sao tr�
 
 ## Gmail
 
-Kết nối thật mặc định tắt. Sau khi M1 đạt cổng bảo mật, cấu hình OAuth client loại Web trong Google Cloud, bật Gmail API và đăng ký redirect URI chính xác `http://127.0.0.1:5183/api/google/callback`. Truyền `DETOT_GOOGLE_CLIENT_ID`, `DETOT_GOOGLE_CLIENT_SECRET` và `DETOT_GOOGLE_RELEASE_ENABLED=true` vào tiến trình khởi động lab. Mở workspace trên cổng 5183 và chọn **Kết nối Gmail** trong menu tài khoản.
+Bật Gmail API trong Google Cloud và tạo OAuth client loại Web. Đăng ký callback theo địa chỉ workspace. Với cổng 5184 trên laptop, dùng `http://127.0.0.1:5184/api/google/callback`. Nạp file JSON bằng `Start-Lab.ps1 -WebPort 5184 -ImportGoogleOAuth <đường-dẫn>` hoặc đặt `DETOT_GOOGLE_CLIENT_ID` và `DETOT_GOOGLE_CLIENT_SECRET` khi khởi động. Gmail tự bật khi backend nạp đủ cấu hình.
 
 Backend mã hóa thông tin tài khoản và refresh token trong `.local/google` bằng ASP.NET Core Data Protection với khóa bảo vệ bằng Windows DPAPI. Menu hỗ trợ nhiều tài khoản, chọn tài khoản tìm thư và thu hồi quyền. Kết quả tìm kiếm hiển thị người gửi và tiêu đề. Nội dung thư không được chuyển tới LLM.
+
+## Dùng từ máy khác
+
+Đặt một địa chỉ HTTPS cố định cho laptop, ví dụ `https://detot.example.com`. Cấu hình reverse proxy trên laptop để kết thúc TLS và chuyển tiếp đến `http://127.0.0.1:5183` (hoặc cổng đã chọn bằng `-WebPort`), giữ nguyên header `Host` công khai. Chỉ cấp quyền truy cập proxy cho các thiết bị được phép. Laptop cần bật và có mạng trong lúc sử dụng.
+
+Trong Google Cloud, thêm callback Web OAuth `https://detot.example.com/api/google/callback` cho đúng địa chỉ HTTPS. Nếu dùng JSON tải từ Google, nạp cấu hình trên laptop từ thư mục `detot-lab`:
+
+```powershell
+& .\Start-Lab.ps1 -PublicOrigin 'https://detot.example.com' -ImportGoogleOAuth 'C:\path\google-oauth.json'
+```
+
+Đặt mật khẩu ngẫu nhiên dài ít nhất 24 ký tự qua biến môi trường của phiên khởi động:
+
+```powershell
+$password = Read-Host 'Mật khẩu Đệ Tốt' -AsSecureString
+$env:DETOT_REMOTE_PASSWORD = [Net.NetworkCredential]::new('', $password).Password
+$password.Dispose()
+try {
+    & .\Start-Lab.ps1 -PublicOrigin 'https://detot.example.com'
+} finally {
+    Remove-Item Env:DETOT_REMOTE_PASSWORD -ErrorAction SilentlyContinue
+}
+```
+
+Mở `https://detot.example.com/workspace` từ máy được phép rồi đăng nhập. Phiên hết hạn sau 15 phút không có yêu cầu đến server hoặc sau 8 giờ, và bị hủy trên server khi đăng xuất. Token, tài khoản Gmail đã chọn và ghi chú mới được lưu mã hóa trên laptop. Ghi chú từ bản cũ còn nằm trong trình duyệt từng dùng và cần sao chép thủ công nếu muốn giữ lại. Workspace HTTPS tự lưu lịch sử chat mã hóa trên laptop. Khi mở workspace từ máy khác, lịch sử được tải lại vào bộ nhớ trình duyệt. Khi dùng máy dùng chung, đóng toàn bộ cửa sổ riêng tư sau khi đăng xuất để trình duyệt dọn dữ liệu của phiên riêng tư.

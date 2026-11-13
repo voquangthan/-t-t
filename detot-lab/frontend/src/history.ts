@@ -11,6 +11,7 @@ export interface Conversation {
   title: string;
   pinned: boolean;
   gatewayLinked?: boolean;
+  practice?: boolean;
   messages: Message[];
 }
 
