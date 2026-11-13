@@ -68,7 +68,9 @@ Trong lần cập nhật này, bộ M1 thường, Dreaming và retention đều 
 
 **Quyết định cổng hiện tại: FAIL / chưa nghiệm thu.** Candidate đã đạt regression xóa continuation, session row, transcript và archive fixture qua restart trên Node ghim. Chưa có test Memory Core entry gắn provenance với session, cache/vector hoặc backup; cũng chưa chứng minh cryptographic erasure cho archive hiện hữu. DeepSeek thật chưa chạy vì không có key. 22 moderate có biện pháp giảm thiểu/giám sát nhưng chưa được vá hay chấp nhận rủi ro. Tiếp tục chỉ dùng dữ liệu giả; không chuyển Milestone 2. Chỉ mở cổng sau khi các phần thiếu được kiểm thử trên candidate và DeepSeek thật đạt khi có key.
 
-## Cập nhật DeepSeek trên candidate
+## Trạng thái hiện tại
+
+DeepSeek thật đã đạt theo bằng chứng bên dưới. Cổng dữ liệu thật vẫn chưa đạt vì chưa chứng minh purge Memory Core, vector/cache, backup và archive hiện hữu. Cấu hình Google OAuth có thể nhập trước, nhưng Gmail thật vẫn tắt.
 
 Lượt live do người dùng chạy trên OpenClaw candidate `2026.11.3` đạt PASS. Cả lượt gọi tool và lượt continuation đều trả HTTP 200. Bằng chứng cục bộ nằm tại `detot-lab/.local/m1-hxrdQR/results.json`. Kết quả này thay thế các trạng thái BLOCKED của những lượt chạy trước. Cổng M1 vẫn mở các mục kiểm chứng xóa Memory Core, cache/vector, backup và archive.
 

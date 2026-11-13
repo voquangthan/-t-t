@@ -80,7 +80,7 @@ export function GoogleProfiles() {
         <form method="dialog"><button aria-label="Đóng">×</button></form>
       </div>
       {!canonical ? <p><a href="http://127.0.0.1:5183/workspace">Mở Đệ Tốt từ backend để quản lý Gmail</a></p>
-        : enabled === false && !busy && <p>Kết nối Google đang tắt trong cấu hình lab.</p>}
+        : enabled === false && !busy && <p>Gmail thật chưa được bật trong lab. Bạn có thể lưu cấu hình OAuth trước. Kết nối tài khoản chỉ mở sau khi M1 đạt kiểm tra xóa dữ liệu.</p>}
       {canonical && enabled && <>
         <ul>{accounts.map(account => <li key={account.id}>
           <strong>{account.email}</strong>

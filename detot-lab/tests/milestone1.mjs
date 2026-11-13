@@ -468,6 +468,11 @@ async function retentionBaseline() {
       gateway = launchGateway();
       await waitReady(url, gateway);
       for (const id of relatedIds) restartedContinuationStatuses.push((await request(marker, { previous: id })).status);
+      assert.equal(sessionIdForKey(sessionKey), undefined, "deleted session must stay absent after restart");
+      const restoredFiles = await storageLeaks(archiveRoot, [canary]);
+      const restoredRows = await sqliteLeaks(archiveRoot, [canary]);
+      if (restoredFiles.length || restoredRows.length)
+        fail("Deleted content reappeared after restart: files=" + restoredFiles.length + "; SQLite rows=" + restoredRows.length);
       const survivingControl = await request(marker, { previous: controlId });
       if (survivingControl.status !== 200) fail("Unrelated control continuation did not survive deletion/restart");
       if (retainedMappings.length || survivingResponseIds.length || responseStatuses.some(status => status !== 400) || restartedContinuationStatuses.some(status => status !== 400)) {
