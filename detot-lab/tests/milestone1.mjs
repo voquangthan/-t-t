@@ -451,11 +451,13 @@ async function retentionBaseline() {
       assert(sessionId, "session row must identify the transcript generation before deletion");
       const memoryFile = resolve(profile.workspace, "MEMORY.md");
       const unrelatedMemory = "## Unrelated synthetic memory\nKeep this line.";
-      await writeFile(memoryFile, `## Session ID: ${sessionId}\n${canary}\n\n${unrelatedMemory}\n`);
+      const memoryContent = `## Session ID: ${sessionId}\n${canary}\n\n${unrelatedMemory}\n`;
+      await writeFile(memoryFile, memoryContent);
       const hash = value => createHash("sha256").update(value).digest("hex");
       const normalized = profile.workspace.replaceAll("\\", "/");
       const workspaceKey = hash(process.platform === "win32" ? normalized.toLowerCase() : normalized);
       const recallKey = "detot-retention-recall";
+      const backupKey = workspaceKey + ":" + hash("detot-retention-backup");
       const state = new DatabaseSync(dbPath);
       try {
         state.prepare("INSERT INTO plugin_state_entries (plugin_id,namespace,entry_key,value_json,created_at) VALUES (?,?,?,?,?)")
@@ -463,7 +465,34 @@ async function retentionBaseline() {
             version: 1, workspaceKey, workspaceDir: profile.workspace, key: recallKey,
             value: { key: recallKey, path: `sessions/main/${sessionId}.jsonl`, snippet: canary }
           }), Date.now());
+        state.prepare("INSERT INTO plugin_state_entries (plugin_id,namespace,entry_key,value_json,created_at) VALUES (?,?,?,?,?)")
+          .run("memory-core", "dreaming-memory-backups", backupKey, JSON.stringify({
+            version: 1, workspaceKey, workspaceDir: profile.workspace, key: "detot-retention-backup",
+            value: { content: memoryContent, contentHash: hash(memoryContent), createdAt: new Date().toISOString() }
+          }), Date.now());
       } finally { state.close(); }
+      function backupContent() {
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        try {
+          const row = db.prepare("SELECT value_json FROM plugin_state_entries WHERE plugin_id=? AND namespace=? AND entry_key=?")
+            .get("memory-core", "dreaming-memory-backups", backupKey);
+          return JSON.parse(row.value_json).value.content;
+        } finally { db.close(); }
+      }
+      assert.equal(backupContent(), memoryContent);
+      const embeddingHash = hash(canary);
+      const indexDb = new DatabaseSync(agentDbPath);
+      try {
+        indexDb.prepare("INSERT INTO memory_embedding_cache (provider,model,provider_key,hash,embedding,dims,updated_at) VALUES (?,?,?,?,?,?,?)")
+          .run("detot-test", "fixture", "fixture", embeddingHash,
+            new Uint8Array(new Float32Array([0.25, 0.5]).buffer), 2, Date.now());
+      } finally { indexDb.close(); }
+      function hasCachedEmbedding() {
+        const db = new DatabaseSync(agentDbPath, { readOnly: true });
+        try { return Boolean(db.prepare("SELECT 1 FROM memory_embedding_cache WHERE hash=?").get(embeddingHash)); }
+        finally { db.close(); }
+      }
+      assert(hasCachedEmbedding(), "embedding cache must contain the synthetic vector before deletion");
       assert(databaseLeaks(dbPath, [canary]).some(row => row.table === "plugin_state_entries"),
         "synthetic recall cache must contain the canary before deletion");
       const archiveDir = resolve(profile.state, "agents/main/sessions");
@@ -487,6 +516,9 @@ async function retentionBaseline() {
       await waitReady(url, gateway);
       for (const id of relatedIds) restartedContinuationStatuses.push((await request(marker, { previous: id })).status);
       assert.equal(sessionIdForKey(sessionKey), undefined, "deleted session must stay absent after restart");
+      assert(!hasCachedEmbedding(), "synthetic embedding cache row must stay absent after restart");
+      assert(!backupContent().includes(canary) && backupContent().includes(unrelatedMemory),
+        "Memory Core backup must retain only unrelated content after restart");
       const restoredFiles = await storageLeaks(archiveRoot, [canary]);
       const restoredRows = await sqliteLeaks(archiveRoot, [canary]);
       if (restoredFiles.length || restoredRows.length)
