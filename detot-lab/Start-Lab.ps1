@@ -1,5 +1,5 @@
 ﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
-    [string]$ImportGoogleOAuth, [string]$RestoredState,
+    [string]$ImportGoogleOAuth, [string]$RestoredState, [switch]$EnableGoogle,
     [ValidateRange(1024,65535)][int]$WebPort = 5183,
     [ValidateRange(1024,65535)][int]$GatewayPort = 18793)
 
@@ -228,6 +228,10 @@ try {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value) { $backendVariables[$name] = $value }
     }
+    if ($EnableGoogle -and !$isolatedPorts -and !$RestoredState) {
+        $backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] = 'true'
+    }
+    if ($isolatedPorts -or $RestoredState) { $backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] = 'false' }
     if ($backendVariables['DETOT_GOOGLE_RELEASE_ENABLED'] -eq 'true' -and
         !$backendVariables['DETOT_GOOGLE_CLIENT_ID'] -and !$backendVariables['DETOT_GOOGLE_CLIENT_SECRET'] -and
         (Test-Path -LiteralPath $googleConfig -PathType Leaf)) {
