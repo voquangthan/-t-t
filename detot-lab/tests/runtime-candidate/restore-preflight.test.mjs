@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { gzipSync } from "node:zlib";
+import { purgeConfiguredCopies, verifyRestoreState } from "./restore-preflight.mjs";
+
+test("restore scans nested stores and purge audits and verifies configured copies", async t => {
+  const root = await mkdtemp(join(tmpdir(), "detot-preflight-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const authority = join(root, "authority");
+  const copies = join(root, "copies");
+  const nested = join(copies, "secondary");
+  await mkdir(authority);
+  await mkdir(nested, { recursive: true });
+  await writeFile(join(authority, "session-deleted.revoked"), "");
+  const target = join(nested, "old.gz");
+  const control = join(nested, "control.gz");
+  await writeFile(target, gzipSync("Session ID: session-deleted\ncanary"));
+  await writeFile(control, gzipSync("Session ID: control\nkeep"));
+  await assert.rejects(verifyRestoreState(copies, authority), /revoked session/);
+  const log = [];
+  await purgeConfiguredCopies([copies], authority, { log: row => log.push(row) });
+  assert.equal(log[0].matches, 1);
+  assert((await readFile(target)).length);
+  await writeFile(join(copies, "untraceable.gz"), gzipSync("no provenance"));
+  await assert.rejects(purgeConfiguredCopies([copies], authority, { apply: true }), /no verifiable/);
+  assert((await readFile(target)).length);
+  await rm(join(copies, "untraceable.gz"));
+  await purgeConfiguredCopies([copies], authority, { apply: true, log: row => log.push(row) });
+  await assert.rejects(readFile(target), { code: "ENOENT" });
+  assert.equal(await verifyRestoreState(copies, authority), 1);
+  assert.equal(log.at(-1).action, "verified");
+});

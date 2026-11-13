@@ -96,6 +96,14 @@ Regression `m1-DkiszN` đạt. Khi đặt `DETOT_RESTORE_AUTHORITY` trỏ tới 
 
 Chạy lại M1 thường `m1-XVQxp7`, Dreaming `m1-Iq2SwU`, retention và restore `m1-DkiszN`, DeepSeek thật `m1-y518BZ` đều đạt theo phạm vi thử. M1 vẫn chưa nghiệm thu cho dữ liệu thật: cổng restore hiện chỉ kiểm tra database agent chính khi được cấu hình, chưa bao phủ restore toàn state hoặc bản sao ngoài manifest. Phép thử unlink không chứng minh xóa vật lý trên thiết bị lưu trữ.
 
+### Kiểm kê tự động và cổng restore theo thư mục
+
+Gateway candidate ở chế độ restore (`DETOT_RESTORE_AUTHORITY`) quét toàn bộ cây state đã stage trước khi mở cổng. Kho thu hồi phải nằm ngoài cây đó. Bản sao có dấu vết ID đã thu hồi bị từ chối, kể cả khi dấu vết còn nằm ở trang SQLite không còn truy vấn được. Bộ quét có thể từ chối cả snapshot sau xóa còn dấu vết và cần một snapshot sạch để khôi phục.
+
+Tạo JSON có `authority` trỏ tới kho thu hồi và `roots` là danh sách thư mục backup tuyệt đối. Dừng các tiến trình ghi tại đó. Chạy `node purge-legacy-copies.mjs --scan-config CONFIG.json` để kiểm kê, rồi `node purge-legacy-copies.mjs --apply-config CONFIG.json` để dọn. Chuyển stdout sang file ngoài các thư mục quét nếu muốn lưu log JSON. Chế độ apply kiểm kê lại sau khi xóa và báo lỗi nếu còn dấu vết nhận diện được. Archive thiếu nguồn, định dạng chưa hỗ trợ, liên kết và file quá lớn cần xử lý riêng.
+
+Phạm vi này chỉ chứng minh kiểm tra theo ID có thể nhận diện trong các vị trí đã cấu hình. Nội dung đã mất thông tin nguồn hoặc các bản sao bên ngoài phạm vi cần kiểm kê riêng. Không dùng kết quả này làm chứng nhận xóa vật lý hoặc nghiệm thu dữ liệu thật.
+
 ## Chạy lại
 
 Harness nhận `DETOT_TEST_OPENCLAW_ENTRY` để chọn runtime ứng viên. Các mode gồm chạy mặc định cho Gateway, Memory Core và mock continuation, `--dreaming` cho managed sweep, `--retention` cho TTL/incognito/xóa, và `--live` khi có key nhập cục bộ. Không chuyển runtime đang dùng sang ứng viên cho tới khi nghiệm thu.

@@ -48,6 +48,14 @@ await replaceExactly(runtime, 'import { existsSync, readFileSync, realpathSync, 
   '  await verifyRestoreSnapshot(path.join(state, "agents/main/agent/openclaw-agent.sqlite"), authority);\n' +
   '}',
   "enforce restore preflight before gateway boot");
+await replaceExactly(runtime,
+  'const { verifyRestoreSnapshot } = await import("./dist/detot-restore-preflight.mjs");',
+  'const { verifyRestoreState } = await import("./dist/detot-restore-preflight.mjs");',
+  "load full-state restore verifier");
+await replaceExactly(runtime,
+  'await verifyRestoreSnapshot(path.join(state, "agents/main/agent/openclaw-agent.sqlite"), authority);',
+  'await verifyRestoreState(state, authority);',
+  "scan all staged restore files before boot");
 await copyFile(fileURLToPath(new URL("./session-copies.mjs", import.meta.url)),
   join(packageRoot, "dist", "detot-session-copies.mjs"));
 const memoryCliPath = join(packageRoot, "dist", "cli.runtime-D93HQK_k.mjs");

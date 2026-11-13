@@ -10,7 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { backup, DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { sessionCopies } from "./runtime-candidate/session-copies.mjs";
-import { purgeRegisteredPlaintextCopies, verifyRestoreSnapshot } from "./runtime-candidate/restore-preflight.mjs";
+import { purgeConfiguredCopies, verifyRestoreState } from "./runtime-candidate/restore-preflight.mjs";
 import { gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const lab = resolve(import.meta.dirname, "..");
@@ -288,6 +288,7 @@ async function dreamingSweep() {
 async function retentionBaseline() {
   const externalRoot = await mkdtemp(resolve(tmpdir(), "detot-retention-"));
   const snapshotPath = resolve(externalRoot, "pre-delete.sqlite");
+  const controlSnapshot = resolve(scratch, "restore-control.sqlite");
   const externalArchive = resolve(externalRoot, "pre-delete.jsonl.zst");
   const authorityDir = resolve(scratch, "copy-authority");
   await mkdir(authorityDir);
@@ -427,8 +428,11 @@ async function retentionBaseline() {
       return { explicitContinuation: true, responseMapping: false, responseIdStatus: 400 };
     });
     await test("Persisted continuation TTL fixture setup", async () => {
-      expiredId = await turn(canary);
       controlId = await turn("DETOT-M1-TTL-CONTROL");
+      const cleanSource = new DatabaseSync(agentDbPath, { readOnly: true });
+      try { await backup(cleanSource, controlSnapshot); }
+      finally { cleanSource.close(); }
+      expiredId = await turn(canary);
       const stored = mapping(expiredId);
       sessionKey = stored?.sessionKey;
       assert(sessionKey && stored.expiresAt > Date.now());
@@ -539,7 +543,7 @@ async function retentionBaseline() {
       const source = new DatabaseSync(agentDbPath, { readOnly: true });
       try { await backup(source, snapshotPath); }
       finally { source.close(); }
-      await writeFile(externalArchive, zstdCompressSync(Buffer.from(canary)));
+      await writeFile(externalArchive, zstdCompressSync(Buffer.from(`Session ID: ${sessionId}\n${canary}`)));
       assert(databaseLeaks(snapshotPath, [canary]).length > 0, "pre-delete snapshot must contain the canary");
       copiedSessionId = sessionId;
       await copies.provision(sessionId);
@@ -592,8 +596,8 @@ async function retentionBaseline() {
         const restoreDb = resolve(restored.state, "agents/main/agent/openclaw-agent.sqlite");
         await mkdir(dirname(restoreDb), { recursive: true });
         const restoreUrl = "http://127.0.0.1:" + restorePort;
-        async function startRestored(snapshot) {
-          await verifyRestoreSnapshot(snapshot, authorityDir);
+        async function startRestored() {
+          await verifyRestoreState(restored.state, authorityDir);
           const child = launch(restored, ["gateway", "run"]);
           child.stdout.resume();
           child.stderr.resume();
@@ -608,10 +612,8 @@ async function retentionBaseline() {
         assert.notEqual(exit, 0);
         assert.match(diagnostic, /Snapshot contains a revoked session/);
         await assert.rejects(fetch(restoreUrl + "/readyz", { signal: AbortSignal.timeout(1000) }));
-        const source = new DatabaseSync(agentDbPath, { readOnly: true });
-        try { await backup(source, restoreDb); }
-        finally { source.close(); }
-        const child = await startRestored(restoreDb);
+        await copyFile(controlSnapshot, restoreDb);
+        const child = await startRestored();
         try {
           await waitReady(restoreUrl, child);
           const history = key => cli(restored, ["gateway", "call", "chat.history", "--json", "--params",
@@ -625,13 +627,14 @@ async function retentionBaseline() {
         } finally { await stopChild(child); }
         return { dirtySnapshotRejectedBeforeListen: true, cleanSnapshotRestored: true, controlHistoryReadable: true };
       });
-      await test("Registered plaintext copies cannot be read after purge", async () => {
+      await test("Automatically inventoried plaintext copies cannot be read after purge", async () => {
         assert(databaseLeaks(snapshotPath, [canary]).length > 0);
         assert(zstdDecompressSync(await readFile(externalArchive)).includes(Buffer.from(canary)));
-        assert.equal(await purgeRegisteredPlaintextCopies(externalRoot, authorityDir, [
-          { name: "pre-delete.sqlite", sessionIds: [copiedSessionId] },
-          { name: "pre-delete.jsonl.zst", sessionIds: [copiedSessionId] },
-        ]) >= 2, true);
+        const log = [];
+        await purgeConfiguredCopies([externalRoot], authorityDir, { log: event => log.push(event) });
+        assert(log.some(event => event.action === "inventory" && event.matches >= 2));
+        await purgeConfiguredCopies([externalRoot], authorityDir, { apply: true, log: event => log.push(event) });
+        assert(log.some(event => event.action === "verified"));
         for (const file of [snapshotPath, externalArchive]) await assert.rejects(readFile(file), { code: "ENOENT" });
         return { registeredSnapshotUnreadable: true, registeredArchiveUnreadable: true };
       });
