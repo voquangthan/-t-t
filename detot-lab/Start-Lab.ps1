@@ -1,4 +1,4 @@
-﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard)
+﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
@@ -169,7 +169,10 @@ try {
     } finally {
         $probe.Dispose()
     }
-    $appProcess = Start-LabChild $dotnet @($app) @{ DETOT_GATEWAY_TOKEN = $token }
+    $appProcess = Start-LabChild $dotnet @($app) @{
+        DETOT_GATEWAY_TOKEN = $token
+        DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
+    }
     $token = $null
     Write-Host 'Open http://127.0.0.1:5183/workspace and send a synthetic prompt. Press Ctrl+C here to stop.'
     while (!$appProcess.HasExited -and !$gatewayProcess.HasExited) {

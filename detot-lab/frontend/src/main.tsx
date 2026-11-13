@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { Calendar } from "./Calendar";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
@@ -34,6 +35,7 @@ function Code({ className, children }: React.ComponentProps<"code">) {
 }
 
 function App() {
+  const [calendar, setCalendar] = useState(false);
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string>();
   const [query, setQuery] = useState("");
@@ -58,7 +60,7 @@ function App() {
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }); }, [active, conversation?.messages.length, busy]);
 
   const save = (value: Conversation) => setItems(old => [value, ...old.filter(item => item.id !== value.id)]);
-  const select = (id?: string) => { setActive(id); setDraft(""); setSide(false); setError(""); retry.current = null; };
+  const select = (id?: string) => { setCalendar(false); setActive(id); setDraft(""); setSide(false); setError(""); retry.current = null; };
 
   async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string) {
     if (!text.trim() || request.current) return;
@@ -125,10 +127,11 @@ function App() {
           </div></details>
         </div>)}
       </nav>
-      <div className="sidebar-footer"><button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button></div>
+      <div className="sidebar-footer"><button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setSide(false); }}>Lịch thử</button>{" "}<button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button></div>
     </aside>
     <main>
-      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span></header>
+      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{calendar ? "Lịch thử" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span></header>
+      {calendar ? <Calendar /> : <>
       <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
         {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
         {conversation?.messages.map((message, index) => <article key={message.id} className={message.role}>
@@ -162,6 +165,7 @@ function App() {
         </form>
         <p>Lịch sử lưu trên trình duyệt. Tin nhắn được gửi tới nhà cung cấp LLM.</p>
       </footer>
+      </>}
     </main>
   </div>;
 }

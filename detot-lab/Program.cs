@@ -33,6 +33,9 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
+var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
+var deletedCalendarRequests = new HashSet<Guid>();
+var calendarLock = new object();
 var calendarTrialEnabled = builder.Configuration.GetValue<bool>("DETOT_ENABLE_CALENDAR_TRIAL");
 app.Use(async (context, next) =>
 {
@@ -52,6 +55,38 @@ app.UseStaticFiles();
 app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
+app.MapGet("/api/calendar", () => Results.Ok(new
+{
+    enabled = calendarTrialEnabled,
+    events = trialCalendar.OrderBy(item => item.Value.Start)
+        .Select(item => new { id = item.Key, item.Value.Title, item.Value.Start, item.Value.End })
+}));
+app.MapPut("/api/calendar/{id:guid}", (Guid id, CalendarEdit edit, HttpContext context) =>
+{
+    if (!calendarTrialEnabled || !IsLocalMutation(context)) return Results.StatusCode(403);
+    var title = edit.Title?.Trim();
+    if (title is not { Length: > 0 and <= 120 } || edit.End <= edit.Start || edit.Start == default)
+        return Results.BadRequest(new { error = "Nhập tên sự kiện và giờ kết thúc sau giờ bắt đầu." });
+    lock (calendarLock)
+    {
+        if (!trialCalendar.TryGetValue(id, out var current)) return Results.NotFound();
+        if (trialCalendar.Any(item => item.Key != id && edit.Start < item.Value.End && edit.End > item.Value.Start))
+            return Results.Conflict(new { error = "Khung giờ trùng với sự kiện khác." });
+        trialCalendar[id] = current with { Title = title, Start = edit.Start, End = edit.End };
+        return Results.NoContent();
+    }
+});
+app.MapDelete("/api/calendar/{id:guid}", (Guid id, HttpContext context) =>
+{
+    if (!calendarTrialEnabled || !IsLocalMutation(context)) return Results.StatusCode(403);
+    lock (calendarLock)
+    {
+        if (!trialCalendar.TryRemove(id, out _)) return Results.NotFound();
+        calendarReceipts.TryRemove(id, out _);
+        deletedCalendarRequests.Add(id);
+        return Results.NoContent();
+    }
+});
 app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFactory factory, CancellationToken cancellationToken) =>
 {
     if (context.Request.Headers.Origin != $"http://{context.Request.Host.Value}" || !context.Request.HasJsonContentType())
@@ -86,8 +121,16 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             ? calendarInput
             : history.Select(turn => new { role = turn.Role, content = turn.Text })
                 .Append(new { role = "user", content = calendarInput }).ToArray();
-        if (calendarRequest && request.RequestId is Guid existingId && trialCalendar.TryGetValue(existingId, out var existing))
-            return existing.Message == calendarInput ? CalendarReply(existing) : Results.Conflict();
+        if (calendarRequest && request.RequestId is Guid existingId)
+        {
+            lock (calendarLock)
+            {
+                if (deletedCalendarRequests.Contains(existingId))
+                    return Results.Conflict(new { error = "Sự kiện của yêu cầu này đã bị xóa." });
+                if (calendarReceipts.TryGetValue(existingId, out var existing))
+                    return existing.Message == calendarInput ? CalendarReply(existing) : Results.Conflict();
+            }
+        }
         if (calendarRequest)
             tools.Add(new
             {
@@ -136,12 +179,18 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 return Results.BadRequest(new { error = "Bạn cho mình tên sự kiện, giờ bắt đầu và giờ kết thúc nhé." });
 
             var proposed = new TrialEvent(calendarInput, title, start, end);
-            if (trialCalendar.Values.Any(item => start < item.End && end > item.Start))
-                return Results.Conflict(new { error = "Khung giờ này trùng với một sự kiện trong lịch thử. Bạn chọn giờ khác nhé." });
-            var saved = trialCalendar.GetOrAdd(requestId, proposed);
-            if (saved.Message != calendarInput)
-                return Results.Conflict(new { error = "Mã yêu cầu đã được dùng cho tin nhắn khác." });
-            return CalendarReply(saved);
+            lock (calendarLock)
+            {
+                if (deletedCalendarRequests.Contains(requestId))
+                    return Results.Conflict(new { error = "Sự kiện của yêu cầu này đã bị xóa." });
+                if (calendarReceipts.TryGetValue(requestId, out var receipt))
+                    return receipt.Message == calendarInput ? CalendarReply(receipt) : Results.Conflict();
+                if (trialCalendar.Values.Any(item => start < item.End && end > item.Start))
+                    return Results.Conflict(new { error = "Khung giờ này trùng với một sự kiện trong lịch thử. Bạn chọn giờ khác nhé." });
+                trialCalendar[requestId] = proposed;
+                calendarReceipts[requestId] = proposed;
+                return CalendarReply(proposed);
+            }
         }
         if (calls.Length != 1 || calls[0].GetProperty("name").GetString() != fixture)
             return Results.Problem("Gateway đề xuất tool ngoài hợp đồng lab.", statusCode: 502);
@@ -184,6 +233,9 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
 
 app.Run();
 
+static bool IsLocalMutation(HttpContext context) =>
+    context.Request.Headers.Origin == $"http://{context.Request.Host.Value}";
+
 static async Task<JsonDocument> CallGateway(HttpClient client, object body, CancellationToken cancellationToken)
 {
     using var response = await client.PostAsJsonAsync("/v1/responses", body, cancellationToken);
@@ -225,3 +277,4 @@ static bool IsCalendarCommand(string message) =>
 record ChatTurn(string Role, string Text);
 record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History);
 record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
+record CalendarEdit(string? Title, DateTimeOffset Start, DateTimeOffset End);
