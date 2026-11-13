@@ -1,4 +1,4 @@
-param([switch]$ConfigureDeepSeek)
+﻿param([switch]$ConfigureDeepSeek)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
