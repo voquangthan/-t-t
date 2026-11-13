@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
+import { tmpdir } from "node:os";
 import { gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const lab = resolve(import.meta.dirname, "..");
@@ -283,6 +284,9 @@ async function dreamingSweep() {
 }
 
 async function retentionBaseline() {
+  const externalRoot = await mkdtemp(resolve(tmpdir(), "detot-retention-"));
+  const snapshotPath = resolve(externalRoot, "pre-delete.sqlite");
+  const externalArchive = resolve(externalRoot, "pre-delete.jsonl.zst");
   const { getLoadablePath } = await import(pathToFileURL(resolve(dirname(runtime), "../sqlite-vec/index.mjs")).href);
   const vectorExtension = getLoadablePath();
   const port = await availablePort();
@@ -523,6 +527,11 @@ async function retentionBaseline() {
       await mkdir(archiveDir, { recursive: true });
       await writeFile(resolve(archiveDir, sessionId + ".jsonl.deleted.fixture.zst"), zstdCompressSync(Buffer.from(canary)));
       assert((await storageLeaks(profile.state, [canary])).length > 0, "compressed archive fixture must be readable before deletion");
+      const source = new DatabaseSync(agentDbPath, { readOnly: true });
+      try { await backup(source, snapshotPath); }
+      finally { source.close(); }
+      await writeFile(externalArchive, zstdCompressSync(Buffer.from(canary)));
+      assert(databaseLeaks(snapshotPath, [canary]).length > 0, "pre-delete snapshot must contain the canary");
       await cli(profile, ["sessions", "delete", sessionKey, "--yes", "--json"]);
       const retainedMappings = mappingsForSession(sessionKey).map(item => item.id);
       const survivingResponseIds = relatedIds.filter(id => mapping(id));
@@ -556,7 +565,22 @@ async function retentionBaseline() {
       if (diskLeaks.length || dbLeaks.length) fail("Deleted content remains in files=" + diskLeaks.length + "; SQLite tables=" + dbLeaks.map(item => item.table).join(","));
       return { revokedContinuationIds: relatedIds.length, allRejectedBeforeAndAfterRestart: true, diskCanaryLeaks: 0, sqliteLeaks: 0, unrelatedControlSurvived: true };
     });
-  } finally { await stopChild(gateway); }
+    if (results.at(-1)?.status === "PASS") {
+      await test("Pre-delete snapshot and external archive do not expose deleted content", async () => {
+        const snapshotRetainsContent = databaseLeaks(snapshotPath, [canary]).length > 0;
+        const archiveRetainsContent = zstdDecompressSync(await readFile(externalArchive)).includes(Buffer.from(canary));
+        assert(!snapshotRetainsContent && !archiveRetainsContent,
+          `Deleted content remains readable: restored SQLite snapshot=${snapshotRetainsContent}, external archive=${archiveRetainsContent}`);
+        return { snapshotRetainsContent, archiveRetainsContent };
+      });
+    }
+  } finally {
+    await stopChild(gateway);
+    for (const file of [snapshotPath, snapshotPath + "-wal", snapshotPath + "-shm", snapshotPath + "-journal", externalArchive]) {
+      await unlink(file).catch(error => { if (error.code !== "ENOENT") throw error; });
+    }
+    await rmdir(externalRoot);
+  }
 }
 
 try {

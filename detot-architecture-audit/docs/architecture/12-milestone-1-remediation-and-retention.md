@@ -76,6 +76,12 @@ Cổng dữ liệu thật vẫn chưa đạt. Regression `detot-lab/.local/m1-nm
 
 Lượt live do người dùng chạy trên OpenClaw candidate `2026.11.3` đạt PASS. Cả lượt gọi tool và lượt continuation đều trả HTTP 200. Bằng chứng cục bộ nằm tại `detot-lab/.local/m1-hxrdQR/results.json`. Kết quả này thay thế các trạng thái BLOCKED của những lượt chạy trước. Cổng M1 vẫn mở các mục kiểm chứng xóa Memory Core, cache/vector, backup và archive.
 
+## Bản sao tạo trước khi xóa
+
+Lượt `detot-lab/.local/m1-mX1VGI/results.json` đạt kiểm tra xóa trên Gateway đang chạy. Ca kiểm tra bản sao ngoài lab thất bại ở cả hai nguồn. Mở snapshot SQLite được tạo trước khi xóa vẫn thấy canary và giải nén archive bên ngoài vẫn đọc được canary. Đây là dữ liệu tổng hợp. Lượt này kiểm tra khả năng đọc snapshot trực tiếp, chưa nạp snapshot vào một Gateway khôi phục.
+
+Quy trình khôi phục cần đối chiếu danh sách thu hồi bền vững nằm ngoài snapshot và purge trước khi Gateway phục vụ. Archive nén bản rõ đã xuất ra ngoài cần được dọn tại nơi lưu. Với archive mới, có thể dùng mã hóa theo session và thu hồi khóa được giữ ngoài bản sao. Cổng M1 giữ trạng thái chưa nghiệm thu.
+
 ## Chạy lại
 
 Harness nhận `DETOT_TEST_OPENCLAW_ENTRY` để chọn runtime ứng viên. Các mode gồm chạy mặc định cho Gateway, Memory Core và mock continuation, `--dreaming` cho managed sweep, `--retention` cho TTL/incognito/xóa, và `--live` khi có key nhập cục bộ. Không chuyển runtime đang dùng sang ứng viên cho tới khi nghiệm thu.
