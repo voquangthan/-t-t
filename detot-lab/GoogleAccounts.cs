@@ -15,7 +15,10 @@ static class GoogleAccounts
         var group = app.MapGroup("/api/google");
         var clientId = app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
         var secret = app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"];
-        var enabled = OperatingSystem.IsWindows() && app.Configuration.GetValue<bool>("DETOT_GOOGLE_RELEASE_ENABLED")
+        var configured = (!string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret))
+            || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-client.json"));
+        var releaseEnabled = app.Configuration.GetValue<bool>("DETOT_GOOGLE_RELEASE_ENABLED");
+        var enabled = OperatingSystem.IsWindows() && releaseEnabled
             && !string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret);
         var mutex = new SemaphoreSlim(1);
         var path = Path.Combine(directory, "accounts.bin");
@@ -52,7 +55,13 @@ static class GoogleAccounts
         }
 
         group.MapGet("/accounts", Task<IResult> (HttpContext ctx) => !enabled
-            ? Task.FromResult<IResult>(Results.Ok(new { enabled = false, accounts = Array.Empty<object>() }))
+            ? Task.FromResult<IResult>(Results.Ok(new
+            {
+                enabled = false,
+                configured,
+                reason = !OperatingSystem.IsWindows() ? "platform" : !releaseEnabled ? "security_gate" : "credentials",
+                accounts = Array.Empty<object>()
+            }))
             : Run(ctx, () => Task.FromResult<IResult>(Results.Ok(new
             {
                 enabled = true,

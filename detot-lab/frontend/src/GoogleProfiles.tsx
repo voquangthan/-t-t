@@ -18,6 +18,7 @@ export function GoogleProfiles() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [active, setActive] = useState("");
   const [enabled, setEnabled] = useState<boolean>();
+  const [disabledMessage, setDisabledMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<Mail[]>();
@@ -32,7 +33,13 @@ export function GoogleProfiles() {
 
   async function load() {
     setEnabled(undefined);
-    const data = await api<{ enabled: boolean; accounts: Account[] }>("accounts");
+    const data = await api<{ enabled: boolean; accounts: Account[]; configured?: boolean; reason?: string }>("accounts");
+    setDisabledMessage(data.reason === "security_gate"
+      ? (data.configured ? "Đã lưu cấu hình Google OAuth. " : "") +
+        "Gmail thật đang chờ nghiệm thu xóa dữ liệu M1."
+      : data.reason === "platform"
+        ? "Lưu thông tin xác thực Google cần Windows."
+        : "Backend chưa nạp đủ cấu hình Google OAuth.");
     setEnabled(data.enabled);
     setAccounts(data.accounts);
     const saved = localStorage.getItem(key);
@@ -80,7 +87,7 @@ export function GoogleProfiles() {
         <form method="dialog"><button aria-label="Đóng">×</button></form>
       </div>
       {!canonical ? <p><a href="http://127.0.0.1:5183/workspace">Mở Đệ Tốt từ backend để quản lý Gmail</a></p>
-        : enabled === false && !busy && <p>Gmail thật chưa được bật trong lab. Bạn có thể lưu cấu hình OAuth trước. Kết nối tài khoản chỉ mở sau khi M1 đạt kiểm tra xóa dữ liệu.</p>}
+        : enabled === false && !busy && <p>{disabledMessage}</p>}
       {canonical && enabled && <>
         <ul>{accounts.map(account => <li key={account.id}>
           <strong>{account.email}</strong>
