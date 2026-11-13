@@ -88,6 +88,14 @@ Candidate có thể ghi dấu thu hồi và hủy khóa bản sao theo session k
 
 Đây là phép thử bản sao mã hóa trong lab. Gateway chưa có quy trình khôi phục hệ thống bắt buộc áp dụng danh sách thu hồi trước khi mở cổng. Snapshot và archive bản rõ nằm ngoài lab vẫn đọc được trong phép thử và cần purge tại nơi lưu. Chưa nghiệm thu M1.
 
+### Khôi phục cô lập và xử lý bản rõ đã kiểm kê
+
+Regression `m1-DkiszN` đạt. Khi đặt `DETOT_RESTORE_AUTHORITY` trỏ tới kho thu hồi ngoài state, Gateway candidate từ chối khởi động từ database agent chính chứa session đã thu hồi. Phép thử sau đó khởi động Gateway riêng với snapshot sạch và state vận hành mới, gọi `chat.history` cho session đã xóa và session đối chứng, rồi kiểm tra lại các hàng SQLite. Bản rõ trước khi xóa vẫn đọc được trước purge. Sau purge, hai bản đã đăng ký không thể mở lại qua đường dẫn cũ.
+
+Để xử lý bản rõ trong lab, dừng mọi tiến trình ghi vào thư mục bản sao. Lập JSON array gồm `name` là tên file trực tiếp và `sessionIds` là danh sách session trong từng bản sao. Đối chiếu manifest với kho thu hồi độc lập, rồi chạy `node purge-legacy-copies.mjs --apply COPY_DIRECTORY AUTHORITY_DIRECTORY INVENTORY_JSON` từ thư mục chứa script. Công cụ xóa toàn bộ bản sao đã đăng ký có session bị thu hồi, gồm sidecar SQLite nếu có. Kiểm tra các vị trí lưu khác riêng.
+
+Chạy lại M1 thường `m1-XVQxp7`, Dreaming `m1-Iq2SwU`, retention và restore `m1-DkiszN`, DeepSeek thật `m1-y518BZ` đều đạt theo phạm vi thử. M1 vẫn chưa nghiệm thu cho dữ liệu thật: cổng restore hiện chỉ kiểm tra database agent chính khi được cấu hình, chưa bao phủ restore toàn state hoặc bản sao ngoài manifest. Phép thử unlink không chứng minh xóa vật lý trên thiết bị lưu trữ.
+
 ## Chạy lại
 
 Harness nhận `DETOT_TEST_OPENCLAW_ENTRY` để chọn runtime ứng viên. Các mode gồm chạy mặc định cho Gateway, Memory Core và mock continuation, `--dreaming` cho managed sweep, `--retention` cho TTL/incognito/xóa, và `--live` khi có key nhập cục bộ. Không chuyển runtime đang dùng sang ứng viên cho tới khi nghiệm thu.

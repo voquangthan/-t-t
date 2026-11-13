@@ -34,6 +34,20 @@ export { handleOpenResponsesHttpRequest, revokeOpenResponsesForDeletedSession };
 );
 
 const deletionPath = join(packageRoot, "dist", "sessions-delete-DbGyBrAQ.mjs");
+await copyFile(fileURLToPath(new URL("./restore-preflight.mjs", import.meta.url)),
+  join(packageRoot, "dist", "detot-restore-preflight.mjs"));
+await replaceExactly(runtime, 'import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";',
+  'import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";\n' +
+  'if (process.env.DETOT_RESTORE_AUTHORITY && process.argv.slice(2, 4).join(" ") === "gateway run") {\n' +
+  '  const path = await import("node:path");\n' +
+  '  const { verifyRestoreSnapshot } = await import("./dist/detot-restore-preflight.mjs");\n' +
+  '  const state = realpathSync(process.env.OPENCLAW_STATE_DIR);\n' +
+  '  const authority = realpathSync(process.env.DETOT_RESTORE_AUTHORITY);\n' +
+  '  const relative = path.relative(state, authority);\n' +
+  '  if (!relative || (!relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative))) throw new Error("Restore authority must be external.");\n' +
+  '  await verifyRestoreSnapshot(path.join(state, "agents/main/agent/openclaw-agent.sqlite"), authority);\n' +
+  '}',
+  "enforce restore preflight before gateway boot");
 await copyFile(fileURLToPath(new URL("./session-copies.mjs", import.meta.url)),
   join(packageRoot, "dist", "detot-session-copies.mjs"));
 const memoryCliPath = join(packageRoot, "dist", "cli.runtime-D93HQK_k.mjs");
