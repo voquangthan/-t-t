@@ -82,6 +82,12 @@ Lượt `detot-lab/.local/m1-mX1VGI/results.json` đạt kiểm tra xóa trên G
 
 Quy trình khôi phục cần đối chiếu danh sách thu hồi bền vững nằm ngoài snapshot và purge trước khi Gateway phục vụ. Archive nén bản rõ đã xuất ra ngoài cần được dọn tại nơi lưu. Với archive mới, có thể dùng mã hóa theo session và thu hồi khóa được giữ ngoài bản sao. Cổng M1 giữ trạng thái chưa nghiệm thu.
 
+### Bản sao mã hóa theo session
+
+Candidate có thể ghi dấu thu hồi và hủy khóa bản sao theo session khi `DETOT_COPY_AUTHORITY_DIR` trỏ tới kho khóa riêng. Lượt `detot-lab/.local/m1-jpMC2X/results.json` xác nhận sau `sessions.delete`, bộ đọc mới từ chối giải mã cả snapshot và archive đã tạo trước đó. Unit test xác nhận session đối chứng vẫn đọc được, sửa ciphertext bị từ chối và thiếu kho khóa khiến restore thất bại.
+
+Đây là phép thử bản sao mã hóa trong lab. Gateway chưa có quy trình khôi phục hệ thống bắt buộc áp dụng danh sách thu hồi trước khi mở cổng. Snapshot và archive bản rõ nằm ngoài lab vẫn đọc được trong phép thử và cần purge tại nơi lưu. Chưa nghiệm thu M1.
+
 ## Chạy lại
 
 Harness nhận `DETOT_TEST_OPENCLAW_ENTRY` để chọn runtime ứng viên. Các mode gồm chạy mặc định cho Gateway, Memory Core và mock continuation, `--dreaming` cho managed sweep, `--retention` cho TTL/incognito/xóa, và `--live` khi có key nhập cục bộ. Không chuyển runtime đang dùng sang ứng viên cho tới khi nghiệm thu.

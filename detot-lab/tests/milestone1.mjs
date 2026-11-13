@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { backup, DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
+import { sessionCopies } from "./runtime-candidate/session-copies.mjs";
 import { gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const lab = resolve(import.meta.dirname, "..");
@@ -287,6 +288,12 @@ async function retentionBaseline() {
   const externalRoot = await mkdtemp(resolve(tmpdir(), "detot-retention-"));
   const snapshotPath = resolve(externalRoot, "pre-delete.sqlite");
   const externalArchive = resolve(externalRoot, "pre-delete.jsonl.zst");
+  const authorityDir = resolve(scratch, "copy-authority");
+  await mkdir(authorityDir);
+  const copies = sessionCopies(authorityDir);
+  let copiedSessionId;
+  let sealedSnapshot;
+  let sealedArchive;
   const { getLoadablePath } = await import(pathToFileURL(resolve(dirname(runtime), "../sqlite-vec/index.mjs")).href);
   const vectorExtension = getLoadablePath();
   const port = await availablePort();
@@ -298,6 +305,7 @@ async function retentionBaseline() {
     // Keep only the one synthetic tool; send a tool result on test turns so the fixture replies.
   });
   const url = "http://127.0.0.1:" + port;
+  profile.env.DETOT_COPY_AUTHORITY_DIR = authorityDir;
   const launchGateway = () => {
     const child = launch(profile, ["gateway", "run"]);
     child.stdout.resume();
@@ -532,6 +540,10 @@ async function retentionBaseline() {
       finally { source.close(); }
       await writeFile(externalArchive, zstdCompressSync(Buffer.from(canary)));
       assert(databaseLeaks(snapshotPath, [canary]).length > 0, "pre-delete snapshot must contain the canary");
+      copiedSessionId = sessionId;
+      await copies.provision(sessionId);
+      sealedSnapshot = await copies.seal(sessionId, await readFile(snapshotPath));
+      sealedArchive = await copies.seal(sessionId, await readFile(externalArchive));
       await cli(profile, ["sessions", "delete", sessionKey, "--yes", "--json"]);
       const retainedMappings = mappingsForSession(sessionKey).map(item => item.id);
       const survivingResponseIds = relatedIds.filter(id => mapping(id));
@@ -566,6 +578,12 @@ async function retentionBaseline() {
       return { revokedContinuationIds: relatedIds.length, allRejectedBeforeAndAfterRestart: true, diskCanaryLeaks: 0, sqliteLeaks: 0, unrelatedControlSurvived: true };
     });
     if (results.at(-1)?.status === "PASS") {
+      await test("Gateway deletion revokes encrypted pre-delete copies", async () => {
+        const restoredReader = sessionCopies(authorityDir);
+        await assert.rejects(restoredReader.restore(copiedSessionId, sealedSnapshot), /revoked/);
+        await assert.rejects(restoredReader.restore(copiedSessionId, sealedArchive), /revoked/);
+        return { encryptedSnapshotDenied: true, encryptedArchiveDenied: true };
+      });
       await test("Pre-delete snapshot and external archive do not expose deleted content", async () => {
         const snapshotRetainsContent = databaseLeaks(snapshotPath, [canary]).length > 0;
         const archiveRetainsContent = zstdDecompressSync(await readFile(externalArchive)).includes(Buffer.from(canary));

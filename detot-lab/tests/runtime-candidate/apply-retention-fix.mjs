@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const runtime = resolve(process.argv[2] ?? "");
 assert(runtime.endsWith("openclaw.mjs"), "Pass the OpenClaw candidate entrypoint.");
@@ -33,6 +34,8 @@ export { handleOpenResponsesHttpRequest, revokeOpenResponsesForDeletedSession };
 );
 
 const deletionPath = join(packageRoot, "dist", "sessions-delete-DbGyBrAQ.mjs");
+await copyFile(fileURLToPath(new URL("./session-copies.mjs", import.meta.url)),
+  join(packageRoot, "dist", "detot-session-copies.mjs"));
 const memoryCliPath = join(packageRoot, "dist", "cli.runtime-D93HQK_k.mjs");
 await replaceExactly(memoryCliPath, "export { runMemoryForget,", "export { forgetMemoryEntries, runMemoryForget,", "Memory Core purge API");
 await replaceExactly(memoryCliPath,
@@ -159,5 +162,8 @@ const oldPurgeLine = purgeLine.replace(", storePath, assertCurrent", ", assertCu
 deletionSource = await readFile(deletionPath, "utf8");
 if (deletionSource.includes(oldPurgeLine)) await replaceExactly(deletionPath, oldPurgeLine, purgeLine, "upgrade Memory Core purge");
 await replaceExactly(deletionPath, archiveAnchor, purgeLine + archiveAnchor, "purge Memory Core before removing provenance");
+await replaceExactly(deletionPath, purgeLine,
+  '\t\t\t\t\t\tif (postCleanupEntry?.sessionId && process.env.DETOT_COPY_AUTHORITY_DIR) await (await import("./detot-session-copies.mjs")).sessionCopies(process.env.DETOT_COPY_AUTHORITY_DIR).revoke(postCleanupEntry.sessionId);\n' + purgeLine,
+  "revoke backup keys before deleting session data");
 
 console.log("Applied Detot retention patch to OpenClaw " + manifest.version + ".");
