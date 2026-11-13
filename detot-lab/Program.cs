@@ -2,6 +2,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.RateLimiting;
+using System.Collections.Concurrent;
+using System.Globalization;
 
 const string address = "http://127.0.0.1:5183";
 const string fixture = "detot_lab_fixture";
@@ -30,6 +32,8 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
+var calendarTrialEnabled = builder.Configuration.GetValue<bool>("DETOT_ENABLE_CALENDAR_TRIAL");
 app.Use(async (context, next) =>
 {
     if (context.Request.Host.Value != "127.0.0.1:5183")
@@ -59,18 +63,43 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             return Results.BadRequest(new { error = "Nhập từ 1 đến 1500 ký tự." });
 
         using var gateway = factory.CreateClient("gateway");
-        var tools = new[] { new
+        var tools = new List<object> { new
         {
             type = "function",
             name = fixture,
             description = "Trả mã kiểm thử cố định của Đệ Tốt AI lab.",
             parameters = new { type = "object", properties = new { }, additionalProperties = false }
         } };
+        var calendarRequest = calendarTrialEnabled &&
+            (message.TrimStart().StartsWith("tạo lịch ", StringComparison.OrdinalIgnoreCase)
+            || message.TrimStart().StartsWith("đặt lịch ", StringComparison.OrdinalIgnoreCase));
+        if (calendarRequest && request.RequestId is Guid existingId && trialCalendar.TryGetValue(existingId, out var existing))
+            return existing.Message == message ? CalendarReply(existing) : Results.Conflict();
+        if (calendarRequest)
+            tools.Add(new
+            {
+                type = "function", name = "detot_trial_calendar_create",
+                description = "Tạo sự kiện trong lịch thử. Chỉ gọi khi có tên, giờ bắt đầu và giờ kết thúc rõ ràng. Nếu thiếu, hỏi lại.",
+                parameters = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        title = new { type = "string" },
+                        start = new { type = "string", description = "yyyy-MM-ddTHH:mm:sszzz" },
+                        end = new { type = "string", description = "yyyy-MM-ddTHH:mm:sszzz" }
+                    },
+                    required = new[] { "title", "start", "end" },
+                    additionalProperties = false
+                }
+            });
         using var first = await CallGateway(gateway, new
         {
             model = "openclaw/default",
             input = message,
-            instructions,
+            instructions = calendarRequest
+                ? instructions + $" Lịch thử dùng UTC+07:00. Giờ hiện tại: {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):O}. Hỏi lại nếu thời gian không rõ."
+                : instructions,
             tools
         }, cancellationToken);
 
@@ -78,6 +107,29 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
         if (calls.Length == 0)
             return Reply(first.RootElement, false);
+        if (calendarRequest && calls.Length == 1 && calls[0].GetProperty("name").GetString() == "detot_trial_calendar_create")
+        {
+            if (request.RequestId is not Guid requestId || requestId == Guid.Empty)
+                return Results.BadRequest(new { error = "Thiếu mã yêu cầu tạo lịch." });
+            using var eventArguments = JsonDocument.Parse(calls[0].GetProperty("arguments").GetString() ?? "");
+            var fields = eventArguments.RootElement;
+            if (fields.ValueKind != JsonValueKind.Object ||
+                !ReadString(fields, "title", out var title) || title.Length > 120 ||
+                !ReadString(fields, "start", out var startText) ||
+                !ReadString(fields, "end", out var endText) ||
+                !DateTimeOffset.TryParseExact(startText, "yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture, DateTimeStyles.None, out var start) ||
+                !DateTimeOffset.TryParseExact(endText, "yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture, DateTimeStyles.None, out var end) ||
+                end <= start)
+                return Results.BadRequest(new { error = "Bạn cho mình tên sự kiện, giờ bắt đầu và giờ kết thúc nhé." });
+
+            var proposed = new TrialEvent(message, title, start, end);
+            if (trialCalendar.Values.Any(item => start < item.End && end > item.Start))
+                return Results.Conflict(new { error = "Khung giờ này trùng với một sự kiện trong lịch thử. Bạn chọn giờ khác nhé." });
+            var saved = trialCalendar.GetOrAdd(requestId, proposed);
+            if (saved.Message != message)
+                return Results.Conflict(new { error = "Mã yêu cầu đã được dùng cho tin nhắn khác." });
+            return CalendarReply(saved);
+        }
         if (calls.Length != 1 || calls[0].GetProperty("name").GetString() != fixture)
             return Results.Problem("Gateway đề xuất tool ngoài hợp đồng lab.", statusCode: 502);
 
@@ -138,4 +190,20 @@ static IResult Reply(JsonElement result, bool toolUsed)
         : Results.Ok(new { reply = text, toolUsed });
 }
 
-record ChatRequest(string? Message);
+static bool ReadString(JsonElement fields, string key, out string value)
+{
+    value = fields.TryGetProperty(key, out var element) && element.ValueKind == JsonValueKind.String
+        ? element.GetString()?.Trim() ?? ""
+        : "";
+    return value.Length > 0;
+}
+
+static IResult CalendarReply(TrialEvent saved) => Results.Ok(new
+{
+    reply = $"Đã tạo lịch thử «{saved.Title}» từ {saved.Start:dd/MM/yyyy HH:mm zzz} đến {saved.End:dd/MM/yyyy HH:mm zzz}.",
+    toolUsed = true,
+    calendarCreated = true
+});
+
+record ChatRequest(string? Message, Guid? RequestId);
+record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
