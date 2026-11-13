@@ -50,11 +50,23 @@ Một lần xóa phải thu hồi mapping cho **mọi** response ID thuộc sess
 
 Archive `.jsonl.deleted.*.zst` hiện là nội dung nén có thể giải nén, không phải mã hóa. Xóa bản rõ sau khi nén không phải cryptographic erasure. Thiết kế dài hạn cần mã hóa từng artifact session-owned bằng data-encryption key riêng, key bọc bằng key mã hóa do host giữ; xóa thì thu hồi key trước, sau đó dọn ciphertext và index theo vòng đời. Phải bảo đảm không có bản sao key trong backup. Archive cũ chưa được mã hóa phải giải nén, purge mọi bản sao/index có thể chỉnh sửa, checkpoint/vacuum các DB phù hợp và quét lại; nếu không thể chứng minh các bước đó, giữ lỗi xóa và không đưa dữ liệu thật vào hệ thống. Tombstone chống truy cập nhưng không chứng minh nội dung cũ đã bị xóa.
 
-Regression test đã được mở rộng để lấy mọi continuation ID của cùng session, kiểm tra trước/sau restart, giữ session đối chứng, quét nội dung file (kể cả `.zst`/`.gz`) và quét các bảng SQLite của state. Phép thử retention hiện fail-fast nếu thiếu candidate. Trong checkout ngày 13/11/2026, `npm ci --ignore-scripts --no-audit --no-fund` không khôi phục được package vì DNS tới `registry.npmjs.org` trả `ENOTFOUND`; thư mục runtime candidate dưới `detot-lab/.local` không có. Node cục bộ là `24.21.0`, khác bản `24.22.3` đã ghi nhận trước đó. Vì vậy test retention dừng ở preflight, chưa thực thi trên Gateway; không có key DeepSeek trong môi trường này.
+Regression test đã được mở rộng để lấy mọi continuation ID của cùng session, kiểm tra trước/sau restart, giữ session đối chứng, quét nội dung file (kể cả `.zst`/`.gz`) và quét các bảng SQLite của state. Harness tự tạo `.local` và fail-fast nếu thiếu candidate.
 
-Trong lần cập nhật này, `node --check` và `git diff --check` đạt; `dotnet build detot-lab/Detot.Lab.csproj` đạt 0 warning/0 error sau restore. Chưa thể kiểm thử lại toàn bộ M1 trên candidate. Cần mở rộng regression với Memory Core/vector/cache và backup đã được seeded, truy xuất trước xóa rồi purge sau xóa. Không được coi việc không tìm thấy canary trong kho chưa được seeded là bằng chứng.
+### Chạy lại candidate ngày 13/11/2026
 
-**Quyết định cổng hiện tại: FAIL / chưa nghiệm thu.** Regression test mới chưa chạy trên runtime candidate và chưa có bản vá runtime; lỗi xóa đã biết vẫn tồn tại. DeepSeek thật chưa được chạy trên candidate do thiếu key/runtime. 22 moderate đã có phương án giảm thiểu và theo dõi nhưng chưa được khắc phục hay chấp nhận rủi ro. Tiếp tục giữ dữ liệu giả; chưa chuyển Milestone 2. Chỉ mở cổng khi test xóa xuyên kho qua restart đạt trên đúng candidate, các kho memory/cache/backup được bao phủ thật, toàn bộ M1 được chạy lại, và DeepSeek candidate đạt khi có key.
+Candidate được khôi phục tại chỗ từ lockfile hiện có (361 packages, OpenClaw `2026.11.3`, commit `847611d`); không clone hay dựng lại dự án. Candidate chạy trên Node hệ thống `24.21.0`, thuộc engine range của gói nhưng khác Node `24.22.3` đã dùng trong baseline cũ. Kết quả:
+
+| Bộ kiểm thử | Kết quả | Bằng chứng |
+|---|---|---|
+| Gateway, bearer/continuation validation, Memory Core/paraphrase, mock tool continuation và Dreaming preview | 5 PASS | `detot-lab/.local/m1-vuar7f/results.json` |
+| Managed Dreaming sweep | 1 PASS; `succeeded`, durable memory unchanged | `detot-lab/.local/m1-gxMuR8/results.json` |
+| Retention | 4 PASS, 1 FAIL. Incognito, TTL/restart và session đối chứng đạt; xóa còn 1 mapping, một continuation vẫn HTTP 200 trước/sau restart. Canary còn trong archive `.zst`, SQLite và WAL. | `detot-lab/.local/m1-1AlONW/results.json` và state fixture |
+| `npm audit --omit=dev` trên lockfile candidate | 22 moderate, 0 high/critical; 22 package findings thuộc 2 advisory nguồn trực tiếp (`glob`, `minimatch`) và các đường phụ thuộc. Tự động hạ OpenClaw xuống `2026.4.29` (major downgrade). | `detot-lab/.local/candidate-audit.json` |
+| DeepSeek thật trên candidate | BLOCKED; chưa có key trong tiến trình thử | Kết quả `BLOCKED` trong mock suite |
+
+Trong lần cập nhật này, `node --check`, `git diff --check` đạt; `dotnet build detot-lab/Detot.Lab.csproj` đạt 0 warning/0 error. Cần mở rộng regression với Memory Core/vector/cache và backup đã được seeded, truy xuất trước xóa rồi purge sau xóa. Không được coi việc không tìm thấy canary trong kho chưa được seeded là bằng chứng.
+
+**Quyết định cổng hiện tại: FAIL / chưa nghiệm thu.** Môi trường candidate đã phục hồi và retention test thực thi; lỗi xóa vẫn tái hiện trên candidate, kể cả sau restart. DeepSeek thật chưa chạy vì không có key. 22 moderate có phương án giảm thiểu và theo dõi nhưng chưa được vá hay chấp nhận rủi ro. Tiếp tục giữ dữ liệu giả; chưa chuyển Milestone 2. Chỉ mở cổng khi test xóa xuyên kho qua restart đạt trên đúng candidate, các kho memory/cache/backup được bao phủ thật, toàn bộ M1 được chạy lại trên Node ghim, và DeepSeek candidate đạt khi có key.
 
 ## Chạy lại
 

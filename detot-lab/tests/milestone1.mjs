@@ -15,7 +15,9 @@ const runtime = process.env.DETOT_TEST_OPENCLAW_ENTRY
   : resolve(lab, ".local/openclaw-registry/node_modules/openclaw/openclaw.mjs");
 try { await access(runtime); }
 catch { throw new Error("OpenClaw candidate runtime is missing: " + runtime + ". Install the locked candidate before running this suite."); }
-const scratch = await mkdtemp(resolve(lab, ".local/m1-"));
+const localData = resolve(lab, ".local");
+await mkdir(localData, { recursive: true });
+const scratch = await mkdtemp(resolve(localData, "m1-"));
 const base = JSON.parse(await readFile(resolve(lab, "gateway.lab.json"), "utf8"));
 const token = randomBytes(32).toString("hex");
 const live = process.argv.includes("--live");
