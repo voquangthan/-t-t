@@ -1,6 +1,21 @@
+param([switch]$ConfigureDeepSeek)
+
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
+$credentialPath = Join-Path $root '.local/deepseek-key.dpapi'
+if ($ConfigureDeepSeek) {
+    $secret = Read-Host 'Nhập DeepSeek API key (ẩn)' -AsSecureString
+    try {
+        if (!$secret.Length) { throw 'Bạn chưa nhập khóa DeepSeek.' }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $credentialPath) -Force | Out-Null
+        $secret | ConvertFrom-SecureString | Set-Content -LiteralPath $credentialPath -Encoding ASCII
+        Write-Host 'Đã lưu khóa DeepSeek cho tài khoản Windows hiện tại.'
+    } finally {
+        $secret.Dispose()
+    }
+    return
+}
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $node = Join-Path $root ".local/node-v24.22.3-win-$arch/node.exe"
 $dotnet = Join-Path $root '.local/dotnet/dotnet.exe'
@@ -40,7 +55,17 @@ if ($LASTEXITCODE -ne 0) { throw 'Backend build failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
 
 # The process-local credentials are only passed to the children that need them.
-$key = Read-Host 'DeepSeek API key (hidden, this session only)' -AsSecureString
+$key = if (Test-Path -LiteralPath $credentialPath -PathType Leaf) {
+    try {
+        Get-Content -LiteralPath $credentialPath -Raw | ForEach-Object { ConvertTo-SecureString -String $_.Trim() }
+    } catch {
+        throw 'Không đọc được khóa đã lưu. Chạy Start-Lab.ps1 -ConfigureDeepSeek để lưu lại khóa.'
+    }
+} elseif (![string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY)) {
+    ConvertTo-SecureString -String $env:DEEPSEEK_API_KEY -AsPlainText -Force
+} else {
+    Read-Host 'DeepSeek API key (hidden, this session only)' -AsSecureString
+}
 if (!$key.Length) { throw 'A DeepSeek key is required.' }
 $bytes = New-Object byte[] 32
 $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
