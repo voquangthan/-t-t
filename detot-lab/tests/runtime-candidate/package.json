@@ -1,0 +1,13 @@
+{
+  "name": "detot-runtime-candidate",
+  "private": true,
+  "dependencies": {
+    "openclaw": "2026.11.3"
+  },
+  "overrides": {
+    "openclaw": {
+      "zod": "4.6.7",
+      "npm": "12.2.2"
+    }
+  }
+}
