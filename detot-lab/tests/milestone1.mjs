@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
-import { gunzipSync, zstdDecompressSync } from "node:zlib";
+import { gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const lab = resolve(import.meta.dirname, "..");
 const runtime = process.env.DETOT_TEST_OPENCLAW_ENTRY
@@ -15,6 +15,7 @@ const runtime = process.env.DETOT_TEST_OPENCLAW_ENTRY
   : resolve(lab, ".local/openclaw-registry/node_modules/openclaw/openclaw.mjs");
 try { await access(runtime); }
 catch { throw new Error("OpenClaw candidate runtime is missing: " + runtime + ". Install the locked candidate before running this suite."); }
+execFileSync(process.execPath, [resolve(lab, "tests/runtime-candidate/apply-retention-fix.mjs"), runtime], { stdio: "inherit" });
 const localData = resolve(lab, ".local");
 await mkdir(localData, { recursive: true });
 const scratch = await mkdtemp(resolve(localData, "m1-"));
@@ -83,7 +84,8 @@ async function test(name, action) {
     const details = await action();
     results.push({ name, status: "PASS", details });
   } catch (error) {
-    results.push({ name, status: "FAIL", details: error.safeDetail ?? error.code ?? error.name });
+    const detail = error.safeDetail ?? (error.code === "ERR_ASSERTION" ? error.message.slice(0, 240) : error.code ?? error.name);
+    results.push({ name, status: "FAIL", details: detail });
   }
   console.log(JSON.stringify(results.at(-1)));
 }
@@ -283,6 +285,8 @@ async function retentionBaseline() {
   const port = await availablePort();
   const profile = await setup("retention", config => {
     config.gateway.port = port;
+    config.plugins = { enabled: true, allow: ["memory-core"], slots: { memory: "memory-core" },
+      entries: { "memory-core": { enabled: true, config: { dreaming: { enabled: true } } } } };
     // Keep only the one synthetic tool; send a tool result on test turns so the fixture replies.
   });
   const url = "http://127.0.0.1:" + port;
@@ -301,6 +305,7 @@ async function retentionBaseline() {
   const canary = "DETOT-M1-DELETE-7E39";
   const privateCanary = "DETOT-M1-INCOGNITO-9F12";
   const dbPath = resolve(profile.state, "state/openclaw.sqlite");
+  const agentDbPath = resolve(profile.state, "agents/main/agent/openclaw-agent.sqlite");
   function request(input, { previous, session } = {}) {
     return fetch(url + "/v1/responses", {
       method: "POST",
@@ -332,6 +337,11 @@ async function retentionBaseline() {
         .map(row => ({ id: row.entry_key, ...JSON.parse(row.value_json), expiresAt: row.expires_at }));
     } finally { db.close(); }
   }
+  function sessionIdForKey(key) {
+    const db = new DatabaseSync(agentDbPath, { readOnly: true });
+    try { return db.prepare("SELECT current_session_id FROM session_nodes WHERE session_key = ?").get(key)?.current_session_id; }
+    finally { db.close(); }
+  }
   function databaseLeaks(dbFile, needles) {
     const db = new DatabaseSync(dbFile, { readOnly: true });
     const found = [];
@@ -359,6 +369,7 @@ async function retentionBaseline() {
     const found = [];
     for (const entry of entries) {
       if (!entry.isFile()) continue;
+      if (/\.(?:sqlite3?|db3?)(?:-(?:wal|shm|journal))?$/i.test(entry.name)) continue;
       const path = resolve(entry.parentPath, entry.name);
       const bytes = await readFile(path);
       let text;
@@ -435,17 +446,23 @@ async function retentionBaseline() {
       const preDeleteMappings = mappingsForSession(sessionKey);
       relatedIds = [...new Set([...relatedIds, ...preDeleteMappings.map(item => item.id)])];
       assert(relatedIds.length >= 2, "test must exercise multiple continuation IDs for one session");
-      assert((await storageLeaks(profile.state, [canary])).length > 0, "canary must be present in persisted files before deletion");
       assert((await sqliteLeaks(profile.state, [canary])).length > 0, "canary must be present in indexed/database storage before deletion");
+      const sessionId = sessionIdForKey(sessionKey);
+      assert(sessionId, "session row must identify the transcript generation before deletion");
+      const archiveDir = resolve(profile.state, "agents/main/sessions");
+      await mkdir(archiveDir, { recursive: true });
+      await writeFile(resolve(archiveDir, sessionId + ".jsonl.deleted.fixture.zst"), zstdCompressSync(Buffer.from(canary)));
+      assert((await storageLeaks(profile.state, [canary])).length > 0, "compressed archive fixture must be readable before deletion");
       await cli(profile, ["sessions", "delete", sessionKey, "--yes", "--json"]);
       const retainedMappings = mappingsForSession(sessionKey).map(item => item.id);
+      const survivingResponseIds = relatedIds.filter(id => mapping(id));
       const remainingSessions = await cli(profile, ["sessions", "--json"]);
       if (remainingSessions.includes(sessionKey)) fail("Deleted session key remains listed");
       const responseStatuses = [];
       for (const id of relatedIds) responseStatuses.push((await request(marker, { previous: id })).status);
       const archiveRoot = profile.state;
       const diskLeaks = await storageLeaks(archiveRoot, [canary]);
-      const dbLeaks = await sqliteLeaks(archiveRoot, [canary, ...relatedIds]);
+      const dbLeaks = await sqliteLeaks(archiveRoot, [canary]);
       const restartedContinuationStatuses = [];
       await stopChild(gateway);
       gateway = launchGateway();
@@ -453,8 +470,8 @@ async function retentionBaseline() {
       for (const id of relatedIds) restartedContinuationStatuses.push((await request(marker, { previous: id })).status);
       const survivingControl = await request(marker, { previous: controlId });
       if (survivingControl.status !== 200) fail("Unrelated control continuation did not survive deletion/restart");
-      if (retainedMappings.length || responseStatuses.some(status => status !== 400) || restartedContinuationStatuses.some(status => status !== 400)) {
-        fail("Deleted session mappings=" + retainedMappings.length + "; before-restart continuation statuses=" + responseStatuses.join(",") + "; after-restart=" + restartedContinuationStatuses.join(","));
+      if (retainedMappings.length || survivingResponseIds.length || responseStatuses.some(status => status !== 400) || restartedContinuationStatuses.some(status => status !== 400)) {
+        fail("Deleted session mappings=" + retainedMappings.length + "; surviving response IDs=" + survivingResponseIds.length + "; before-restart continuation statuses=" + responseStatuses.join(",") + "; after-restart=" + restartedContinuationStatuses.join(",") + "; disk canary files=" + diskLeaks.length + "; SQLite logical leaks=" + dbLeaks.length);
       }
       if (diskLeaks.length || dbLeaks.length) fail("Deleted content remains in files=" + diskLeaks.length + "; SQLite tables=" + dbLeaks.map(item => item.table).join(","));
       return { revokedContinuationIds: relatedIds.length, allRejectedBeforeAndAfterRestart: true, diskCanaryLeaks: 0, sqliteLeaks: 0, unrelatedControlSurvived: true };

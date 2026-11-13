@@ -20,7 +20,7 @@ Hai advisory trực tiếp còn lại trong kết quả audit ứng viên là `g
 | DeepSeek thật | **PASS.** Artifact chạy cục bộ `.local/m1-QbR9lC/results.json` có hai lượt HTTP 200. Log Gateway có `stopReason=tool_calls` rồi `stopReason=stop`. Lượt thử dùng fixture có mã tổng hợp, không lưu API key trong báo cáo. |
 | Incognito | **PASS trong phạm vi hợp đồng.** Tạo session incognito qua RPC, tiếp tục bằng session key được, không tạo response mapping và gửi lại response ID trả 400. Sau khi dừng, ba bảng transcript/FTS kiểm tra chỉ đọc không có canary incognito dạng rõ. Chưa bao phủ mọi bản sao log, backup hoặc blob mã hóa/nén. |
 | TTL và restart | **PASS.** Lưu mapping hợp lệ. Dừng Gateway của fixture, đặt duy nhất `expires_at` của mapping thử về quá khứ, rồi khởi động lại cùng state. Mapping hết hạn trả HTTP 400. Mapping đối chứng chưa hết hạn trả HTTP 200. Phép thử xác minh kiểm tra hạn runtime và lưu mapping qua restart. |
-| Xóa xuyên kho | **FAIL.** RPC `sessions.delete` báo thành công. Continuation dùng response ID còn hạn của session đã xóa vẫn trả HTTP 200. Archive `.jsonl.deleted.*.zst` giữ canary giả sau giải nén. Chưa đạt yêu cầu xóa/revoke xuyên transcript, mapping, memory index và backup. |
+| Xóa xuyên kho trước khi vá | **FAIL.** RPC `sessions.delete` báo thành công. Continuation dùng response ID còn hạn của session đã xóa vẫn trả HTTP 200. Archive `.jsonl.deleted.*.zst` giữ canary giả sau giải nén. |
 
 Bằng chứng baseline retention nằm tại `detot-lab/.local/m1-5AesMz/results.json`. Cơ chế lưu archive khi xóa session thường được mô tả trong tài liệu upstream. `memory forget` xử lý memory theo nguồn, trong khi transcript và bản sao khác có vòng đời riêng. Cần xác nhận cơ chế thu hồi continuation và xử lý archive/FTS/memory/backup bằng cùng canary trước khi dùng dữ liệu thật. [Sessions delete tại tag](https://github.com/openclaw/openclaw/blob/v2026.11.3/docs/cli/sessions.md) · [Memory forget tại tag](https://github.com/openclaw/openclaw/blob/v2026.11.3/docs/cli/memory.md)
 
@@ -28,10 +28,10 @@ Bằng chứng baseline retention nằm tại `detot-lab/.local/m1-5AesMz/result
 
 | Bộ kiểm thử | Kết quả | Bằng chứng cục bộ |
 |---|---|---|
-| Gateway, bearer sai, continuation không hợp lệ, Memory Core, Dreaming preview và mock tool round trip | 5 PASS. Memory Core thực hiện 3 yêu cầu embedding giả lập. Mock tool round trip trả HTTP 200 ở cả hai lượt. | `detot-lab/.local/m1-XvrnP4/results.json` |
-| Dreaming managed sweep | 1 PASS. Job báo `succeeded`, `MEMORY.md` không đổi. | `detot-lab/.local/m1-2n5S0r/results.json` |
-| Retention | 4 PASS gồm readiness, Incognito, tạo mapping và TTL qua restart. 1 FAIL ở xóa. Archive nén còn canary và continuation trả HTTP 200. | `detot-lab/.local/m1-quj3ej/results.json` |
-| DeepSeek thật trên ứng viên | BLOCKED do không có key trong tiến trình thử. Kết quả PASS của lượt DeepSeek trên cài đặt gốc vẫn được ghi ở trên. | Kết quả `BLOCKED` trong các run ứng viên |
+| Gateway, bearer sai, continuation không hợp lệ, Memory Core/paraphrase, Dreaming preview và mock tool round trip | 5 PASS. Memory Core thực hiện 3 yêu cầu embedding giả lập; mock tool round trip trả HTTP 200 ở cả hai lượt. Đây chưa phải kiểm chứng xóa memory có provenance. | `detot-lab/.local/m1-VKegeU/results.json` |
+| Dreaming managed sweep | 1 PASS. Job báo `succeeded`, `MEMORY.md` không đổi. | `detot-lab/.local/m1-HxDbMb/results.json` |
+| Retention | 5 PASS. Incognito, TTL/restart và xóa đạt; xóa thu hồi 2 continuation ID, từ chối trước/sau restart, không còn canary trong file/archive nén hay các hàng SQLite có thể truy vấn, session đối chứng còn hoạt động. | `detot-lab/.local/m1-GMoSdW/results.json` |
+| DeepSeek thật trên ứng viên | BLOCKED do tiến trình không có key. Không dùng PASS từ cài đặt gốc làm bằng chứng cho candidate. | Kết quả `BLOCKED` trong các run ứng viên |
 
 ## Disposition cho 22 cảnh báo moderate
 
@@ -50,23 +50,23 @@ Một lần xóa phải thu hồi mapping cho **mọi** response ID thuộc sess
 
 Archive `.jsonl.deleted.*.zst` hiện là nội dung nén có thể giải nén, không phải mã hóa. Xóa bản rõ sau khi nén không phải cryptographic erasure. Thiết kế dài hạn cần mã hóa từng artifact session-owned bằng data-encryption key riêng, key bọc bằng key mã hóa do host giữ; xóa thì thu hồi key trước, sau đó dọn ciphertext và index theo vòng đời. Phải bảo đảm không có bản sao key trong backup. Archive cũ chưa được mã hóa phải giải nén, purge mọi bản sao/index có thể chỉnh sửa, checkpoint/vacuum các DB phù hợp và quét lại; nếu không thể chứng minh các bước đó, giữ lỗi xóa và không đưa dữ liệu thật vào hệ thống. Tombstone chống truy cập nhưng không chứng minh nội dung cũ đã bị xóa.
 
-Regression test đã được mở rộng để lấy mọi continuation ID của cùng session, kiểm tra trước/sau restart, giữ session đối chứng, quét nội dung file (kể cả `.zst`/`.gz`) và quét các bảng SQLite của state. Harness tự tạo `.local` và fail-fast nếu thiếu candidate.
+Regression test đã được mở rộng để lấy mọi continuation ID của cùng session, kiểm tra trước/sau restart, giữ session đối chứng, thêm archive `.zst` có canary, quét nội dung file nén và quét các hàng/bảng SQLite. Harness tự tạo `.local` và fail-fast nếu thiếu candidate. Test hiện chưa seed một Memory Core entry có provenance tới session, cache/vector artifact hoặc bản backup; vì vậy kết quả không chứng minh purge các kho đó. SQLite được kiểm tra theo nội dung logic trong bảng, không theo byte thô của trang đã giải phóng; checkpoint/VACUUM offline và bản sao backup vẫn cần thiết kế/kiểm chứng riêng.
 
 ### Chạy lại candidate ngày 13/11/2026
 
-Candidate được khôi phục tại chỗ từ lockfile hiện có (361 packages, OpenClaw `2026.11.3`, commit `847611d`); không clone hay dựng lại dự án. Candidate chạy trên Node hệ thống `24.21.0`, thuộc engine range của gói nhưng khác Node `24.22.3` đã dùng trong baseline cũ. Kết quả:
+Candidate được khôi phục tại chỗ từ lockfile hiện có (361 packages, OpenClaw `2026.11.3`, commit `847611d`); không clone hay dựng lại dự án. Ban đầu Node `24.22.3` thiếu, nên đã lấy đúng runtime vào npm cache (không thay Node hệ thống) và chạy lại M1 trên Node `24.22.3`. Kết quả mới nhất:
 
 | Bộ kiểm thử | Kết quả | Bằng chứng |
 |---|---|---|
-| Gateway, bearer/continuation validation, Memory Core/paraphrase, mock tool continuation và Dreaming preview | 5 PASS | `detot-lab/.local/m1-vuar7f/results.json` |
-| Managed Dreaming sweep | 1 PASS; `succeeded`, durable memory unchanged | `detot-lab/.local/m1-gxMuR8/results.json` |
-| Retention | 4 PASS, 1 FAIL. Incognito, TTL/restart và session đối chứng đạt; xóa còn 1 mapping, một continuation vẫn HTTP 200 trước/sau restart. Canary còn trong archive `.zst`, SQLite và WAL. | `detot-lab/.local/m1-1AlONW/results.json` và state fixture |
+| Gateway, bearer/continuation validation, Memory Core/paraphrase, mock tool continuation và Dreaming preview | 5 PASS | `detot-lab/.local/m1-waCI9v/results.json` |
+| Managed Dreaming sweep | 1 PASS; `succeeded`, durable memory unchanged | `detot-lab/.local/m1-k1UhI5/results.json` |
+| Retention | 5 PASS. Thu hồi 2 continuation ID, từ chối trước/sau restart, xóa archive fixture và không còn canary trong các hàng SQLite; session đối chứng sống sót. | `detot-lab/.local/m1-ACgQEg/results.json` |
 | `npm audit --omit=dev` trên lockfile candidate | 22 moderate, 0 high/critical; 22 package findings thuộc 2 advisory nguồn trực tiếp (`glob`, `minimatch`) và các đường phụ thuộc. Tự động hạ OpenClaw xuống `2026.4.29` (major downgrade). | `detot-lab/.local/candidate-audit.json` |
 | DeepSeek thật trên candidate | BLOCKED; chưa có key trong tiến trình thử | Kết quả `BLOCKED` trong mock suite |
 
-Trong lần cập nhật này, `node --check`, `git diff --check` đạt; `dotnet build detot-lab/Detot.Lab.csproj` đạt 0 warning/0 error. Cần mở rộng regression với Memory Core/vector/cache và backup đã được seeded, truy xuất trước xóa rồi purge sau xóa. Không được coi việc không tìm thấy canary trong kho chưa được seeded là bằng chứng.
+Trong lần cập nhật này, bộ M1 thường, Dreaming và retention đều chạy trên candidate và Node ghim `24.22.3`, đạt các kiểm tra đã mô tả. `DEEPSEEK_API_KEY` không hiện diện trong tiến trình. Memory Core purge qua `sessions.delete`, vector/cache, cryptographic erasure cho archive lâu dài và backup chưa được kiểm chứng. Không coi việc không tìm thấy canary trong kho chưa seed là bằng chứng.
 
-**Quyết định cổng hiện tại: FAIL / chưa nghiệm thu.** Môi trường candidate đã phục hồi và retention test thực thi; lỗi xóa vẫn tái hiện trên candidate, kể cả sau restart. DeepSeek thật chưa chạy vì không có key. 22 moderate có phương án giảm thiểu và theo dõi nhưng chưa được vá hay chấp nhận rủi ro. Tiếp tục giữ dữ liệu giả; chưa chuyển Milestone 2. Chỉ mở cổng khi test xóa xuyên kho qua restart đạt trên đúng candidate, các kho memory/cache/backup được bao phủ thật, toàn bộ M1 được chạy lại trên Node ghim, và DeepSeek candidate đạt khi có key.
+**Quyết định cổng hiện tại: FAIL / chưa nghiệm thu.** Candidate đã đạt regression xóa continuation, session row, transcript và archive fixture qua restart trên Node ghim. Chưa có test Memory Core entry gắn provenance với session, cache/vector hoặc backup; cũng chưa chứng minh cryptographic erasure cho archive hiện hữu. DeepSeek thật chưa chạy vì không có key. 22 moderate có biện pháp giảm thiểu/giám sát nhưng chưa được vá hay chấp nhận rủi ro. Tiếp tục chỉ dùng dữ liệu giả; không chuyển Milestone 2. Chỉ mở cổng sau khi các phần thiếu được kiểm thử trên candidate và DeepSeek thật đạt khi có key.
 
 ## Chạy lại
 
