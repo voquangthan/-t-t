@@ -36,7 +36,7 @@ function Code({ className, children }: React.ComponentProps<"code">) {
 }
 
 function App() {
-  const [calendar, setCalendar] = useState(false);
+  const [calendar, setCalendar] = useState(() => new URLSearchParams(location.search).has("calendar"));
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string | undefined>(() => {
     try { return sessionStorage.getItem("detot.active-conversation") ?? undefined; }
@@ -148,10 +148,10 @@ function App() {
           </div></details>
         </div>)}
       </nav>
-      <div className="sidebar-footer"><button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setSide(false); }}>Lịch thử</button>{" "}<button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button></div>
+      <div className="sidebar-footer"><button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setSide(false); }}>Lịch</button>{" "}<button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button></div>
     </aside>
     <main>
-      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{calendar ? "Lịch thử" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles /></header>
+      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles /></header>
       {calendar ? <Calendar /> : <>
       <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
         {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}

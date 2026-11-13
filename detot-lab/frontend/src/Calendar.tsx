@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { GoogleCalendar } from "./GoogleCalendar";
 
 type Event = { id: string; title: string; start: string; end: string };
 const formatter = new Intl.DateTimeFormat("sv-SE", {
@@ -7,6 +8,15 @@ const formatter = new Intl.DateTimeFormat("sv-SE", {
 const localInput = (value: string) => formatter.format(new Date(value)).replace(" ", "T");
 
 export function Calendar() {
+  const [google, setGoogle] = useState(true);
+  return <>
+    <div><button aria-pressed={google} onClick={() => setGoogle(true)}>Google Calendar</button>{" "}
+      <button aria-pressed={!google} onClick={() => setGoogle(false)}>Lịch thử</button></div>
+    {google ? <GoogleCalendar /> : <TrialCalendar />}
+  </>;
+}
+
+function TrialCalendar() {
   const [events, setEvents] = useState<Event[]>([]);
   const [enabled, setEnabled] = useState<boolean>();
   const [editing, setEditing] = useState<Event>();
