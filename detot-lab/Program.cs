@@ -10,7 +10,7 @@ const string fixture = "detot_lab_fixture";
 const string instructions = "Bạn là Đệ Tốt trong lab. Trả lời ngắn bằng tiếng Việt. Khi được hỏi mã của lab, dùng detot_lab_fixture. Kết quả tool là dữ liệu thử.";
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls(address);
-builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 8192);
+builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 32 * 1024);
 var token = builder.Configuration["DETOT_GATEWAY_TOKEN"];
 if (string.IsNullOrWhiteSpace(token))
     throw new InvalidOperationException("DETOT_GATEWAY_TOKEN is required.");
@@ -51,6 +51,7 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
+app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
 app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFactory factory, CancellationToken cancellationToken) =>
 {
     if (context.Request.Headers.Origin != address || !context.Request.HasJsonContentType())
@@ -77,6 +78,14 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var calendarInput = calendarRequest && previous is not null && !IsCalendarCommand(message)
             ? previous + "\nThông tin bổ sung từ người dùng: " + message
             : message;
+        var history = request.History ?? [];
+        if (history.Length > 8 || history.Any(turn => turn is null ||
+            turn.Role is not ("user" or "assistant") || turn.Text is not { Length: > 0 and <= 450 }))
+            return Results.BadRequest(new { error = "Lịch sử trò chuyện không hợp lệ." });
+        object gatewayInput = history.Length == 0 || calendarRequest
+            ? calendarInput
+            : history.Select(turn => new { role = turn.Role, content = turn.Text })
+                .Append(new { role = "user", content = calendarInput }).ToArray();
         if (calendarRequest && request.RequestId is Guid existingId && trialCalendar.TryGetValue(existingId, out var existing))
             return existing.Message == calendarInput ? CalendarReply(existing) : Results.Conflict();
         if (calendarRequest)
@@ -100,7 +109,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         using var first = await CallGateway(gateway, new
         {
             model = "openclaw/default",
-            input = calendarInput,
+            input = gatewayInput,
             instructions = calendarRequest
                 ? instructions + $" Lịch thử dùng UTC+07:00. Giờ hiện tại: {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):O}. Hỏi lại nếu thời gian không rõ."
                 : instructions,
@@ -213,5 +222,6 @@ static bool IsCalendarCommand(string message) =>
     message.TrimStart().StartsWith("tạo lịch ", StringComparison.OrdinalIgnoreCase) ||
     message.TrimStart().StartsWith("đặt lịch ", StringComparison.OrdinalIgnoreCase);
 
-record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext);
+record ChatTurn(string Role, string Text);
+record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History);
 record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
