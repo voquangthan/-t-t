@@ -70,11 +70,15 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             description = "Trả mã kiểm thử cố định của Đệ Tốt AI lab.",
             parameters = new { type = "object", properties = new { }, additionalProperties = false }
         } };
-        var calendarRequest = calendarTrialEnabled &&
-            (message.TrimStart().StartsWith("tạo lịch ", StringComparison.OrdinalIgnoreCase)
-            || message.TrimStart().StartsWith("đặt lịch ", StringComparison.OrdinalIgnoreCase));
+        var previous = request.CalendarContext;
+        if (previous is { Length: > 1500 } || (previous is not null && !IsCalendarCommand(previous)))
+            return Results.BadRequest(new { error = "Ngữ cảnh tạo lịch không hợp lệ." });
+        var calendarRequest = calendarTrialEnabled && (IsCalendarCommand(message) || previous is not null);
+        var calendarInput = calendarRequest && previous is not null && !IsCalendarCommand(message)
+            ? previous + "\nThông tin bổ sung từ người dùng: " + message
+            : message;
         if (calendarRequest && request.RequestId is Guid existingId && trialCalendar.TryGetValue(existingId, out var existing))
-            return existing.Message == message ? CalendarReply(existing) : Results.Conflict();
+            return existing.Message == calendarInput ? CalendarReply(existing) : Results.Conflict();
         if (calendarRequest)
             tools.Add(new
             {
@@ -96,7 +100,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         using var first = await CallGateway(gateway, new
         {
             model = "openclaw/default",
-            input = message,
+            input = calendarInput,
             instructions = calendarRequest
                 ? instructions + $" Lịch thử dùng UTC+07:00. Giờ hiện tại: {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):O}. Hỏi lại nếu thời gian không rõ."
                 : instructions,
@@ -106,7 +110,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var calls = first.RootElement.GetProperty("output").EnumerateArray()
             .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
         if (calls.Length == 0)
-            return Reply(first.RootElement, false);
+            return Reply(first.RootElement, false, calendarRequest ? calendarInput : null);
         if (calendarRequest && calls.Length == 1 && calls[0].GetProperty("name").GetString() == "detot_trial_calendar_create")
         {
             if (request.RequestId is not Guid requestId || requestId == Guid.Empty)
@@ -122,11 +126,11 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 end <= start)
                 return Results.BadRequest(new { error = "Bạn cho mình tên sự kiện, giờ bắt đầu và giờ kết thúc nhé." });
 
-            var proposed = new TrialEvent(message, title, start, end);
+            var proposed = new TrialEvent(calendarInput, title, start, end);
             if (trialCalendar.Values.Any(item => start < item.End && end > item.Start))
                 return Results.Conflict(new { error = "Khung giờ này trùng với một sự kiện trong lịch thử. Bạn chọn giờ khác nhé." });
             var saved = trialCalendar.GetOrAdd(requestId, proposed);
-            if (saved.Message != message)
+            if (saved.Message != calendarInput)
                 return Results.Conflict(new { error = "Mã yêu cầu đã được dùng cho tin nhắn khác." });
             return CalendarReply(saved);
         }
@@ -178,7 +182,7 @@ static async Task<JsonDocument> CallGateway(HttpClient client, object body, Canc
     return await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
 }
 
-static IResult Reply(JsonElement result, bool toolUsed)
+static IResult Reply(JsonElement result, bool toolUsed, string? calendarContext = null)
 {
     var text = string.Join("\n", result.GetProperty("output").EnumerateArray()
         .Where(item => item.GetProperty("type").GetString() == "message")
@@ -187,7 +191,7 @@ static IResult Reply(JsonElement result, bool toolUsed)
         .Select(part => part.GetProperty("text").GetString()));
     return string.IsNullOrWhiteSpace(text)
         ? Results.Problem("Gateway không có câu trả lời văn bản.", statusCode: 502)
-        : Results.Ok(new { reply = text, toolUsed });
+        : Results.Ok(new { reply = text, toolUsed, calendarContext = calendarContext is { Length: <= 1500 } ? calendarContext : null });
 }
 
 static bool ReadString(JsonElement fields, string key, out string value)
@@ -205,5 +209,9 @@ static IResult CalendarReply(TrialEvent saved) => Results.Ok(new
     calendarCreated = true
 });
 
-record ChatRequest(string? Message, Guid? RequestId);
+static bool IsCalendarCommand(string message) =>
+    message.TrimStart().StartsWith("tạo lịch ", StringComparison.OrdinalIgnoreCase) ||
+    message.TrimStart().StartsWith("đặt lịch ", StringComparison.OrdinalIgnoreCase);
+
+record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext);
 record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
