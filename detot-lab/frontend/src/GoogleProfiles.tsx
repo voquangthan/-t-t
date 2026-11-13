@@ -61,7 +61,14 @@ export function GoogleProfiles() {
     url.searchParams.delete("google");
     history.replaceState(history.state, "", url);
     dialog.current?.showModal();
-    void run(load, outcome === "connected" ? "Đã kết nối Gmail." : "Google chưa cấp đủ quyền Gmail.");
+    const messages: Record<string, string> = {
+      connected: "Đã kết nối Gmail.",
+      denied: "Luồng cấp quyền đã bị hủy hoặc Google đã từ chối.",
+      gmail_scope_missing: "Google chưa cấp quyền đọc Gmail. Kết nối lại và chọn quyền đọc thư trên màn hình Google.",
+      unexpected_scope: "Google trả thêm quyền ngoài phạm vi Gmail chỉ đọc. Đệ Tốt chưa lưu kết nối.",
+      refresh_missing: "Google không trả mã duy trì kết nối. Hãy thử cấp quyền lại.",
+    };
+    void run(load, messages[outcome] ?? "Chưa hoàn tất kết nối Gmail.");
   }, []);
 
   function search(event: FormEvent<HTMLFormElement>) {

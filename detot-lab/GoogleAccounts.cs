@@ -105,9 +105,12 @@ static class GoogleAccounts
             }, ctx.RequestAborted);
             var token = tokens.RootElement;
             var scope = Required(token, "scope");
-            if (!IsReadOnlyGrant(scope) ||
-                !token.TryGetProperty("refresh_token", out var refresh) || string.IsNullOrWhiteSpace(refresh.GetString()))
-                return Results.Redirect("/app/index.html?google=denied");
+            if (!scope.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(GmailScope, StringComparer.Ordinal))
+                return Results.Redirect("/app/index.html?google=gmail_scope_missing");
+            if (!IsReadOnlyGrant(scope))
+                return Results.Redirect("/app/index.html?google=unexpected_scope");
+            if (!token.TryGetProperty("refresh_token", out var refresh) || string.IsNullOrWhiteSpace(refresh.GetString()))
+                return Results.Redirect("/app/index.html?google=refresh_missing");
             using var identity = await GoogleGet(http, "https://openidconnect.googleapis.com/v1/userinfo",
                 Required(token, "access_token"), ctx.RequestAborted);
             if (!identity.RootElement.GetProperty("email_verified").GetBoolean()) return Results.BadRequest();
