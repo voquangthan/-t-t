@@ -169,6 +169,27 @@ static class GoogleAccounts
             return Results.Ok(results);
         }));
 
+        group.MapGet("/accounts/{id}/messages/{messageId}/preview",
+            (string id, string messageId, HttpContext ctx, IHttpClientFactory factory) => Run(ctx, async () =>
+        {
+            if (messageId.Length is < 1 or > 128 || !messageId.All(char.IsAsciiLetterOrDigit))
+                return Results.BadRequest();
+            var account = Read().Find(item => item.Id == id);
+            if (account is null) return Results.NotFound();
+            if (!IsReadOnlyGrant(account.Scope)) return Results.StatusCode(403);
+            using var http = factory.CreateClient("google");
+            using var token = await Token(http, new()
+            {
+                ["grant_type"] = "refresh_token", ["refresh_token"] = account.RefreshToken
+            }, ctx.RequestAborted);
+            if (token.RootElement.TryGetProperty("scope", out var scope) && !IsReadOnlyGrant(scope.GetString()))
+                return Results.StatusCode(403);
+            using var mail = await GoogleGet(http, $"https://gmail.googleapis.com/gmail/v1/users/me/messages/{messageId}?format=full&fields=snippet",
+                Required(token.RootElement, "access_token"), ctx.RequestAborted);
+            var preview = mail.RootElement.TryGetProperty("snippet", out var snippet) ? snippet.GetString() ?? "" : "";
+            return Results.Ok(new { preview = preview[..Math.Min(600, preview.Length)] });
+        }));
+
         async Task<JsonDocument> Token(HttpClient http, Dictionary<string, string> values, CancellationToken ct)
         {
             values["client_id"] = clientId!;
