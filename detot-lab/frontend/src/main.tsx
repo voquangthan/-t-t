@@ -38,7 +38,10 @@ function Code({ className, children }: React.ComponentProps<"code">) {
 function App() {
   const [calendar, setCalendar] = useState(false);
   const [items, setItems] = useState(readHistory);
-  const [active, setActive] = useState<string>();
+  const [active, setActive] = useState<string | undefined>(() => {
+    try { return sessionStorage.getItem("detot.active-conversation") ?? undefined; }
+    catch { return undefined; }
+  });
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [side, setSide] = useState(false);
@@ -50,6 +53,13 @@ function App() {
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const conversation = items.find(item => item.id === active);
+  const visibleItems = visibleConversations(items, query);
+  useEffect(() => {
+    try {
+      if (conversation) sessionStorage.setItem("detot.active-conversation", conversation.id);
+      else sessionStorage.removeItem("detot.active-conversation");
+    } catch { /* The current conversation remains usable without browser storage. */ }
+  }, [conversation?.id]);
   useEffect(() => {
     try { localStorage.setItem(storageKey, JSON.stringify(items)); }
     catch { setError("Không thể lưu lịch sử trên trình duyệt này."); }
@@ -112,8 +122,9 @@ function App() {
       <button className="new" disabled={busy} onClick={() => { select(); input.current?.focus(); }}>＋ Cuộc trò chuyện mới</button>
       <input aria-label="Tìm cuộc trò chuyện" placeholder="Tìm cuộc trò chuyện…" value={query} onChange={event => setQuery(event.target.value)} />
       <nav aria-label="Lịch sử">
-        {visibleConversations(items, query).map(item => <div className={item.id === active ? "row selected" : "row"} key={item.id}>
-          <button className="title" disabled={busy} onClick={() => select(item.id)}>{item.pinned ? "◆ " : ""}{item.title}</button>
+        {query.trim() && visibleItems.length === 0 && <p role="status">Không tìm thấy cuộc trò chuyện.</p>}
+        {visibleItems.map(item => <div className={item.id === active ? "row selected" : "row"} key={item.id}>
+          <button className="title" aria-current={!calendar && item.id === active ? "true" : undefined} disabled={busy} onClick={() => select(item.id)}>{item.pinned ? "◆ " : ""}{item.title}</button>
           <details><summary aria-label={`Thao tác với ${item.title}`}>⋯</summary><div className="menu">
             <button disabled={busy} onClick={() => save({ ...item, pinned: !item.pinned })}>{item.pinned ? "Bỏ ghim" : "Ghim"}</button>
             <button disabled={busy} onClick={() => {
