@@ -12,7 +12,8 @@ Các phase dưới đây là đề xuất. Theo chỉ đạo hiện tại của 
 
 ## Đồng bộ Google Calendar hai chiều trong Milestone 2
 
-- Kết nối một tài khoản và một lịch Google do người dùng chọn. Tạo, sửa hoặc xóa từ Đệ Tốt phải cập nhật lịch đó. Thay đổi từ Google Calendar phải tự cập nhật Đệ Tốt, kể cả sau khi ứng dụng mất kết nối hoặc khởi động lại.
+- Một người dùng Đệ Tốt có thể kết nối nhiều tài khoản Google và chọn lịch theo từng tài khoản. Tạo, sửa hoặc xóa từ Đệ Tốt phải cập nhật đúng lịch đã chọn. Thay đổi từ Google Calendar phải tự cập nhật Đệ Tốt, kể cả sau khi ứng dụng mất kết nối hoặc khởi động lại.
+- Thêm menu tài khoản ở thanh trên để xem, chuyển và ngắt kết nối từng tài khoản. Gmail và Calendar cấp quyền riêng. Phạm vi Gmail ban đầu là đọc và tìm thư. Thông tin xác thực chỉ lưu ở backend. Chuyển tài khoản phải đổi phạm vi dữ liệu, còn ngắt kết nối phải dừng đồng bộ và thu hồi quyền của đúng tài khoản.
 - Dùng ID sự kiện Google để đối chiếu, lưu mốc đồng bộ, xử lý sự kiện đã xóa và làm mới toàn bộ khi mốc hết hiệu lực. Gửi lại một thao tác không tạo sự kiện trùng. Khi hai phía cùng sửa, kiểm tra phiên bản và báo xung đột để người dùng chọn bản muốn giữ.
 - Kiểm thử tạo, sửa và xóa từ cả hai phía, phục hồi khi mất mạng, độ trễ cập nhật và ngắt kết nối. Chỉ dùng dữ liệu lab cho đến khi cổng bảo mật M1 đạt và người dùng cấp quyền Google.
 
