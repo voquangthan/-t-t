@@ -104,13 +104,14 @@ static class GoogleAccounts
                 ["redirect_uri"] = Callback, ["code_verifier"] = state[1]
             }, ctx.RequestAborted);
             var token = tokens.RootElement;
-            if (!Required(token, "scope").Split(' ').Contains(GmailScope) ||
+            var scope = Required(token, "scope");
+            if (!IsReadOnlyGrant(scope) ||
                 !token.TryGetProperty("refresh_token", out var refresh) || string.IsNullOrWhiteSpace(refresh.GetString()))
                 return Results.Redirect("/app/index.html?google=denied");
             using var identity = await GoogleGet(http, "https://openidconnect.googleapis.com/v1/userinfo",
                 Required(token, "access_token"), ctx.RequestAborted);
             if (!identity.RootElement.GetProperty("email_verified").GetBoolean()) return Results.BadRequest();
-            var account = new Account(Required(identity.RootElement, "sub"), Required(identity.RootElement, "email"), refresh.GetString()!);
+            var account = new Account(Required(identity.RootElement, "sub"), Required(identity.RootElement, "email"), refresh.GetString()!, scope);
             var accounts = Read();
             accounts.RemoveAll(item => item.Id == account.Id);
             accounts.Add(account);
@@ -137,11 +138,16 @@ static class GoogleAccounts
             if (query.Query is not { Length: <= 200 }) return Results.BadRequest();
             var account = Read().Find(item => item.Id == id);
             if (account is null) return Results.NotFound();
+            if (!IsReadOnlyGrant(account.Scope))
+                return Results.Problem("Kết nối lại tài khoản để xác minh quyền Gmail chỉ đọc.", statusCode: 403);
             using var http = factory.CreateClient("google");
             using var token = await Token(http, new()
             {
                 ["grant_type"] = "refresh_token", ["refresh_token"] = account.RefreshToken
             }, ctx.RequestAborted);
+            if (token.RootElement.TryGetProperty("scope", out var refreshedScope) &&
+                !IsReadOnlyGrant(refreshedScope.GetString()))
+                return Results.Problem("Google trả về quyền ngoài phạm vi Gmail chỉ đọc.", statusCode: 403);
             var access = Required(token.RootElement, "access_token");
             const string messages = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
             using var list = await GoogleGet(http, QueryHelpers.AddQueryString(messages,
@@ -187,6 +193,13 @@ static class GoogleAccounts
     {
         HttpOnly = true, SameSite = SameSiteMode.Lax, Path = "/api/google/callback", MaxAge = TimeSpan.FromMinutes(5)
     };
-    private sealed record Account(string Id, string Email, string RefreshToken);
+    private static bool IsReadOnlyGrant(string? scope)
+    {
+        var grants = scope?.Split(' ', StringSplitOptions.RemoveEmptyEntries) ?? [];
+        return grants.Contains(GmailScope, StringComparer.Ordinal) &&
+            grants.All(grant => grant is GmailScope or "openid" or "email" or "https://www.googleapis.com/auth/userinfo.email");
+    }
+
+    private sealed record Account(string Id, string Email, string RefreshToken, string? Scope = null);
     internal sealed record GmailQuery(string? Query);
 }
