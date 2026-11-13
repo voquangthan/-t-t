@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 type Event = { id: string; title: string; start: string; end: string };
 const formatter = new Intl.DateTimeFormat("sv-SE", {
@@ -12,13 +12,19 @@ export function Calendar() {
   const [editing, setEditing] = useState<Event>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(true);
+  const loadVersion = useRef(0);
+  const changing = useRef(false);
+  const [refreshError, setRefreshError] = useState(false);
 
   async function load(signal?: AbortSignal) {
+    const version = ++loadVersion.current;
     const response = await fetch("/api/calendar", { signal });
     if (!response.ok) throw new Error("Không tải được lịch thử.");
     const data = await response.json();
+    if (signal?.aborted || version !== loadVersion.current) return;
     setEnabled(data.enabled);
     setEvents(data.events);
+    setRefreshError(false);
   }
 
   useEffect(() => {
@@ -28,10 +34,27 @@ export function Calendar() {
     }).finally(() => {
       if (!controller.signal.aborted) setBusy(false);
     });
-    return () => controller.abort();
+    let refreshing = false;
+    const refresh = async () => {
+      if (document.hidden || refreshing || changing.current) return;
+      refreshing = true;
+      try { await load(controller.signal); }
+      catch { if (!controller.signal.aborted) setRefreshError(true); }
+      finally { refreshing = false; }
+    };
+    const timer = window.setInterval(() => void refresh(), 5000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, []);
 
   async function mutate(id: string, method: "PUT" | "DELETE", body?: object) {
+    if (changing.current) return;
+    changing.current = true;
+    ++loadVersion.current;
     setBusy(true);
     setError("");
     try {
@@ -49,6 +72,7 @@ export function Calendar() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không kết nối được với lịch thử.");
     } finally {
+      changing.current = false;
       setBusy(false);
     }
   }
@@ -67,6 +91,7 @@ export function Calendar() {
   return <section className="transcript calendar" aria-busy={busy}>
     <h1>Lịch thử</h1>
     {error && <p role="alert">{error}</p>}
+    {refreshError && <p role="status">Chưa lấy được cập nhật mới. Lịch sẽ tự thử lại.</p>}
     {busy && <p role="status">Đang cập nhật lịch…</p>}
     {enabled === false && <p>Khởi động lab với tùy chọn <code>-CalendarTrial</code> để dùng lịch thử.</p>}
     {enabled && <p>Dùng chat để tạo sự kiện thử. Giờ hiển thị theo UTC+07:00.</p>}

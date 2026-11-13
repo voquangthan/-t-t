@@ -10,6 +10,12 @@ Các phase dưới đây là đề xuất. Theo chỉ đạo hiện tại của 
 | 3 — Windows, registry và thao tác host có duyệt | Pair Hub, registry thiết bị, capability hẹp, preview optimizer và thao tác host đã chọn. Calendar event creation thuộc phase 2 khi người dùng chủ động yêu cầu và đã cấp quyền connector. | Cao. Cần phase 1, cơ chế consent và audit. | Pair/revoke hoạt động. Từ chối approval hết hạn, phát lại hoặc đổi tham số. Thử junction và đường dẫn ngoài phạm vi trên fixture. Khôi phục file thử từ quarantine. |
 | 4 — Voice và Chibi Pet | STT/TTS tiếng Việt, điều khiển mic, Chibi desktop nhận sự kiện và gửi yêu cầu có giới hạn. | Vừa đến cao. Cần phase 1 và hợp đồng sự kiện Windows phase 3. | Quyền mic tắt thì dừng thu; kiểm tra độ trễ/ngắt lời; pet dùng được khi mất kết nối và không có token Gateway trong tiến trình UI. |
 
+## Đồng bộ Google Calendar hai chiều trong Milestone 2
+
+- Kết nối một tài khoản và một lịch Google do người dùng chọn. Tạo, sửa hoặc xóa từ Đệ Tốt phải cập nhật lịch đó. Thay đổi từ Google Calendar phải tự cập nhật Đệ Tốt, kể cả sau khi ứng dụng mất kết nối hoặc khởi động lại.
+- Dùng ID sự kiện Google để đối chiếu, lưu mốc đồng bộ, xử lý sự kiện đã xóa và làm mới toàn bộ khi mốc hết hiệu lực. Gửi lại một thao tác không tạo sự kiện trùng. Khi hai phía cùng sửa, kiểm tra phiên bản và báo xung đột để người dùng chọn bản muốn giữ.
+- Kiểm thử tạo, sửa và xóa từ cả hai phía, phục hồi khi mất mạng, độ trễ cập nhật và ngắt kết nối. Chỉ dùng dữ liệu lab cho đến khi cổng bảo mật M1 đạt và người dùng cấp quyền Google.
+
 ## TASK 002 đề xuất
 
 **Xác minh OpenClaw tại commit ghim và chốt hợp đồng MVP.** Ưu tiên hoàn tất clone và đối chiếu SHA, đọc chuỗi Gateway → agent runtime → tool executor, rà luồng policy/MCP và kiểm tra release Hub tương thích. Giao sơ đồ dữ liệu, ma trận RPC/scope, danh sách tool MVP, biên bản license/advisory và bộ tiêu chí nghiệm thu. Nếu hai bên duyệt chạy thử trong môi trường cô lập, dùng dữ liệu giả và mock provider để kiểm tra chat streaming, tool schema, job và restore. Kết nối Google/YouTube hoặc quyền Windows chỉ dùng khi đã được cấp đúng phạm vi; chạy hành động ghi lịch bằng fixture trước.
