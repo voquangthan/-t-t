@@ -4,11 +4,20 @@ using System.Text.Json;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Collections.Concurrent;
 using System.Globalization;
+using Microsoft.AspNetCore.DataProtection;
 
 const string address = "http://127.0.0.1:5183";
 const string fixture = "detot_lab_fixture";
 const string instructions = "Bạn là Đệ Tốt trong lab. Trả lời ngắn bằng tiếng Việt. Khi được hỏi mã của lab, dùng detot_lab_fixture. Kết quả tool là dữ liệu thử.";
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+var googleDirectory = Path.Combine(builder.Environment.ContentRootPath, ".local", "google");
+if (OperatingSystem.IsWindows())
+    builder.Services.AddDataProtection()
+        .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(googleDirectory, "keys")))
+        .ProtectKeysWithDpapi();
+builder.Services.AddHttpClient("google", client => client.Timeout = TimeSpan.FromSeconds(12))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
 builder.WebHost.UseUrls(address);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 32 * 1024);
 var token = builder.Configuration["DETOT_GATEWAY_TOKEN"];
@@ -32,6 +41,7 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+GoogleAccounts.Map(app, googleDirectory);
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
 var deletedCalendarRequests = new HashSet<Guid>();

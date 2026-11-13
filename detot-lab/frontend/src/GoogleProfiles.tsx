@@ -1,109 +1,113 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-type Profile = { id: string; name: string };
-type Profiles = { active: string | null; items: Profile[] };
-const storageKey = "detot.google-profiles.lab.v1";
+type Account = { id: string; email: string };
+type Mail = { id: string; subject: string; from: string };
+const key = "detot.google.active";
 
-function readProfiles(): Profiles {
-  try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-    if (Array.isArray(saved?.items)) {
-      const items: Profile[] = saved.items.filter((item: Profile) =>
-        typeof item?.id === "string" && typeof item?.name === "string");
-      return { items, active: items.some(item => item.id === saved.active) ? saved.active : items[0]?.id ?? null };
-    }
-  } catch { /* Use an empty profile list when browser storage is unavailable. */ }
-  return { items: [], active: null };
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch("/api/google/" + path, init);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(body?.detail ?? `Yêu cầu Google thất bại (HTTP ${response.status}).`);
+  return body;
 }
 
 export function GoogleProfiles() {
-  const [profiles, setProfiles] = useState(readProfiles);
-  const [editing, setEditing] = useState<string>();
-  const [error, setError] = useState("");
   const dialog = useRef<HTMLDialogElement>(null);
-  const active = profiles.items.find(item => item.id === profiles.active);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [active, setActive] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [results, setResults] = useState<Mail[]>();
+  const selected = accounts.find(account => account.id === active);
+  const canonical = location.origin === "http://127.0.0.1:5183";
 
-  useEffect(() => {
-    const sync = (event: StorageEvent) => {
-      if (event.key === storageKey || event.key === null) setProfiles(readProfiles());
-    };
-    window.addEventListener("storage", sync);
-    return () => window.removeEventListener("storage", sync);
-  }, []);
-
-  function save(next: Profiles) {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(next));
-      setProfiles(next);
-      setError("");
-      return true;
-    } catch {
-      setError("Trình duyệt không lưu được hồ sơ.");
-      return false;
-    }
+  function choose(id: string) {
+    localStorage.setItem(key, id);
+    setActive(id);
+    setResults(undefined);
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function load() {
+    const data = await api<{ enabled: boolean; accounts: Account[] }>("accounts");
+    setEnabled(data.enabled);
+    setAccounts(data.accounts);
+    const saved = localStorage.getItem(key);
+    choose(data.accounts.find(account => account.id === saved)?.id ?? data.accounts[0]?.id ?? "");
+  }
+
+  async function run(action: () => Promise<void>, initialMessage = "") {
+    setBusy(true);
+    setMessage(initialMessage);
+    try { await action(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Không kết nối được với backend."); }
+    finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    const url = new URL(location.href);
+    const outcome = url.searchParams.get("google");
+    if (!outcome) return;
+    url.searchParams.delete("google");
+    history.replaceState(history.state, "", url);
+    dialog.current?.showModal();
+    void run(load, outcome === "connected" ? "Đã kết nối Gmail." : "Google chưa cấp đủ quyền Gmail.");
+  }, []);
+
+  function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = event.currentTarget;
-    const name = String(new FormData(form).get("name") ?? "").trim();
-    if (!name || name.length > 40 || name.includes("@")) {
-      setError("Nhập biệt danh thử tối đa 40 ký tự và không chứa địa chỉ email.");
-      return;
-    }
-    const current = readProfiles();
-    const id = editing ?? crypto.randomUUID();
-    if (editing && !current.items.some(item => item.id === editing)) {
-      setProfiles(current);
-      setEditing(undefined);
-      setError("Hồ sơ đã bị xóa ở tab khác.");
-      return;
-    }
-    const items = editing ? current.items.map(item => item.id === id ? { id, name } : item)
-      : [...current.items, { id, name }];
-    if (save({ items, active: current.active ?? id })) {
-      form.reset();
-      setEditing(undefined);
-    }
+    if (!selected || busy) return;
+    const query = String(new FormData(event.currentTarget).get("query") ?? "");
+    setResults(undefined);
+    void run(async () => {
+      setResults(await api<Mail[]>(`accounts/${encodeURIComponent(selected.id)}/search`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }),
+      }));
+    });
   }
 
   return <>
     <button className="account-avatar" aria-label="Quản lý tài khoản Google" aria-haspopup="dialog"
-      title={active?.name ?? "Tài khoản Google"} onClick={() => dialog.current?.showModal()}>
-      {active?.name.slice(0, 1).toLocaleUpperCase("vi") ?? "G"}
+      onClick={() => { dialog.current?.showModal(); if (canonical && !busy) void run(load); }}>
+      {selected?.email[0]?.toUpperCase() ?? "G"}
     </button>
     <dialog className="account-dialog" ref={dialog} aria-labelledby="account-heading">
       <div className="account-heading">
         <h2 id="account-heading">Tài khoản Google</h2>
         <form method="dialog"><button aria-label="Đóng">×</button></form>
       </div>
-      <p>Chưa kết nối Google. Hồ sơ thử chỉ lưu biệt danh trên trình duyệt.</p>
-      <ul>
-        {profiles.items.map(item => <li key={item.id}>
-          <strong>{item.name}</strong>
+      {!canonical ? <p><a href="http://127.0.0.1:5183/workspace">Mở Đệ Tốt từ backend để quản lý Gmail</a></p>
+        : !enabled && !busy && <p>Kết nối Google đang tắt trong cấu hình lab.</p>}
+      {canonical && enabled && <>
+        <ul>{accounts.map(account => <li key={account.id}>
+          <strong>{account.email}</strong>
           <div>
-            {item.id === profiles.active ? <span>Đang chọn</span> : <button onClick={() => {
-              const current = readProfiles();
-              if (current.items.some(profile => profile.id === item.id)) save({ ...current, active: item.id });
-            }}>Chọn</button>}
-            <button onClick={() => setEditing(item.id)}>Đổi tên</button>
-            <button onClick={() => {
-              if (!window.confirm(`Xóa hồ sơ thử «${item.name}»?`)) return;
-              const current = readProfiles();
-              const items = current.items.filter(profile => profile.id !== item.id);
-              if (save({ items, active: current.active === item.id ? items[0]?.id ?? null : current.active }) && editing === item.id)
-                setEditing(undefined);
-            }}>Xóa</button>
+            {active === account.id ? <span>Đang chọn</span> : <button disabled={busy} onClick={() => choose(account.id)}>Chọn</button>}
+            <button disabled={busy} onClick={() => {
+              if (!window.confirm(`Thu hồi quyền Google của ${account.email}?`)) return;
+              void run(async () => {
+                await api(`accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+                await load();
+              });
+            }}>Ngắt kết nối</button>
           </div>
-        </li>)}
-      </ul>
-      <form key={editing ?? "new"} onSubmit={submit}>
-        <label htmlFor="profile-name">Biệt danh hồ sơ thử</label>
-        <input id="profile-name" name="name" maxLength={40} required defaultValue={profiles.items.find(item => item.id === editing)?.name} />
-        <button>{editing ? "Lưu tên" : "Thêm hồ sơ thử"}</button>
-        {editing && <button type="button" onClick={() => setEditing(undefined)}>Hủy</button>}
-      </form>
-      {error && <p role="alert">{error}</p>}
+        </li>)}</ul>
+        <button disabled={busy} onClick={() => void run(async () => {
+          const { url } = await api<{ url: string }>("connect", { method: "POST" });
+          location.assign(url);
+        })}>Kết nối Gmail</button>
+        {selected && <form onSubmit={search}>
+          <label htmlFor="gmail-query">Tìm thư trong {selected.email}</label>
+          <input id="gmail-query" name="query" maxLength={200} placeholder="Ví dụ: is:unread" />
+          <button disabled={busy}>Tìm thư</button>
+        </form>}
+        {results?.length === 0 && <p>Không tìm thấy thư.</p>}
+        {results && <ul>{results.map(mail => <li key={mail.id}>
+          <strong>{mail.subject || "(Không có tiêu đề)"}</strong><span>{mail.from}</span>
+        </li>)}</ul>}
+      </>}
+      {busy && <p role="status">Đang xử lý…</p>}
+      {message && <p role="status">{message}</p>}
     </dialog>
   </>;
 }

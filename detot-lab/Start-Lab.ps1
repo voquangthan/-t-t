@@ -169,10 +169,16 @@ try {
     } finally {
         $probe.Dispose()
     }
-    $appProcess = Start-LabChild $dotnet @($app) @{
+    $backendVariables = @{
         DETOT_GATEWAY_TOKEN = $token
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
+    foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_RELEASE_ENABLED')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { $backendVariables[$name] = $value }
+    }
+    $appProcess = Start-LabChild $dotnet @($app) $backendVariables
+    $backendVariables.Clear()
     $token = $null
     Write-Host 'Open http://127.0.0.1:5183/workspace and send a synthetic prompt. Press Ctrl+C here to stop.'
     while (!$appProcess.HasExited -and !$gatewayProcess.HasExited) {
