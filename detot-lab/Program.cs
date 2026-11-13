@@ -43,7 +43,7 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
-GoogleAccounts.Map(app, googleDirectory);
+var createGoogleEvent = GoogleAccounts.Map(app, googleDirectory);
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
 var deletedCalendarRequests = new HashSet<Guid>();
@@ -168,10 +168,15 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var previous = request.CalendarContext;
         if (previous is { Length: > 1500 } || (previous is not null && !IsCalendarCommand(previous)))
             return Results.BadRequest(new { error = "Ngữ cảnh tạo lịch không hợp lệ." });
-        var calendarRequest = calendarTrialEnabled && (IsCalendarCommand(message) || previous is not null);
+        var command = IsCalendarCommand(message) ? message : previous;
+        var googleCalendarRequest = command is not null && IsGoogleCalendarCommand(command);
+        var calendarRequest = command is not null && (googleCalendarRequest || calendarTrialEnabled);
+        var calendarTool = googleCalendarRequest ? "detot_google_calendar_create" : "detot_trial_calendar_create";
         var calendarInput = calendarRequest && previous is not null && !IsCalendarCommand(message)
             ? previous + "\nThông tin bổ sung từ người dùng: " + message
             : message;
+        if (calendarRequest && calendarInput.Length > 1500)
+            return Results.BadRequest(new { error = "Hãy gửi lại yêu cầu tạo lịch đầy đủ trong một tin nhắn." });
         var history = request.History ?? [];
         if (history.Length > 8 || history.Any(turn => turn is null ||
             turn.Role is not ("user" or "assistant") || turn.Text is not { Length: > 0 and <= 450 }))
@@ -180,7 +185,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             ? calendarInput
             : history.Select(turn => new { type = "message", role = turn.Role, content = turn.Text })
                 .Append(new { type = "message", role = "user", content = calendarInput }).ToArray();
-        if (calendarRequest && request.RequestId is Guid existingId)
+        if (calendarRequest && !googleCalendarRequest && request.RequestId is Guid existingId)
         {
             lock (calendarLock)
             {
@@ -193,8 +198,8 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (calendarRequest)
             tools.Add(new
             {
-                type = "function", name = "detot_trial_calendar_create",
-                description = "Tạo sự kiện trong lịch thử. Chỉ gọi khi có tên, giờ bắt đầu và giờ kết thúc rõ ràng. Nếu thiếu, hỏi lại.",
+                type = "function", name = calendarTool,
+                description = "Tạo một sự kiện. Chỉ gọi khi người dùng yêu cầu tạo và cung cấp tên, giờ bắt đầu và giờ kết thúc hoặc thời lượng rõ ràng. Nếu thiếu hoặc mơ hồ, hỏi lại.",
                 parameters = new
                 {
                     type = "object",
@@ -213,7 +218,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             model = "openclaw/default",
             input = gatewayInput,
             instructions = calendarRequest
-                ? instructions + $" Lịch thử dùng UTC+07:00. Giờ hiện tại: {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):O}. Hỏi lại nếu thời gian không rõ."
+                ? instructions + $" Múi giờ mặc định UTC+07:00. Giờ hiện tại: {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):O}. Hỏi lại nếu thời gian không rõ. Không tự đặt thời lượng. Chỉ xử lý yêu cầu tạo một sự kiện."
                 : instructions,
             tools
         }, cancellationToken);
@@ -222,7 +227,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
         if (calls.Length == 0)
             return Reply(first.RootElement, false, calendarRequest ? calendarInput : null);
-        if (calendarRequest && calls.Length == 1 && calls[0].GetProperty("name").GetString() == "detot_trial_calendar_create")
+        if (calendarRequest && calls.Length == 1 && calls[0].GetProperty("name").GetString() == calendarTool)
         {
             if (request.RequestId is not Guid requestId || requestId == Guid.Empty)
                 return Results.BadRequest(new { error = "Thiếu mã yêu cầu tạo lịch." });
@@ -236,6 +241,14 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 !DateTimeOffset.TryParseExact(endText, "yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture, DateTimeStyles.None, out var end) ||
                 end <= start)
                 return Results.BadRequest(new { error = "Bạn cho mình tên sự kiện, giờ bắt đầu và giờ kết thúc nhé." });
+
+            if (googleCalendarRequest)
+            {
+                var result = await createGoogleEvent(new(title, start, end, requestId), context, factory);
+                if (result is IValueHttpResult { Value: GoogleAccounts.CalendarConflict conflict })
+                    return Results.Ok(new { reply = conflict.Reply, calendarContext = calendarInput });
+                return result;
+            }
 
             var proposed = new TrialEvent(calendarInput, title, start, end);
             lock (calendarLock)
@@ -332,8 +345,14 @@ static IResult CalendarReply(TrialEvent saved) => Results.Ok(new
 });
 
 static bool IsCalendarCommand(string message) =>
+    IsGoogleCalendarCommand(message) ||
     message.TrimStart().StartsWith("tạo lịch ", StringComparison.OrdinalIgnoreCase) ||
     message.TrimStart().StartsWith("đặt lịch ", StringComparison.OrdinalIgnoreCase);
+
+static bool IsGoogleCalendarCommand(string message) =>
+    System.Text.RegularExpressions.Regex.IsMatch(message.Split('\n', 2)[0],
+        @"^\s*(?:(?:hãy|giúp mình|giúp tôi)\s+)?(?:đặt|tạo|thêm|lên)\s+(?:lịch|sự kiện)\b[^\r\n]*\bGoogle Calendar\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
 record ChatTurn(string Role, string Text);
 record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History, Guid? ConversationId);

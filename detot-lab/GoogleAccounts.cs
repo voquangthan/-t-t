@@ -13,7 +13,7 @@ static class GoogleAccounts
     private const string CalendarScope = "https://www.googleapis.com/auth/calendar.events.owned";
     private const string EventsUrl = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
-    public static void Map(WebApplication app, string directory)
+    public static Func<GoogleEventEdit, HttpContext, IHttpClientFactory, Task<IResult>> Map(WebApplication app, string directory)
     {
         var group = app.MapGroup("/api/google");
         var clientId = app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
@@ -46,7 +46,7 @@ static class GoogleAccounts
             if (ctx.Request.Host.Value != "127.0.0.1:5183") return Results.StatusCode(403);
             if (!HttpMethods.IsGet(ctx.Request.Method) &&
                 ctx.Request.Headers.Origin != "http://127.0.0.1:5183") return Results.StatusCode(403);
-            if (!enabled) return Results.StatusCode(503);
+            if (!enabled) return Results.Problem("Kết nối Google đang tắt trong cấu hình lab.", statusCode: 503);
             await mutex.WaitAsync(ctx.RequestAborted);
             try { return await action(); }
             catch (Exception error) when (error is HttpRequestException or JsonException or IOException or CryptographicException
@@ -232,6 +232,48 @@ static class GoogleAccounts
         group.MapDelete("/calendar/{id}/events/{eventId}", (string id, string eventId, HttpContext ctx, IHttpClientFactory factory) =>
             Run(ctx, () => WriteEvent(id, eventId, null, ctx, factory)));
 
+        return (edit, ctx, factory) => Run(ctx, async () =>
+        {
+            var accounts = Read().Where(account => account.Calendar).ToArray();
+            if (accounts.Length != 1)
+                return Results.Problem(accounts.Length == 0
+                    ? "Hãy kết nối tài khoản trong mục Google Calendar."
+                    : "Có nhiều tài khoản Calendar. Hãy mở Google Calendar để chọn lịch cần dùng.", statusCode: 409);
+
+            var id = accounts[0].Id;
+            var eventId = "detot" + edit.RequestId.ToString("N");
+            var query = new Dictionary<string, string?>
+            {
+                ["timeMin"] = edit.Start.ToString("O"), ["timeMax"] = edit.End.ToString("O"),
+                ["singleEvents"] = "true", ["maxResults"] = "250",
+                ["fields"] = "nextPageToken,items(id,status,transparency,summary,start/dateTime,end/dateTime)"
+            };
+            using var response = await CalendarCall(id, HttpMethod.Get, QueryHelpers.AddQueryString(EventsUrl, query), null, ctx, factory);
+            if (!response.IsSuccessStatusCode) return CalendarError(response);
+            using var data = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ctx.RequestAborted));
+            var items = data.RootElement.TryGetProperty("items", out var events) ? events.EnumerateArray().ToArray() : [];
+            bool Is(JsonElement item, string field, string value) =>
+                item.TryGetProperty(field, out var property) && property.GetString() == value;
+            var active = items.Where(item => !Is(item, "status", "cancelled")).ToArray();
+            if (active.Any(item => Is(item, "id", eventId) && Is(item, "summary", edit.Title!) &&
+                item.GetProperty("start").GetProperty("dateTime").GetDateTimeOffset() == edit.Start &&
+                item.GetProperty("end").GetProperty("dateTime").GetDateTimeOffset() == edit.End))
+                return CreatedReply();
+            if (active.Any(item => !Is(item, "transparency", "transparent")))
+                return Results.Ok(new CalendarConflict("Khung giờ này đã có lịch bận trên Google Calendar. Bạn muốn chuyển sang giờ nào?"));
+            if (data.RootElement.TryGetProperty("nextPageToken", out _))
+                return Results.Problem("Chưa kiểm tra được toàn bộ khung giờ trên Google Calendar. Hãy chọn khung giờ ngắn hơn.", statusCode: 409);
+
+            var result = await WriteEvent(id, null, edit, ctx, factory);
+            return result is IStatusCodeHttpResult { StatusCode: 204 } ? CreatedReply() : result;
+
+            IResult CreatedReply() => Results.Ok(new
+            {
+                reply = $"Đã tạo «{edit.Title}» trên Google Calendar từ {edit.Start:dd/MM/yyyy HH:mm zzz} đến {edit.End:dd/MM/yyyy HH:mm zzz}.",
+                googleCalendarCreated = true
+            });
+        });
+
         async Task<IResult> WriteEvent(string id, string? eventId, GoogleEventEdit? edit, HttpContext ctx, IHttpClientFactory factory)
         {
             if (edit is not null && (edit.Title?.Trim() is not { Length: > 0 and <= 120 } ||
@@ -337,5 +379,6 @@ static class GoogleAccounts
 
     private sealed record Account(string Id, string Email, string RefreshToken, string? Scope = null, bool Calendar = false);
     internal sealed record GoogleEventEdit(string? Title, DateTimeOffset Start, DateTimeOffset End, Guid RequestId);
+    internal sealed record CalendarConflict(string Reply);
     internal sealed record GmailQuery(string? Query);
 }

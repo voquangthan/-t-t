@@ -102,7 +102,7 @@ function App() {
         throw new Error(data.detail || data.error || fallback);
       }
       const assistant: Message = { id: uid(), role: "assistant", text: data.reply,
-        tool: data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
+        tool: data.googleCalendarCreated ? "Google Calendar" : data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
         calendarContext: data.calendarContext };
       setItems(old => old.map(item => item.id === target.id ? { ...item, messages: [...target.messages, assistant] } : item));
       retry.current = null;
