@@ -45,15 +45,21 @@ export async function eraseDeletedSessionFiles(params) {
 \ttry { entries = await readdir(sessionDir, { withFileTypes: true }); }
 \tcatch (error) { if (error?.code === "ENOENT") return 0; throw error; }
 \tconst prefixes = [sessionId + ".jsonl", sessionId + ".trajectory.jsonl", sessionId + ".trajectory-path.json"];
-\tconst paths = entries.filter((entry) => entry.isFile() && prefixes.some((prefix) => entry.name === prefix || entry.name.startsWith(prefix + ".deleted.") || prefix === sessionId + ".jsonl" && entry.name.startsWith(prefix + "."))).map((entry) => path.join(sessionDir, entry.name));
-\tfor (const file of paths) await unlink(file);
+\tconst paths = entries.filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && prefixes.some((prefix) =>
+\t\tentry.name.startsWith(prefix + ".deleted.") || (!params.archiveOnly &&
+\t\t\t(entry.name === prefix || prefix === sessionId + ".jsonl" && entry.name.startsWith(prefix + ".")))))
+\t\t.map((entry) => path.join(sessionDir, entry.name));
+\tfor (const file of paths) {
+\t\ttry { await unlink(file); }
+\t\tcatch (error) { if (error?.code !== "ENOENT") throw error; }
+\t}
 \treturn paths.length;
 }
 `;
 let installedErasureSource;
 try { installedErasureSource = await readFile(erasurePath, "utf8"); }
-catch { await writeFile(erasurePath, erasureSource, "utf8"); }
-if (installedErasureSource !== undefined) assert.equal(installedErasureSource, erasureSource, "Unexpected candidate artifact-erasure helper content.");
+catch (error) { if (error?.code !== "ENOENT") throw error; }
+if (installedErasureSource !== erasureSource) await writeFile(erasurePath, erasureSource, "utf8");
 
 let deletionSource = await readFile(deletionPath, "utf8");
 const regionMarker = "//#region src/gateway/server-methods/sessions-delete.ts";
@@ -91,6 +97,13 @@ await replaceExactly(
   "if (result.deleted) {\n\t\t\t\t\t\t\tawait retirement.retire();",
   "if (result.deleted) {\n\t\t\t\t\t\t\tawait eraseDeletedSessionFiles({ storePath, sessionId: result.deletedSessionId });\n\t\t\t\t\t\t\tawait retirement.retire();",
   "sessions.delete retained transcript and trajectory purge",
+);
+const revocationAnchor = "\t\t\t\t\t\tawait revokeOpenResponsesForDeletedSession({";
+await replaceExactly(
+  deletionPath,
+  revocationAnchor,
+  "\t\t\t\t\t\tif (postCleanupEntry?.sessionId) await eraseDeletedSessionFiles({ storePath, sessionId: postCleanupEntry.sessionId, archiveOnly: true });\n" + revocationAnchor,
+  "purge archived copies before deleting the session record",
 );
 
 console.log("Applied Detot retention patch to OpenClaw " + manifest.version + ".");
