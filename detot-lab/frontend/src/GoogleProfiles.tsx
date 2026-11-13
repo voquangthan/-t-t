@@ -7,6 +7,8 @@ const key = "detot.google.active";
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch("/api/google/" + path, init);
   const body = await response.json().catch(() => null);
+  if (path === "accounts" && response.status === 404)
+    throw new Error("Backend đang chạy chưa có API tài khoản Google. Dừng lab rồi chạy lại Start-Lab.ps1 để nạp bản mới.");
   if (!response.ok) throw new Error(body?.detail ?? `Yêu cầu Google thất bại (HTTP ${response.status}).`);
   return body;
 }
@@ -15,7 +17,7 @@ export function GoogleProfiles() {
   const dialog = useRef<HTMLDialogElement>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [active, setActive] = useState("");
-  const [enabled, setEnabled] = useState(false);
+  const [enabled, setEnabled] = useState<boolean>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<Mail[]>();
@@ -29,6 +31,7 @@ export function GoogleProfiles() {
   }
 
   async function load() {
+    setEnabled(undefined);
     const data = await api<{ enabled: boolean; accounts: Account[] }>("accounts");
     setEnabled(data.enabled);
     setAccounts(data.accounts);
@@ -77,7 +80,7 @@ export function GoogleProfiles() {
         <form method="dialog"><button aria-label="Đóng">×</button></form>
       </div>
       {!canonical ? <p><a href="http://127.0.0.1:5183/workspace">Mở Đệ Tốt từ backend để quản lý Gmail</a></p>
-        : !enabled && !busy && <p>Kết nối Google đang tắt trong cấu hình lab.</p>}
+        : enabled === false && !busy && <p>Kết nối Google đang tắt trong cấu hình lab.</p>}
       {canonical && enabled && <>
         <ul>{accounts.map(account => <li key={account.id}>
           <strong>{account.email}</strong>
