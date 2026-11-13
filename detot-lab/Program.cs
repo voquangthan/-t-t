@@ -178,8 +178,8 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             return Results.BadRequest(new { error = "Lịch sử trò chuyện không hợp lệ." });
         object gatewayInput = history.Length == 0 || calendarRequest
             ? calendarInput
-            : history.Select(turn => new { role = turn.Role, content = turn.Text })
-                .Append(new { role = "user", content = calendarInput }).ToArray();
+            : history.Select(turn => new { type = "message", role = turn.Role, content = turn.Text })
+                .Append(new { type = "message", role = "user", content = calendarInput }).ToArray();
         if (calendarRequest && request.RequestId is Guid existingId)
         {
             lock (calendarLock)
