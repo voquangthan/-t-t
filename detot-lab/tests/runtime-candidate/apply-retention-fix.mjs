@@ -35,6 +35,18 @@ export { handleOpenResponsesHttpRequest, revokeOpenResponsesForDeletedSession };
 const deletionPath = join(packageRoot, "dist", "sessions-delete-DbGyBrAQ.mjs");
 const memoryCliPath = join(packageRoot, "dist", "cli.runtime-D93HQK_k.mjs");
 await replaceExactly(memoryCliPath, "export { runMemoryForget,", "export { forgetMemoryEntries, runMemoryForget,", "Memory Core purge API");
+await replaceExactly(memoryCliPath,
+  "chunkIds.length > 0 && indexPlan.hasVectorTable ? expectDefined(indexPlan.extensionPath",
+  "indexPlan.hasVectorTable ? expectDefined(indexPlan.extensionPath",
+  "prepare native vector extension for orphan cleanup");
+await replaceExactly(join(packageRoot, "dist", "manager-search.worker-CuiJOauz.mjs"),
+  "if (result.value.hasVectorTable && result.value.chunks.length > 0) {",
+  "if (result.value.hasVectorTable) {",
+  "resolve native vector extension even when chunks were already removed");
+await replaceExactly(join(packageRoot, "dist", "memory-entry-origins.worker-DZ4Gnu3_.mjs"),
+  "\tdeleteMemoryIndexSources(db, input.sources);",
+  "\tif (input.hasVectorTable) db.exec(\"DELETE FROM memory_index_chunks_vec WHERE id IN (SELECT vec.id FROM memory_index_chunks_vec AS vec LEFT JOIN memory_index_chunks AS chunk ON chunk.id = vec.id WHERE chunk.id IS NULL)\");\n\tdeleteMemoryIndexSources(db, input.sources);",
+  "remove orphan vectors in the purge transaction");
 const dreamingPath = join(packageRoot, "dist", "dreaming-state-D1mfF5St.mjs");
 await replaceExactly(
   dreamingPath,
@@ -44,14 +56,29 @@ await replaceExactly(
 );
 const memoryPurgePath = join(packageRoot, "dist", "detot-memory-purge.mjs");
 await writeFile(memoryPurgePath, [
+  'import { DatabaseSync } from "node:sqlite";',
+  'import { c as resolveAgentDb } from "./openclaw-agent-db.paths-BGqL4GOe.mjs";',
+  'import { getLoadablePath } from "../../sqlite-vec/index.mjs";',
   'import { forgetMemoryEntries } from "./cli.runtime-D93HQK_k.mjs";',
   'import { i as createStore } from "./plugin-state-store-DY4rDlss.mjs";',
   'import { withDetotMemoryStore, S as withAuthority } from "./dreaming-state-D1mfF5St.mjs";',
-  'export async function purgeSessionMemory({ cfg, agentId, sessionId, assertCurrent }) {',
+  'export async function purgeSessionMemory({ cfg, agentId, sessionId, storePath, assertCurrent }) {',
   '  const report = await withDetotMemoryStore(options => createStore("memory-core", options, assertCurrent),',
   '    () => withAuthority(assertCurrent, () => forgetMemoryEntries({ cfg, agentId, sessionIds: [sessionId] })));',
   '  if (!report.sessionIds.includes(sessionId) || report.refusals.length || report.untargetableEntryKeys.length)',
   '    throw new Error("Memory Core purge could not verify complete session provenance.");',
+  '  const db = new DatabaseSync(resolveAgentDb({ agentId }), { allowExtension: true });',
+  '  try {',
+  '    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get("memory_index_chunks_vec")) return;',
+  '    db.loadExtension(getLoadablePath());',
+  '    assertCurrent();',
+  '    db.exec("BEGIN IMMEDIATE");',
+  '    try {',
+  '      db.exec("DELETE FROM memory_index_chunks_vec WHERE id IN (SELECT vec.id FROM memory_index_chunks_vec AS vec LEFT JOIN memory_index_chunks AS chunk ON chunk.id = vec.id WHERE chunk.id IS NULL)");',
+  '      assertCurrent();',
+  '      db.exec("COMMIT");',
+  '    } catch (error) { db.exec("ROLLBACK"); throw error; }',
+  '  } finally { db.close(); }',
   '}',
 ].join("\n"), "utf8");
 const erasurePath = join(packageRoot, "dist", "detot-session-artifact-erasure.mjs");
@@ -127,9 +154,10 @@ await replaceExactly(
   archiveAnchor + "\n" + revocationAnchor,
   "purge archived copies before deleting the session record",
 );
-await replaceExactly(deletionPath, archiveAnchor,
-  '\t\t\t\t\t\tif (postCleanupEntry?.sessionId && !incognito && cfg.plugins?.enabled !== false && (cfg.plugins?.slots?.memory ?? "memory-core") === "memory-core") await purgeSessionMemory({ cfg, agentId: target.agentId, sessionId: postCleanupEntry.sessionId, assertCurrent: commitGuard });\n' + archiveAnchor,
-  "purge Memory Core before removing provenance",
-);
+const purgeLine = '\t\t\t\t\t\tif (postCleanupEntry?.sessionId && !incognito && cfg.plugins?.enabled !== false && (cfg.plugins?.slots?.memory ?? "memory-core") === "memory-core") await purgeSessionMemory({ cfg, agentId: target.agentId, sessionId: postCleanupEntry.sessionId, storePath, assertCurrent: commitGuard });\n';
+const oldPurgeLine = purgeLine.replace(", storePath, assertCurrent", ", assertCurrent");
+deletionSource = await readFile(deletionPath, "utf8");
+if (deletionSource.includes(oldPurgeLine)) await replaceExactly(deletionPath, oldPurgeLine, purgeLine, "upgrade Memory Core purge");
+await replaceExactly(deletionPath, archiveAnchor, purgeLine + archiveAnchor, "purge Memory Core before removing provenance");
 
 console.log("Applied Detot retention patch to OpenClaw " + manifest.version + ".");

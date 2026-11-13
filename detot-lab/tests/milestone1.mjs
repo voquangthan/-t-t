@@ -4,7 +4,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
@@ -282,9 +283,12 @@ async function dreamingSweep() {
 }
 
 async function retentionBaseline() {
+  const { getLoadablePath } = await import(pathToFileURL(resolve(dirname(runtime), "../sqlite-vec/index.mjs")).href);
+  const vectorExtension = getLoadablePath();
   const port = await availablePort();
   const profile = await setup("retention", config => {
     config.gateway.port = port;
+    config.memory.search.store = { vector: { extensionPath: vectorExtension } };
     config.plugins = { enabled: true, allow: ["memory-core"], slots: { memory: "memory-core" },
       entries: { "memory-core": { enabled: true, config: { dreaming: { enabled: true } } } } };
     // Keep only the one synthetic tool; send a tool result on test turns so the fixture replies.
@@ -343,10 +347,11 @@ async function retentionBaseline() {
     finally { db.close(); }
   }
   function databaseLeaks(dbFile, needles) {
-    const db = new DatabaseSync(dbFile, { readOnly: true });
+    const db = new DatabaseSync(dbFile, { readOnly: true, allowExtension: true });
     const found = [];
     try {
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all();
+      if (tables.some(table => table.name === "memory_index_chunks_vec")) db.loadExtension(vectorExtension);
       for (const { name } of tables) {
         const quoted = '"' + name.replaceAll('"', '""') + '"';
         const columns = db.prepare("PRAGMA table_info(" + quoted + ")").all();
@@ -481,12 +486,31 @@ async function retentionBaseline() {
       }
       assert.equal(backupContent(), memoryContent);
       const embeddingHash = hash(canary);
-      const indexDb = new DatabaseSync(agentDbPath);
+      const indexDb = new DatabaseSync(agentDbPath, { allowExtension: true });
+      const vectorId = "detot-delete-vector";
+      const controlVectorId = "detot-control-vector";
+      const embedding = new Uint8Array(new Float32Array([0.25, 0.5]).buffer);
       try {
+        indexDb.loadExtension(vectorExtension);
+        indexDb.exec("CREATE VIRTUAL TABLE IF NOT EXISTS memory_index_chunks_vec USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[2])");
+        const addChunk = indexDb.prepare("INSERT INTO memory_index_chunks (id,path,source,start_line,end_line,hash,model,text,embedding,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)");
+        addChunk.run(vectorId, "MEMORY.md", "memory", 1, 2, embeddingHash, "fixture", canary, embedding, Date.now());
+        addChunk.run(controlVectorId, "memory/control.md", "memory", 1, 1, hash(unrelatedMemory), "fixture", unrelatedMemory, embedding, Date.now());
+        const addVector = indexDb.prepare("INSERT INTO memory_index_chunks_vec (id,embedding) VALUES (?,?)");
+        addVector.run(vectorId, embedding);
+        addVector.run(controlVectorId, embedding);
         indexDb.prepare("INSERT INTO memory_embedding_cache (provider,model,provider_key,hash,embedding,dims,updated_at) VALUES (?,?,?,?,?,?,?)")
           .run("detot-test", "fixture", "fixture", embeddingHash,
             new Uint8Array(new Float32Array([0.25, 0.5]).buffer), 2, Date.now());
       } finally { indexDb.close(); }
+      function hasVector(id) {
+        const db = new DatabaseSync(agentDbPath, { readOnly: true, allowExtension: true });
+        try {
+          db.loadExtension(vectorExtension);
+          return Boolean(db.prepare("SELECT 1 FROM memory_index_chunks_vec WHERE id=?").get(id));
+        } finally { db.close(); }
+      }
+      assert(hasVector(vectorId) && hasVector(controlVectorId), "both native vectors must exist before deletion");
       function hasCachedEmbedding() {
         const db = new DatabaseSync(agentDbPath, { readOnly: true });
         try { return Boolean(db.prepare("SELECT 1 FROM memory_embedding_cache WHERE hash=?").get(embeddingHash)); }
@@ -517,6 +541,7 @@ async function retentionBaseline() {
       for (const id of relatedIds) restartedContinuationStatuses.push((await request(marker, { previous: id })).status);
       assert.equal(sessionIdForKey(sessionKey), undefined, "deleted session must stay absent after restart");
       assert(!hasCachedEmbedding(), "synthetic embedding cache row must stay absent after restart");
+      assert(!hasVector(vectorId) && hasVector(controlVectorId), "purge must remove only the target vector after restart");
       assert(!backupContent().includes(canary) && backupContent().includes(unrelatedMemory),
         "Memory Core backup must retain only unrelated content after restart");
       const restoredFiles = await storageLeaks(archiveRoot, [canary]);
