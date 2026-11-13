@@ -1,15 +1,16 @@
-﻿param([switch]$ConfigureDeepSeek)
+﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
 $credentialPath = Join-Path $root '.local/deepseek-key.dpapi'
+if ($FromClipboard -and !$ConfigureDeepSeek) { throw "Use -FromClipboard with -ConfigureDeepSeek." }
 if ($ConfigureDeepSeek) {
-    $secret = Read-Host 'Nhập DeepSeek API key (ẩn)' -AsSecureString
+    $secret = if (!$FromClipboard) { Read-Host 'Nhập DeepSeek API key (ẩn)' -AsSecureString }
     try {
-        $plain = [Net.NetworkCredential]::new('', $secret).Password.Trim()
-        if ($plain -cnotmatch '^sk-[A-Za-z0-9_-]+$') {
-            throw 'Enter only the DeepSeek API key beginning with sk-.'
+        $plain = if ($FromClipboard) { ([string](Get-Clipboard -Raw)).Trim() } else { [Net.NetworkCredential]::new('', $secret).Password.Trim() }
+        if ($plain -cnotmatch '^[!-~]{8,512}$') {
+            throw 'Enter the complete API key as a single value without spaces.'
         }
         $cleanSecret = ConvertTo-SecureString -String $plain -AsPlainText -Force
         New-Item -ItemType Directory -Path (Split-Path -Parent $credentialPath) -Force | Out-Null
@@ -18,7 +19,7 @@ if ($ConfigureDeepSeek) {
     } finally {
         if ($cleanSecret) { $cleanSecret.Dispose() }
         $plain = $null
-        $secret.Dispose()
+        if ($secret) { $secret.Dispose() }
     }
     return
 }
@@ -124,8 +125,8 @@ $gatewayProcess = $null
 $appProcess = $null
 try {
     $provider = [Net.NetworkCredential]::new('', $key)
-    if ($provider.Password.Trim() -cnotmatch '^sk-[A-Za-z0-9_-]+$') {
-        throw 'Invalid DeepSeek key format. Run Start-Lab.ps1 -ConfigureDeepSeek and enter only the key beginning with sk-.'
+    if ($provider.Password.Trim() -cnotmatch '^[!-~]{8,512}$') {
+        throw 'Invalid DeepSeek key format. Run Start-Lab.ps1 -ConfigureDeepSeek and enter the complete API key without spaces.'
     }
     $gatewayProcess = Start-LabChild $node @($gateway, 'gateway', 'run') @{
         DEEPSEEK_API_KEY = $provider.Password.Trim()
