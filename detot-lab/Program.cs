@@ -36,7 +36,7 @@ var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarTrialEnabled = builder.Configuration.GetValue<bool>("DETOT_ENABLE_CALENDAR_TRIAL");
 app.Use(async (context, next) =>
 {
-    if (context.Request.Host.Value != "127.0.0.1:5183")
+    if (context.Request.Host.Value is not ("127.0.0.1:5183" or "localhost:5183"))
     {
         context.Response.StatusCode = StatusCodes.Status400BadRequest;
         return;
@@ -54,7 +54,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
 app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFactory factory, CancellationToken cancellationToken) =>
 {
-    if (context.Request.Headers.Origin != address || !context.Request.HasJsonContentType())
+    if (context.Request.Headers.Origin != $"http://{context.Request.Host.Value}" || !context.Request.HasJsonContentType())
         return Results.StatusCode(StatusCodes.Status403Forbidden);
 
     try

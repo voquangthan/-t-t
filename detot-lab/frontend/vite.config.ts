@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 
 const lab = "http://127.0.0.1:5183";
-const dev = "http://127.0.0.1:5173";
+const devOrigins = new Set(["http://127.0.0.1:5173", "http://localhost:5173"]);
 
 export default defineConfig({
   server: {
@@ -14,7 +14,8 @@ export default defineConfig({
         changeOrigin: true,
         configure(proxy) {
           proxy.on("proxyReq", (outgoing, incoming) => {
-            if (incoming.headers.origin === dev) outgoing.setHeader("Origin", lab);
+            const origin = incoming.headers.origin;
+            if (origin && devOrigins.has(origin)) outgoing.setHeader("Origin", lab);
           });
         },
       },
