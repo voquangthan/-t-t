@@ -65,6 +65,51 @@ app.UseStaticFiles();
 app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
+app.MapDelete("/api/chat/{id:guid}", async Task<IResult> (Guid id, HttpContext context) =>
+{
+    if (!IsLocalMutation(context)) return Results.StatusCode(403);
+    var node = builder.Configuration["DETOT_LAB_NODE"];
+    var runtime = builder.Configuration["DETOT_LAB_RUNTIME"];
+    if (!File.Exists(node) || !File.Exists(runtime))
+        return Results.Problem("Khởi động qua Start-Lab.ps1 để xóa cuộc trò chuyện trên Gateway.", statusCode: 503);
+    var info = new System.Diagnostics.ProcessStartInfo(node!)
+    {
+        UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true
+    };
+    var parameters = JsonSerializer.Serialize(new { key = ConversationKey(id) });
+    foreach (var arg in new[] { runtime!, "gateway", "call", "sessions.delete", "--json", "--params", parameters })
+        info.ArgumentList.Add(arg);
+    info.Environment["OPENCLAW_GATEWAY_TOKEN"] = token;
+    try
+    {
+        using var child = System.Diagnostics.Process.Start(info)!;
+        var output = child.StandardOutput.ReadToEndAsync();
+        var errors = child.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        try { await child.WaitForExitAsync(deadline.Token); }
+        catch (OperationCanceledException)
+        {
+            if (!child.HasExited) child.Kill(entireProcessTree: true);
+            return Results.Problem("Gateway chưa xác nhận xóa. Hãy thử lại.", statusCode: 504);
+        }
+        await Task.WhenAll(output, errors);
+        if (child.ExitCode == 0)
+        {
+            using var result = JsonDocument.Parse(await output);
+            if (result.RootElement.TryGetProperty("deleted", out var deleted) && deleted.ValueKind == JsonValueKind.True)
+                return Results.NoContent();
+        }
+        return Results.Problem("Gateway chưa xác nhận xóa. Lịch sử trên trình duyệt vẫn được giữ.", statusCode: 502);
+    }
+    catch (JsonException)
+    {
+        return Results.Problem("Không đọc được xác nhận xóa của Gateway.", statusCode: 502);
+    }
+    catch (System.ComponentModel.Win32Exception)
+    {
+        return Results.Problem("Không khởi chạy được lệnh xóa Gateway.", statusCode: 503);
+    }
+}).RequireRateLimiting("chat");
 app.MapGet("/api/calendar", () => Results.Ok(new
 {
     enabled = calendarTrialEnabled,
@@ -109,6 +154,8 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             return Results.BadRequest(new { error = "Nhập từ 1 đến 1500 ký tự." });
 
         using var gateway = factory.CreateClient("gateway");
+        if (request.ConversationId is Guid conversationId)
+            gateway.DefaultRequestHeaders.Add("x-openclaw-session-key", ConversationKey(conversationId));
         var tools = new List<object> { new
         {
             type = "function",
@@ -246,6 +293,8 @@ app.Run();
 static bool IsLocalMutation(HttpContext context) =>
     context.Request.Headers.Origin == $"http://{context.Request.Host.Value}";
 
+static string ConversationKey(Guid id) => $"agent:main:detot-chat-{id:N}";
+
 static async Task<JsonDocument> CallGateway(HttpClient client, object body, CancellationToken cancellationToken)
 {
     using var response = await client.PostAsJsonAsync("/v1/responses", body, cancellationToken);
@@ -285,6 +334,6 @@ static bool IsCalendarCommand(string message) =>
     message.TrimStart().StartsWith("đặt lịch ", StringComparison.OrdinalIgnoreCase);
 
 record ChatTurn(string Role, string Text);
-record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History);
+record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History, Guid? ConversationId);
 record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
 record CalendarEdit(string? Title, DateTimeOffset Start, DateTimeOffset End);

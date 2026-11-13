@@ -1,5 +1,5 @@
 ﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
-    [string]$ImportGoogleOAuth)
+    [string]$ImportGoogleOAuth, [string]$RestoredState)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
@@ -113,7 +113,13 @@ finally {
     $rng.Dispose()
 }
 $token = [BitConverter]::ToString($bytes).Replace("-", "")
-$state = Join-Path $root '.state'
+$state = if ($RestoredState) { (Resolve-Path -LiteralPath $RestoredState).Path } else { Join-Path $root '.state' }
+$authority = Join-Path $root '.local/copy-authority'
+if ($RestoredState -and !(Test-Path -LiteralPath $authority -PathType Container)) {
+    throw 'Restore requires the existing external revocation authority.'
+}
+if ($gateway -ne $candidate) { throw 'Install the locked Gateway candidate before launching this lab.' }
+if (!$RestoredState) { New-Item -ItemType Directory -Path $authority -Force | Out-Null }
 New-Item -ItemType Directory -Path $state -Force | Out-Null
 
 function ConvertTo-LabProcessArgument([string]$Argument) {
@@ -163,6 +169,8 @@ try {
         OPENCLAW_CONFIG_PATH = (Join-Path $root 'gateway.lab.json')
         OPENCLAW_SKIP_CHANNELS = '1'
         OPENCLAW_DISABLE_BONJOUR = '1'
+        DETOT_COPY_AUTHORITY_DIR = $authority
+        DETOT_RESTORE_AUTHORITY = if ($RestoredState) { $authority } else { '' }
     }
     $provider = $null
     $key.Dispose()
@@ -190,6 +198,10 @@ try {
     }
     $backendVariables = @{
         DETOT_GATEWAY_TOKEN = $token
+        DETOT_LAB_NODE = $node
+        DETOT_LAB_RUNTIME = $gateway
+        OPENCLAW_STATE_DIR = $state
+        OPENCLAW_CONFIG_PATH = (Join-Path $root 'gateway.lab.json')
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_RELEASE_ENABLED')) {

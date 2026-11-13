@@ -10,6 +10,7 @@ export interface Conversation {
   id: string;
   title: string;
   pinned: boolean;
+  gatewayLinked?: boolean;
   messages: Message[];
 }
 

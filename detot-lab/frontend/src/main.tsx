@@ -76,7 +76,7 @@ function App() {
   async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string) {
     if (!text.trim() || request.current) return;
     const user: Message = { id: requestId, role: "user", text: text.trim() };
-    const target = { ...base, title: prefix.length ? base.title : text.trim().slice(0, 52), messages: [...prefix, user] };
+    const target = { ...base, gatewayLinked: true, title: prefix.length ? base.title : text.trim().slice(0, 52), messages: [...prefix, user] };
     save(target);
     setActive(target.id);
     setDraft("");
@@ -88,7 +88,7 @@ function App() {
     try {
       const response = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: user.text, requestId, calendarContext: context,
+        body: JSON.stringify({ message: user.text, requestId, calendarContext: context, conversationId: target.id,
           history: prefix.slice(-8).map(message => ({ role: message.role, text: message.text.slice(0, 450) })) }),
         signal: controller.signal,
       });
@@ -131,11 +131,20 @@ function App() {
               const title = window.prompt("Tên cuộc trò chuyện", item.title)?.trim();
               if (title) save({ ...item, title: title.slice(0, 100) });
             }}>Đổi tên</button>
-            <button disabled={busy} onClick={() => {
-              if (!window.confirm("Xóa bản lưu cuộc trò chuyện trên trình duyệt?")) return;
-              setItems(old => old.filter(value => value.id !== item.id));
-              if (active === item.id) select();
-            }}>Xóa bản lưu</button>
+            <button disabled={busy} onClick={async () => {
+              if (!window.confirm(item.gatewayLinked ? "Xóa cuộc trò chuyện khỏi Gateway và trình duyệt?" : "Xóa bản lưu cũ trên trình duyệt?")) return;
+              setBusy(true);
+              try {
+                if (item.gatewayLinked) {
+                  const response = await fetch(`/api/chat/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+                  if (!response.ok) throw new Error("Gateway chưa xác nhận xóa. Hãy thử lại.");
+                }
+                setItems(old => old.filter(value => value.id !== item.id));
+                if (active === item.id) select();
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : "Không xóa được cuộc trò chuyện.");
+              } finally { setBusy(false); }
+            }}>{item.gatewayLinked ? "Xóa cuộc trò chuyện" : "Xóa bản lưu cũ"}</button>
           </div></details>
         </div>)}
       </nav>
