@@ -33,6 +33,27 @@ export { handleOpenResponsesHttpRequest, revokeOpenResponsesForDeletedSession };
 );
 
 const deletionPath = join(packageRoot, "dist", "sessions-delete-DbGyBrAQ.mjs");
+const memoryCliPath = join(packageRoot, "dist", "cli.runtime-D93HQK_k.mjs");
+await replaceExactly(memoryCliPath, "export { runMemoryForget,", "export { forgetMemoryEntries, runMemoryForget,", "Memory Core purge API");
+const dreamingPath = join(packageRoot, "dist", "dreaming-state-D1mfF5St.mjs");
+await replaceExactly(
+  dreamingPath,
+  "function openMemoryCoreStateStore(options) {\n\tconst store = dreamingState.getRuntime()(options);",
+  "const detotStoreScope = new AsyncLocalStorage();\nexport function withDetotMemoryStore(openStore, run) { return detotStoreScope.run(openStore, run); }\nfunction openMemoryCoreStateStore(options) {\n\tconst store = (detotStoreScope.getStore() ?? dreamingState.getRuntime())(options);",
+  "scoped Memory Core store",
+);
+const memoryPurgePath = join(packageRoot, "dist", "detot-memory-purge.mjs");
+await writeFile(memoryPurgePath, [
+  'import { forgetMemoryEntries } from "./cli.runtime-D93HQK_k.mjs";',
+  'import { i as createStore } from "./plugin-state-store-DY4rDlss.mjs";',
+  'import { withDetotMemoryStore, S as withAuthority } from "./dreaming-state-D1mfF5St.mjs";',
+  'export async function purgeSessionMemory({ cfg, agentId, sessionId, assertCurrent }) {',
+  '  const report = await withDetotMemoryStore(options => createStore("memory-core", options, assertCurrent),',
+  '    () => withAuthority(assertCurrent, () => forgetMemoryEntries({ cfg, agentId, sessionIds: [sessionId] })));',
+  '  if (!report.sessionIds.includes(sessionId) || report.refusals.length || report.untargetableEntryKeys.length)',
+  '    throw new Error("Memory Core purge could not verify complete session provenance.");',
+  '}',
+].join("\n"), "utf8");
 const erasurePath = join(packageRoot, "dist", "detot-session-artifact-erasure.mjs");
 const erasureSource = `import { readdir, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -67,7 +88,7 @@ const regionIndex = deletionSource.indexOf(regionMarker);
 const importAnchor = 'import { isDeepStrictEqual } from "node:util";';
 const importIndex = deletionSource.lastIndexOf(importAnchor, regionIndex);
 assert(regionIndex > 0 && importIndex >= 0, "Cannot locate the sessions.delete module import boundary.");
-const normalizedImports = `${importAnchor} import { revokeOpenResponsesForDeletedSession } from "./openresponses-http-DLg7g4Pa.mjs"; import { eraseDeletedSessionFiles } from "./detot-session-artifact-erasure.mjs"; `;
+const normalizedImports = `${importAnchor} import { revokeOpenResponsesForDeletedSession } from "./openresponses-http-DLg7g4Pa.mjs"; import { eraseDeletedSessionFiles } from "./detot-session-artifact-erasure.mjs"; import { purgeSessionMemory } from "./detot-memory-purge.mjs"; `;
 deletionSource = deletionSource.slice(0, importIndex) + normalizedImports + deletionSource.slice(regionIndex);
 await writeFile(deletionPath, deletionSource, "utf8");
 await replaceExactly(
@@ -99,11 +120,16 @@ await replaceExactly(
   "sessions.delete retained transcript and trajectory purge",
 );
 const revocationAnchor = "\t\t\t\t\t\tawait revokeOpenResponsesForDeletedSession({";
+const archiveAnchor = "\t\t\t\t\t\tif (postCleanupEntry?.sessionId) await eraseDeletedSessionFiles({ storePath, sessionId: postCleanupEntry.sessionId, archiveOnly: true });";
 await replaceExactly(
   deletionPath,
   revocationAnchor,
-  "\t\t\t\t\t\tif (postCleanupEntry?.sessionId) await eraseDeletedSessionFiles({ storePath, sessionId: postCleanupEntry.sessionId, archiveOnly: true });\n" + revocationAnchor,
+  archiveAnchor + "\n" + revocationAnchor,
   "purge archived copies before deleting the session record",
+);
+await replaceExactly(deletionPath, archiveAnchor,
+  '\t\t\t\t\t\tif (postCleanupEntry?.sessionId && !incognito && cfg.plugins?.enabled !== false && (cfg.plugins?.slots?.memory ?? "memory-core") === "memory-core") await purgeSessionMemory({ cfg, agentId: target.agentId, sessionId: postCleanupEntry.sessionId, assertCurrent: commitGuard });\n' + archiveAnchor,
+  "purge Memory Core before removing provenance",
 );
 
 console.log("Applied Detot retention patch to OpenClaw " + manifest.version + ".");

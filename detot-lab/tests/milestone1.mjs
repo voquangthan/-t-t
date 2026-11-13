@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -449,6 +449,23 @@ async function retentionBaseline() {
       assert((await sqliteLeaks(profile.state, [canary])).length > 0, "canary must be present in indexed/database storage before deletion");
       const sessionId = sessionIdForKey(sessionKey);
       assert(sessionId, "session row must identify the transcript generation before deletion");
+      const memoryFile = resolve(profile.workspace, "MEMORY.md");
+      const unrelatedMemory = "## Unrelated synthetic memory\nKeep this line.";
+      await writeFile(memoryFile, `## Session ID: ${sessionId}\n${canary}\n\n${unrelatedMemory}\n`);
+      const hash = value => createHash("sha256").update(value).digest("hex");
+      const normalized = profile.workspace.replaceAll("\\", "/");
+      const workspaceKey = hash(process.platform === "win32" ? normalized.toLowerCase() : normalized);
+      const recallKey = "detot-retention-recall";
+      const state = new DatabaseSync(dbPath);
+      try {
+        state.prepare("INSERT INTO plugin_state_entries (plugin_id,namespace,entry_key,value_json,created_at) VALUES (?,?,?,?,?)")
+          .run("memory-core", "short-term-recall", workspaceKey + ":" + hash(recallKey), JSON.stringify({
+            version: 1, workspaceKey, workspaceDir: profile.workspace, key: recallKey,
+            value: { key: recallKey, path: `sessions/main/${sessionId}.jsonl`, snippet: canary }
+          }), Date.now());
+      } finally { state.close(); }
+      assert(databaseLeaks(dbPath, [canary]).some(row => row.table === "plugin_state_entries"),
+        "synthetic recall cache must contain the canary before deletion");
       const archiveDir = resolve(profile.state, "agents/main/sessions");
       await mkdir(archiveDir, { recursive: true });
       await writeFile(resolve(archiveDir, sessionId + ".jsonl.deleted.fixture.zst"), zstdCompressSync(Buffer.from(canary)));
@@ -462,6 +479,7 @@ async function retentionBaseline() {
       for (const id of relatedIds) responseStatuses.push((await request(marker, { previous: id })).status);
       const archiveRoot = profile.state;
       const diskLeaks = await storageLeaks(archiveRoot, [canary]);
+      assert((await readFile(memoryFile, "utf8")).includes(unrelatedMemory), "unrelated memory must survive");
       const dbLeaks = await sqliteLeaks(archiveRoot, [canary]);
       const restartedContinuationStatuses = [];
       await stopChild(gateway);

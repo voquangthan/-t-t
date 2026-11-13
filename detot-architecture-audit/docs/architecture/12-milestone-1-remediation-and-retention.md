@@ -70,7 +70,9 @@ Trong lần cập nhật này, bộ M1 thường, Dreaming và retention đều 
 
 ## Trạng thái hiện tại
 
-DeepSeek thật đã đạt theo bằng chứng bên dưới. Cổng dữ liệu thật vẫn chưa đạt vì chưa chứng minh purge Memory Core, vector/cache, backup và archive hiện hữu. Cấu hình Google OAuth có thể nhập trước, nhưng Gmail thật vẫn tắt.
+DeepSeek thật đã đạt theo bằng chứng bên dưới. Gateway candidate gọi purge Memory Core trước khi xóa session. Regression `detot-lab/.local/m1-Uj6pbx/results.json` đạt với canary gieo trong MEMORY.md có nguồn session, recall cache SQLite và archive nén thử. Canary vắng mặt sau restart và ký ức đối chứng còn nguyên.
+
+Cổng dữ liệu thật vẫn chưa đạt. Chưa có fixture chứng minh purge chỉ mục vector, embedding cache hoặc bản sao lưu và chưa chứng minh xử lý mọi archive hiện hữu. Cấu hình Google OAuth đã nhập được trước, Gmail thật vẫn tắt.
 
 Lượt live do người dùng chạy trên OpenClaw candidate `2026.11.3` đạt PASS. Cả lượt gọi tool và lượt continuation đều trả HTTP 200. Bằng chứng cục bộ nằm tại `detot-lab/.local/m1-hxrdQR/results.json`. Kết quả này thay thế các trạng thái BLOCKED của những lượt chạy trước. Cổng M1 vẫn mở các mục kiểm chứng xóa Memory Core, cache/vector, backup và archive.
 
