@@ -58,6 +58,8 @@ var remoteAccess = publicUri is null ? null : new RemoteAccess(
     builder.Configuration["DETOT_REMOTE_PASSWORD"],
     app.Services.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>());
 var createGoogleEvent = GoogleAccounts.Map(app, googleDirectory, publicOrigin ?? address, publicUri is not null);
+GoogleDriveStorage.Map(app, googleDirectory, publicOrigin ?? address, publicUri is not null,
+    builder.Configuration["DETOT_GOOGLE_DRIVE_LOGIN_HINT"] ?? "voquangthan1234");
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
 var deletedCalendarRequests = new HashSet<Guid>();

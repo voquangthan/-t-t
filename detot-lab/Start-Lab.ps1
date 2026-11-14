@@ -13,8 +13,9 @@ $googleConfig = Join-Path $root '.local/google-client.json'
 if ($ImportGoogleOAuth) {
     $web = (Get-Content -LiteralPath $ImportGoogleOAuth -Raw | ConvertFrom-Json).web
     if (!$web.client_id -or !$web.client_secret -or
-        $web.redirect_uris -cnotcontains "$workspaceOrigin/api/google/callback") {
-        throw 'Import a Google OAuth Web client JSON with the exact Detot callback URI.'
+        $web.redirect_uris -cnotcontains "$workspaceOrigin/api/google/callback" -or
+        $web.redirect_uris -cnotcontains "$workspaceOrigin/api/drive/callback") {
+        throw 'Import a Google OAuth Web client JSON with the exact Gmail/Calendar and Drive callback URIs.'
     }
     $googleSecret = ConvertTo-SecureString -String $web.client_secret -AsPlainText -Force
     try {
@@ -225,9 +226,11 @@ try {
         OPENCLAW_CONFIG_PATH = $configPath
         DETOT_WEB_PORT = [string]$WebPort
         DETOT_GATEWAY_PORT = [string]$GatewayPort
+        DETOT_COPY_AUTHORITY_DIR = $authority
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
-    foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET')) {
+    foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_DRIVE_LOGIN_HINT',
+        'DETOT_MEMORY_CORE_PATH','DETOT_DREAMING_PATH','DETOT_MEMORY_RELATED_PATH')) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value -and !$RestoredState) { $backendVariables[$name] = $value }
     }
