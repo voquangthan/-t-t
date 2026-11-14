@@ -27,6 +27,7 @@ public sealed class TrustedLearningSources
     private readonly UniversalUrlReader? _urlReader;
     private readonly SearchDiscoveryService _searchDiscovery;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _wakeWorker = new(0, 1);
     private readonly SemaphoreSlim _mirrorGate = new(1, 1);
     private readonly SemaphoreSlim _cloudRefreshGate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sourceSyncGates = new();
@@ -57,11 +58,35 @@ public sealed class TrustedLearningSources
         });
         app.MapGet("/api/learning/dashboard", () => Results.Ok(Dashboard()));
         app.MapGet("/api/learning/quarantine", () => Results.Ok(Quarantine()));
+        app.MapGet("/api/learning/audit", () =>
+        {
+            var state = _state;
+            var approved = state.Sources.Where(source => source.Status == "approved").Select(source => source.Id).ToHashSet();
+            var indexed = state.Knowledge.Where(item => item.State == "indexed" && approved.Contains(item.SourceId)).ToArray();
+            return Results.Ok(new
+            {
+                checkedUtc = DateTimeOffset.UtcNow,
+                indexed = indexed.Length,
+                integrityFailures = indexed.Count(item => item.Hash != Sha256(item.Text)),
+                missingEvidence = indexed.Count(item => string.IsNullOrWhiteSpace(item.Citation) ||
+                    string.IsNullOrWhiteSpace(item.LicenseEvidenceUrl) || string.IsNullOrWhiteSpace(item.SourceVersion)),
+                duplicateChunks = indexed.Length - indexed.DistinctBy(item => item.Hash).Count(),
+                cloudMirrorPending = state.CloudMirrorDirty,
+            });
+        });
         app.MapGet("/api/learning/discovery/status", () => Results.Ok(new
         {
             configured = _searchDiscovery.IsConfigured,
             provider = _searchDiscovery.ProviderName,
         }));
+        app.MapPost("/api/learning/requests", async (LearningRequest request, HttpContext context) =>
+        {
+            if (!isLocalMutation(context)) return Results.StatusCode(403);
+            try { return Results.Accepted(value: await QueueLearningAsync(request, context.RequestAborted)); }
+            catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
+            catch (Exception error) when (error is HttpRequestException or InvalidOperationException or JsonException)
+            { return Results.Problem(SafeError(error.Message), statusCode: 503); }
+        });
         app.MapPost("/api/learning/discovery/search", async (SearchDiscoveryRequest request, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
@@ -161,6 +186,62 @@ public sealed class TrustedLearningSources
 
     public async Task InitializeCloudSnapshotAsync(CancellationToken cancellationToken) => await RefreshCloudSnapshotAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<SourceView>> QueueLearningAsync(LearningRequest request, CancellationToken cancellationToken)
+    {
+        if (request.ExactUrl is not null && request.Domains is { Length: > 0 })
+            throw new ArgumentException("Chọn một URL hoặc danh sách domain được phép học.");
+        if (request.ExactUrl is null && request.Domains is not { Length: > 0 })
+            throw new ArgumentException("Cần URL hoặc domain được phép trước khi thu thập.");
+        var topic = request.Topic?.Trim() ?? "";
+        if (topic.Length is < 2 or > 200) throw new ArgumentException("Chủ đề phải dài từ 2 đến 200 ký tự.");
+        var urls = request.ExactUrl is { } exact
+            ? new[] { ValidatePublicHttps(exact).AbsoluteUri }
+            : (await _searchDiscovery.SearchAsync(new(topic, request.Domains, "all"), cancellationToken))
+                .Candidates.Take(3).Select(candidate => candidate.Url).ToArray();
+        var batch = urls.Select(url =>
+        {
+            var uri = new Uri(url);
+            var type = uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
+                uri.AbsolutePath.Trim('/').Split('/').Length == 2 ? "github" : "website";
+            return (Type: type, Scope: NormalizeScope(type, url));
+        }).Distinct().ToArray();
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_state.Sources.Length + batch.Count(entry => !_state.Sources.Any(item =>
+                item.Type == entry.Type && item.Scope.Equals(entry.Scope, StringComparison.OrdinalIgnoreCase))) > 1000)
+                throw new ArgumentException("Kho đã đạt giới hạn 1.000 nguồn.");
+            var queued = new List<SourceView>();
+            foreach (var (type, scope) in batch)
+            {
+                var existing = _state.Sources.FirstOrDefault(item => item.Type == type &&
+                    item.Scope.Equals(scope, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null)
+                {
+                    // An explicit request must not resume a paused or quarantined source.
+                    if (!existing.Paused && existing.Status is "pending" or "checked" or "check-failed")
+                    {
+                        existing = existing with { AutoTopic = topic, WorkerState = "queued", NextAttemptUtc = null };
+                        ReplaceSource(existing);
+                    }
+                    queued.Add(View(existing));
+                    continue;
+                }
+                var source = new Source(Guid.NewGuid(), type, DefaultName(type, scope), scope, "read", "", "",
+                    "pending", false, DateTimeOffset.UtcNow, null, null, 0, null, WorkerState: "queued", AutoTopic: topic);
+                _state = _state with { Sources = [.. _state.Sources, source] };
+                queued.Add(View(source));
+            }
+            if (batch.Length > 0)
+            {
+                SaveState();
+                if (_wakeWorker.CurrentCount == 0) _wakeWorker.Release();
+            }
+            return queued;
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<SourceView> AddAsync(SourceDraft draft, CancellationToken cancellationToken)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
@@ -220,6 +301,8 @@ public sealed class TrustedLearningSources
                 CheckedUtc = DateTimeOffset.UtcNow, CheckSummary = details.Summary, FileCount = details.FileCount,
                 QuarantinedDocuments = details.QuarantinedDocuments,
             };
+            var current = RequireSource(id);
+            if (current != source) return View(current);
             ReplaceSource(updated);
             SaveState();
             return View(updated);
@@ -254,7 +337,7 @@ public sealed class TrustedLearningSources
         finally { _gate.Release(); }
     }
 
-    public async Task<SourceView> ApproveAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<SourceView> ApproveAsync(Guid id, CancellationToken cancellationToken, bool automatic = false)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
         SourceView view;
@@ -262,9 +345,13 @@ public sealed class TrustedLearningSources
         try
         {
             var source = RequireSource(id);
+            if (automatic && (source.Paused || source.AutoTopic is null)) return View(source);
             if (source.Status != "checked" || source.CheckedUtc is null || source.CheckedUtc < DateTimeOffset.UtcNow.AddHours(-24))
                 throw new InvalidOperationException("Hãy kiểm tra lại nguồn trước khi phê duyệt; kết quả kiểm tra hết hạn sau 24 giờ.");
-            var approved = source with { Status = "approved", ApprovedUtc = DateTimeOffset.UtcNow, CheckSummary = "Nguồn được người dùng phê duyệt trong phạm vi đã khai báo." };
+            var approved = source with { Status = "approved", ApprovedUtc = DateTimeOffset.UtcNow,
+                WorkerState = automatic ? "queued" : source.WorkerState, LastError = null,
+                NextAttemptUtc = null, RetryCount = 0,
+                CheckSummary = "Nguồn được người dùng phê duyệt trong phạm vi đã khai báo." };
             ReplaceSource(approved);
             SaveState();
             view = View(approved);
@@ -342,6 +429,23 @@ public sealed class TrustedLearningSources
                 "drive-folder" => await ReadDriveFolderAsync(source, driveBatchArtifacts!, cancellationToken),
                 _ => []
             };
+            if (source.AutoTopic is not null && source.LastSyncUtc is not null && documents.Any(document => !document.NotModified))
+            {
+                var verified = source.Type == "github"
+                    ? await CheckGitHubAsync(source, cancellationToken)
+                    : await CheckWebsiteAsync(source, cancellationToken);
+                if (verified.QuarantineReason is { } reason)
+                {
+                    await QuarantineSourceAsync(id, reason, cancellationToken);
+                    return new SyncSummary(id, source.Name, 0, 0, 0, source.LastSyncUtc, reason);
+                }
+                if (!verified.Ok || !string.Equals(verified.DetectedLicense, source.License, StringComparison.OrdinalIgnoreCase))
+                {
+                    const string reasonChanged = "Bằng chứng license thay đổi; cần kiểm tra lại trước khi tiếp tục học.";
+                    await QuarantineSourceAsync(id, reasonChanged, cancellationToken);
+                    return new SyncSummary(id, source.Name, 0, 0, 0, source.LastSyncUtc, reasonChanged);
+                }
+            }
             if (documents.Count > 0 && documents.All(document => document.NotModified))
             {
                 await _gate.WaitAsync(cancellationToken);
@@ -435,7 +539,8 @@ public sealed class TrustedLearningSources
             }
             return summary;
         }
-        catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException or JsonException)
+        catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException or JsonException ||
+            error is OperationCanceledException && !cancellationToken.IsCancellationRequested)
         {
             await _gate.WaitAsync(cancellationToken);
             try
@@ -532,7 +637,7 @@ public sealed class TrustedLearningSources
         if (words.Count == 0) return [];
         var approved = _state.Sources.Where(item => item.Status == "approved").Select(item => item.Id).ToHashSet();
         return _state.Knowledge.Where(item => item.State == "indexed" && approved.Contains(item.SourceId))
-            .Select(item => (Item: item, Score: Tokens(item.Text).Count(words.Contains)))
+            .Select(item => (Item: item, Score: Tokens(item.Text).Distinct(StringComparer.OrdinalIgnoreCase).Count(words.Contains)))
             .Where(pair => pair.Score > 0)
             .OrderByDescending(pair => pair.Score).ThenByDescending(pair => pair.Item.UpdatedUtc).Take(Math.Clamp(take, 1, 40))
             .Select(pair => new KnowledgeView(pair.Item.Text, pair.Item.SourceName, pair.Item.Citation, pair.Item.License, pair.Item.Hash, pair.Score,
@@ -558,34 +663,84 @@ public sealed class TrustedLearningSources
     public async Task RunDueAsync(CancellationToken cancellationToken)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
+        foreach (var source in _state.Sources.Where(item => item.AutoTopic is not null && !item.Paused &&
+            (item.Status is "pending" or "checked" or "check-failed") &&
+            (item.NextAttemptUtc is null || item.NextAttemptUtc <= DateTimeOffset.UtcNow)).Take(8))
+        {
+            try
+            {
+                var checkedSource = await CheckAsync(source.Id, cancellationToken);
+                if (checkedSource.Status == "checked" && !checkedSource.Paused)
+                    await ApproveAsync(source.Id, cancellationToken, automatic: true);
+                else if (checkedSource.Status == "check-failed")
+                    await DeferCheckAsync(source.Id, checkedSource.CheckSummary ?? "Không kiểm tra được nguồn.", cancellationToken);
+            }
+            catch (KeyNotFoundException) { /* Source was revoked during verification. */ }
+            catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or JsonException or InvalidOperationException ||
+                error is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+            {
+                await DeferCheckAsync(source.Id, error.Message, cancellationToken);
+            }
+        }
         if (_state.CloudMirrorDirty) await TryPersistCloudSnapshotAsync(cancellationToken);
         foreach (var source in _state.Sources.Where(item => item.Status == "approved" && !item.Paused &&
             (item.WorkerState is "queued" or "running" || item.NextAttemptUtc is not null ?
                 item.WorkerState is "queued" or "running" || item.NextAttemptUtc <= DateTimeOffset.UtcNow :
-                item.LastSyncUtc is null || item.LastSyncUtc < DateTimeOffset.UtcNow.AddHours(-6))))
+                item.LastSyncUtc is null || item.LastSyncUtc < DateTimeOffset.UtcNow.AddHours(-6))).Take(8))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await SyncAsync(source.Id, cancellationToken);
+            try { await SyncAsync(source.Id, cancellationToken); }
+            catch (KeyNotFoundException) { /* Source was revoked before sync. */ }
+            catch (InvalidOperationException) when (!_state.Sources.Any(item => item.Id == source.Id && item.Status == "approved" && !item.Paused)) { }
         }
         if (_state.CloudMirrorDirty) await TryPersistCloudSnapshotAsync(cancellationToken);
     }
 
     public async Task RunWorkerAsync(CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(15));
         try
         {
             try { await RunDueAsync(cancellationToken); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
             catch (Exception error) { _logger.LogWarning("Trusted learning startup cycle failed ({ErrorType}).", error.GetType().Name); }
-            while (await timer.WaitForNextTickAsync(cancellationToken))
+            while (!cancellationToken.IsCancellationRequested)
             {
+                await _wakeWorker.WaitAsync(TimeSpan.FromMinutes(15), cancellationToken);
                 try { await RunDueAsync(cancellationToken); }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
                 catch (Exception error) { _logger.LogWarning("Trusted learning worker cycle failed ({ErrorType}).", error.GetType().Name); }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task DeferCheckAsync(Guid id, string reason, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var source = _state.Sources.FirstOrDefault(item => item.Id == id);
+            if (source is null || source.Paused || source.Status is "approved" or "quarantined") return;
+            var retry = Math.Min(source.RetryCount + 1, 12);
+            ReplaceSource(source with { RetryCount = retry, LastError = SafeError(reason), LastAttemptUtc = DateTimeOffset.UtcNow,
+                NextAttemptUtc = DateTimeOffset.UtcNow.AddMinutes(Math.Min(360, Math.Pow(2, retry))),
+                WorkerState = "retry-wait" });
+            SaveState();
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task QuarantineSourceAsync(Guid id, string reason, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireSource(id);
+            ReplaceSource(current with { Status = "quarantined", QuarantineReason = reason,
+                WorkerState = "idle", LastSyncStatus = "quarantined", NextAttemptUtc = null });
+            SaveState();
+        }
+        finally { _gate.Release(); }
     }
 
     private async Task RefreshCloudSnapshotAsync(CancellationToken cancellationToken)
@@ -610,7 +765,7 @@ public sealed class TrustedLearningSources
                 if (snapshot.Version is not (1 or 2) || snapshot.Sources.Length > 1000 || snapshot.Knowledge.Length > 100_000 ||
                     snapshot.Sources.Any(item => item.Status is not ("pending" or "checked" or "check-failed" or "quarantined" or "approved") ||
                         (item.Type == "drive-folder" ? item.License != "Per-artifact-metadata" :
-                            item.Status != "quarantined" && !IsKnownLicense(item.License))) ||
+                            (item.Status is "checked" or "approved") && !IsKnownLicense(item.License))) ||
                     snapshot.Knowledge.Any(item => item.Hash.Length != 64 || item.State is not ("indexed" or "review" or "quarantined" or "superseded" or "staging")))
                     throw new InvalidDataException("Cloud learning snapshot không đạt kiểm tra cấu trúc.");
                 await _gate.WaitAsync(cancellationToken);
@@ -627,7 +782,8 @@ public sealed class TrustedLearningSources
             }
             finally { try { File.Delete(download.Path); } catch (IOException) { } }
         }
-        catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException or JsonException)
+        catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException or JsonException ||
+            error is OperationCanceledException && !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Could not refresh trusted learning snapshot ({ErrorType}).", error.GetType().Name);
         }
@@ -782,7 +938,8 @@ public sealed class TrustedLearningSources
     {
         if (_urlReader is not null)
         {
-            var page = await _urlReader.ReadVersionedAsync(source.Scope, source.LastSourceETag, source.LastSourceModifiedUtc, cancellationToken);
+            var page = await _urlReader.ReadVersionedAsync(source.Scope, source.LastSourceETag, source.LastSourceModifiedUtc,
+                cancellationToken, allowRedirects: false);
             if (!new Uri(page.FinalUrl).Host.Equals(new Uri(source.Scope).Host, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Nguồn chuyển hướng sang host khác với phạm vi đã phê duyệt.");
             if (page.NotModified)
@@ -1001,9 +1158,7 @@ public sealed class TrustedLearningSources
         string? ifNoneMatch = null, DateTimeOffset? ifModifiedSince = null, bool allowNotModified = false)
     {
         var uri = ValidatePublicHttps(url);
-        var addresses = await Dns.GetHostAddressesAsync(uri.DnsSafeHost, cancellationToken);
-        if (addresses.Length == 0 || addresses.Any(address => !IsPublicAddress(address)))
-            throw new InvalidOperationException("Nguồn bị từ chối vì host không phân giải hoàn toàn tới địa chỉ IP công khai.");
+        // The learning-source transport validates the resolved addresses at connect time.
         var client = _clients.CreateClient("learning-source");
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Accept.ParseAdd(accept);
@@ -1216,7 +1371,7 @@ public sealed class TrustedLearningSources
         string? LastManifestFingerprint = null, long LastDurationMilliseconds = 0, string? LastSourceETag = null,
         DateTimeOffset? LastSourceModifiedUtc = null, string? ProcessingFingerprint = null, int ProcessingOffset = 0,
         int ProcessingAccepted = 0, int ProcessingReview = 0, int ProcessingDuplicate = 0, int ProcessingQuarantined = 0,
-        int ProcessingArtifactOffset = 0);
+        int ProcessingArtifactOffset = 0, string? AutoTopic = null);
     private sealed record SourceDocument(string Title, string Citation, string License, string Text,
         string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? Version = null,
         string? ETag = null, DateTimeOffset? LastModifiedUtc = null, bool NotModified = false,
@@ -1230,6 +1385,7 @@ public sealed class TrustedLearningSources
     private sealed record LicenseEvidence(string License, string Url, string Method);
 
     public sealed record SourceDraft(string? Type, string? Name, string? Scope, string? License, string? LicenseUrl, string? AccessPermission = null);
+    public sealed record LearningRequest(string? Topic, string? ExactUrl, string[]? Domains);
     public sealed record SourceView(Guid Id, string Type, string Name, string Scope, string AccessPermission, string License, string LicenseUrl,
         string Status, DateTimeOffset? CheckedUtc, DateTimeOffset? ApprovedUtc, DateTimeOffset? LastSyncUtc,
         int FileCount, int LastAccepted, int LastReview, int LastDuplicate, string? CheckSummary, string? LastError,

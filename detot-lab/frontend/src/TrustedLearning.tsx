@@ -27,7 +27,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 
 const date = (value?: string | null) => value ? new Intl.DateTimeFormat("vi-VN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "chưa có";
 
-export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: string; domains: string[]; exactUrl?: string } }) {
+export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: string; domains: string[]; exactUrl?: string; collect?: boolean } }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [driveScopes, setDriveScopes] = useState<DriveScope[]>([]);
   const [type, setType] = useState("website");
@@ -46,6 +46,7 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [audit, setAudit] = useState<{ indexed: number; integrityFailures: number; missingEvidence: number; duplicateChunks: number; cloudMirrorPending: boolean }>();
 
   const reload = useCallback(async () => {
     try {
@@ -58,6 +59,29 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Không tải được danh sách nguồn."); }
   }, []);
   useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (!document.hidden) void reload(); }, 15000);
+    return () => window.clearInterval(timer);
+  }, [reload]);
+
+  async function queueLearning(topic: string, exactUrl?: string, domains?: string[]) {
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const queued = await api<Source[]>("requests", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, exactUrl, domains }) });
+      setMessage(queued.length ? `Đã tiếp nhận ${queued.length} nguồn. Xem tiến độ bên dưới.` : "Không tìm thấy nguồn trong phạm vi đã chọn.");
+      await reload();
+      return queued.length > 0;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không gửi được yêu cầu học.");
+      return false;
+    } finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    if (initialRequest?.collect && (initialRequest.exactUrl || initialRequest.domains.length))
+      void queueLearning(initialRequest.topic, initialRequest.exactUrl, initialRequest.exactUrl ? undefined : initialRequest.domains);
+  }, [initialRequest]);
 
   const search = async () => {
     setBusy(true); setError("");
@@ -86,6 +110,7 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
     if (!initialRequest) return;
     setTopic(initialRequest.topic);
     setDomainFilter(initialRequest.domains.join(", "));
+    if (initialRequest.collect && (initialRequest.exactUrl || initialRequest.domains.length)) return;
     if (initialRequest.exactUrl) {
       const url = new URL(initialRequest.exactUrl);
       const github = url.hostname.toLowerCase() === "github.com";
@@ -147,6 +172,13 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
   return <section className="transcript trusted-learning">
     <div className="cloud-heading"><div><h1>Nguồn học</h1><p>Backend tự phát hiện giấy phép từ metadata có bằng chứng. Nguồn chưa rõ license hoặc chưa được phép sẽ bị cách ly.</p></div><button disabled={busy} onClick={() => void reload()}>Làm mới</button></div>
     {dashboard && <div className="cloud-footnote"><strong>Kho kiến thức:</strong> {dashboard.sourceCount} nguồn · {dashboard.approvedCount} đang học · {dashboard.pausedCount} tạm dừng · {dashboard.indexedChunks} đoạn đã lập chỉ mục · {dashboard.duplicateChunks} trùng · {dashboard.quarantinedItems} cách ly · {dashboard.errorCount} lỗi · Drive mirror {dashboard.cloudMirrorPending ? "đang chờ đồng bộ" : "đã cập nhật"}. Lần chạy: {date(dashboard.lastAttemptUtc)} · lần đồng bộ: {date(dashboard.lastSyncUtc)}.</div>}
+    <button type="button" disabled={busy} onClick={async () => {
+      setBusy(true); setError("");
+      try { setAudit(await api<NonNullable<typeof audit>>("audit")); }
+      catch (cause) { setError(cause instanceof Error ? cause.message : "Không kiểm toán được kho kiến thức."); }
+      finally { setBusy(false); }
+    }}>Kiểm toán kho kiến thức</button>
+    {audit && <p role="status">{audit.indexed} đoạn đã kiểm tra · {audit.integrityFailures} sai SHA-256 · {audit.missingEvidence} thiếu bằng chứng · {audit.duplicateChunks} trùng · Drive {audit.cloudMirrorPending ? "đang chờ đồng bộ" : "đã cập nhật"}.</p>}
     {message && <p role="status" className="cloud-notice">{message}</p>}{error && <p role="alert" className="cloud-error">{error}</p>}
     <div className="cloud-footnote"><strong>Giới hạn hiện tại:</strong> Connector nguồn chỉ đọc: website đúng một URL, GitHub README của một repository, hoặc dataset trong thư mục DETOT-AI đã chọn. Universal Reader quyết định định dạng nào trích xuất được; nguồn lớn, thiếu license hoặc ngoài phạm vi bị bỏ qua/cách ly. Manifest Drive không đổi sẽ không tải lại artifact. Bản chỉ mục có citation được đồng bộ vào Drive; worker kiểm tra mỗi 15 phút, đồng bộ thay đổi và làm mới tối đa sau 6 giờ.</div>
     <form className="cloud-upload" onSubmit={event => void discover(event)}>
@@ -164,6 +196,10 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
         <p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.url}</a></p>
         {candidate.description && <p>{candidate.description}</p>}{candidate.officialSource && <small>Nguồn chính thức</small>}{candidate.version && <small> · {candidate.version}</small>}{candidate.lastUpdatedUtc && <small> · cập nhật {date(candidate.lastUpdatedUtc)}</small>}
         <button type="button" disabled={busy} onClick={() => void checkCandidate(candidate)}>Kiểm tra nguồn</button>
+        <button type="button" disabled={busy} onClick={async () => {
+          if (await queueLearning(topic || candidate.title.slice(0, 200), candidate.url))
+            setCandidates(items => items.filter(item => item.url !== candidate.url));
+        }}>Cho phép học nguồn này</button>
       </article>)}
     </form>
     <form className="cloud-upload" onSubmit={event => void add(event)}>

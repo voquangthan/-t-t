@@ -34,7 +34,7 @@ PDF scan, TIFF/BMP và DOC/XLS/PPT cũ hiện trả lỗi adapter chưa được
 
 ## Trusted Learning Sources
 
-Trang **Nguồn học** quản lý các nguồn theo trạng thái `pending → checked → approved` hoặc `quarantined`. Chat nhận câu lệnh như “Học ASP.NET Core từ Microsoft Learn” và mở Search Discovery với chủ đề/domain tương ứng. Khi đặt `DETOT_SEARXNG_BASE_URL`, Search Discovery dùng SearXNG tự host để tìm URL ứng viên. Backend kiểm tra giấy phép và chờ người dùng phê duyệt phạm vi trước khi Worker thu thập qua Universal Reader. URL cụ thể vẫn có thể thêm trực tiếp để kiểm tra.
+Trang **Nguồn học** hiển thị tiến độ, cách ly và kiểm toán SHA-256, citation, giấy phép và phiên bản. Khi bạn yêu cầu “Học ASP.NET Core từ Microsoft Learn” hoặc nêu đúng một URL cần học, yêu cầu đó cấp phạm vi cho worker. Với domain, mỗi yêu cầu lấy tối đa ba URL từ kết quả tìm kiếm. Worker tự xác minh giấy phép rồi mới đưa nội dung qua Universal Reader và Quality Gate. Yêu cầu rộng như “Tìm và học tài liệu Networking cơ bản” chỉ tìm ứng viên. Chọn **Cho phép học nguồn này** để cấp phạm vi cho một ứng viên. Các thao tác kiểm tra, phê duyệt và đồng bộ thủ công vẫn có trong trang Nguồn học.
 
 Quyền truy cập được lưu riêng với giấy phép; connector hiện chỉ đọc. Backend tự nhận diện license từ metadata GitHub, metadata Hugging Face dataset card và metadata/license URL của Website. License do người dùng nhập không được xem là bằng chứng. Chỉ giấy phép trong allowlist tự động (CC0, CC-BY/CC-BY-SA, MIT, Apache-2.0, BSD, PSF/Python và MPL) mới được xử lý tự động; thiếu bằng chứng hoặc license ngoài chính sách sẽ bị cách ly, không có nút xác nhận thủ công. Website giới hạn ở đúng URL đã khai báo, GitHub chỉ đọc README của một repository, Drive chỉ đọc một thư mục dataset con trong `DETOT-AI/datasets` và kiểm tra metadata license từng artifact.
 
@@ -69,6 +69,8 @@ $env:DETOT_SEARXNG_BASE_URL = 'http://127.0.0.1:8888'
 ```
 
 Với SearXNG đã tự host trên máy khác, đặt `DETOT_SEARXNG_BASE_URL` thành base URL HTTPS của instance và bật `json` trong `search.formats`. Có thể bỏ qua `DETOT_SEARCH_PROVIDER` khi không có cấu hình provider cũ. Backend gọi `POST /search` qua form với `format=json`. SearXNG chuyển truy vấn cho các công cụ tìm kiếm được bật trên instance. [Search API](https://docs.searxng.org/dev/search_api.html)
+
+Để tìm tài liệu trên Microsoft Learn trực tiếp từ Windows, đặt `$env:DETOT_SEARCH_PROVIDER = 'microsoft-learn'` trước khi chạy `Start-Lab.ps1`. Provider gọi endpoint tìm kiếm công khai của Microsoft Learn qua HTTPS, giới hạn kết quả ở `learn.microsoft.com` và dùng kết quả tiếng Anh. Endpoint có thể thay đổi và chỉ phục vụ nội dung Microsoft Learn.
 
 Sau khi mở workspace, vào **Nguồn học → Tìm nguồn**. Tìm một chủ đề, kiểm tra và phê duyệt URL phù hợp, sau đó đồng bộ. Hỏi lại chủ đề trong Chat để kiểm tra câu trả lời dẫn đúng URL của nguồn.
 

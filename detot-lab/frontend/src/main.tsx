@@ -22,26 +22,29 @@ type HistoryEntry = { conversation: Conversation; revision: string };
 Object.entries({ javascript, typescript, python, json, csharp }).forEach(([name, language]) => hljs.registerLanguage(name, language));
 const uid = () => crypto.randomUUID();
 const blank = (): Conversation => ({ id: uid(), title: "Cuộc trò chuyện mới", pinned: false, messages: [] });
-type LearningIntent = { topic: string; domains: string[]; exactUrl?: string };
+type LearningIntent = { topic: string; domains: string[]; exactUrl?: string; collect?: boolean };
 function parseLearningIntent(text: string): LearningIntent | null {
-  const match = text.trim().match(/^(?:đệ tốt[, ]*)?(?:tìm và học|học|cập nhật kiến thức|tìm tài liệu)\s+(.+)$/i);
+  const match = text.trim().match(/^(?:đệ tốt[, ]*)?(tìm và học|học kiến thức từ|học|cập nhật kiến thức|tìm tài liệu)\s+(.+)$/i);
   if (!match) return null;
-  let topic = match[1].trim().replace(/[.!?]+$/, "");
+  const collect = match[1].toLowerCase() !== "tìm tài liệu";
+  let topic = match[2].trim().replace(/[.!?]+$/, "");
   const foundUrl = topic.match(/https:\/\/[^\s]+/i)?.[0];
   const url = foundUrl?.replace(/[),.;!?]+$/, "");
   if (url) {
     let domain = "";
     try { domain = new URL(url).hostname; } catch { return null; }
     topic = topic.replace(foundUrl!, "").replace(/\b(?:từ|trong|tại)\b/gi, "").trim() || "Tài liệu chính thức";
-    return { topic, domains: [domain], exactUrl: url };
+    return { topic, domains: [domain], exactUrl: url, collect };
   }
   const source = topic.match(/\s+(?:từ|trên)\s+(microsoft learn|python(?:\.org)?|mdn|github|tài liệu chính thức)$/i);
   if (source) {
     const domains: Record<string, string> = { "microsoft learn": "learn.microsoft.com", "python": "docs.python.org", "python.org": "docs.python.org", "mdn": "developer.mozilla.org", "github": "github.com" };
     topic = topic.slice(0, source.index).trim();
-    if (source[1].toLowerCase() !== "tài liệu chính thức") return { topic, domains: [domains[source[1].toLowerCase()]] };
+    if (source[1].toLowerCase() !== "tài liệu chính thức") return { topic, domains: [domains[source[1].toLowerCase()]], collect };
   }
-  return topic.length >= 2 ? { topic, domains: [] } : null;
+  const domain = topic.match(/\s+(?:từ|trên)\s+([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i);
+  if (domain) return { topic: topic.slice(0, domain.index).trim(), domains: [domain[1]], collect };
+  return topic.length >= 2 ? { topic, domains: [], collect } : null;
 }
 const readHistory = (): Conversation[] => {
   if (remoteWorkspace) return [];
@@ -184,7 +187,7 @@ function App() {
 
   async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false, files = attachments) {
     if ((!text.trim() && files.length === 0) || request.current) return;
-    const learning = files.length === 0 && !context && !startPractice ? parseLearningIntent(text) : null;
+    const learning = files.length === 0 && !context && !startPractice && !base.practice ? parseLearningIntent(text) : null;
     if (learning) {
       setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setLearningIntent(learning);
       setPracticeNotes(undefined); setSide(false); setDraft(""); setError("");

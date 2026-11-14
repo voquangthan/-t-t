@@ -414,7 +414,7 @@ public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFile
     }
 
     public async Task<UniversalUrlReadResult> ReadVersionedAsync(string value, string? etag, DateTimeOffset? lastModifiedUtc,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool allowRedirects = true)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "https" || uri.Port != 443 ||
             !string.IsNullOrEmpty(uri.UserInfo) || uri.Fragment.Length > 0 || IPAddress.TryParse(uri.Host, out _) ||
@@ -433,6 +433,7 @@ public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFile
                     response.Content.Headers.LastModified ?? lastModifiedUtc, true);
             if ((int)response.StatusCode is >= 300 and <= 399)
             {
+                if (!allowRedirects) throw new InvalidDataException("Nguồn chuyển hướng; cần cho phép URL đích trước khi thu thập.");
                 if (redirects == 3 || response.Headers.Location is null) throw new InvalidDataException("URL chuyển hướng quá số lần cho phép.");
                 uri = response.Headers.Location.IsAbsoluteUri ? response.Headers.Location : new Uri(uri, response.Headers.Location);
                 if (uri.Scheme != "https" || uri.Port != 443 || !string.IsNullOrEmpty(uri.UserInfo) || IPAddress.TryParse(uri.Host, out _))
