@@ -193,7 +193,8 @@ function App() {
     setAttachments(combined);
   };
 
-  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false, files = attachments) {
+  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string,
+    startPractice = false, files = attachments, startMiniPractice = false) {
     if ((!text.trim() && files.length === 0) || request.current) return;
     const learning = files.length === 0 && !context && !startPractice && !base.practice ? parseLearningIntent(text) : null;
     if (learning) {
@@ -205,7 +206,8 @@ function App() {
       files.length ? `Tệp đính kèm: ${files.map(file => file.name).join(", ")}` : ""].filter(Boolean).join("\n").slice(0, 1500);
     const displayText = (files.length ? `${prompt}\n📎 ${files.map(file => file.name).join(", ")}` : prompt).slice(0, 450);
     const user: Message = { id: requestId, role: "user", text: displayText };
-    const target = { ...base, practice: startPractice || base.practice, gatewayLinked: true,
+    const target = { ...base, practice: startPractice || base.practice,
+      miniPractice: startMiniPractice || base.miniPractice, gatewayLinked: true,
       title: prefix.length ? base.title : prompt.slice(0, 52), messages: [...prefix, user] };
     save(target);
     setActive(target.id);
@@ -215,7 +217,7 @@ function App() {
     setBusy(true);
     const controller = new AbortController();
     request.current = controller;
-    retry.current = () => void send(text, base, prefix, requestId, context, startPractice, files);
+    retry.current = () => void send(text, base, prefix, requestId, context, startPractice, files, startMiniPractice);
     try {
       let documentContext: string | undefined;
       let visionImages: string[] = [];
@@ -231,7 +233,7 @@ function App() {
         visionImages = Array.isArray(parsed.images) ? parsed.images.filter((item: unknown): item is string => typeof item === "string") : [];
       }
       await sync(target);
-      const suggestion = context || target.practice ? undefined : await suggestFromChat(user.text, controller.signal);
+      const suggestion = context || target.practice || target.miniPractice ? undefined : await suggestFromChat(user.text, controller.signal);
       if (suggestion !== undefined) {
         const assistant: Message = { id: uid(), role: "assistant", text: suggestion };
         const completed = { ...target, messages: [...target.messages, assistant] };
@@ -245,7 +247,8 @@ function App() {
         method: "POST", headers: revision
           ? { "Content-Type": "application/json", "X-Detot-History-Revision": revision }
           : { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: prompt, requestId, calendarContext: context, conversationId: target.id, startPractice, documentContext, visionImages,
+        body: JSON.stringify({ message: prompt, requestId, calendarContext: context, conversationId: target.id, startPractice,
+          miniPractice: target.miniPractice, startMiniPractice, documentContext, visionImages,
           history: prefix.slice(-8).map(message => ({ role: message.role, text: message.text.slice(0, 450) })) }),
         signal: controller.signal,
       });
@@ -273,6 +276,17 @@ function App() {
       request.current = null;
       setBusy(false);
     }
+  }
+
+  function beginMiniPractice() {
+    const session: Conversation = { ...blank(), title: "Luyện nhanh 5 phút", miniPractice: true };
+    setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setPracticeNotes(undefined); setSide(false);
+    void send("Bắt đầu một thử thách code 5 phút phù hợp với mình.", session, [], uid(), undefined, false, [], true);
+  }
+
+  async function endMiniPractice() {
+    if (!conversation?.miniPractice) return;
+    await updateConversation({ ...conversation, miniPractice: false });
   }
 
   const last = conversation?.messages.at(-1);
@@ -336,7 +350,7 @@ function App() {
       </div>
     </aside>
     <main>
-      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{cloudStorage ? "Cloud Storage" : trustedLearning ? "Nguồn học" : calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
+      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{cloudStorage ? "Cloud Storage" : trustedLearning ? "Nguồn học" : calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong>{conversation?.miniPractice && <><span className="mini-practice-badge">Luyện nhanh · có thể dừng bất cứ lúc nào</span><button type="button" disabled={busy} onClick={() => void endMiniPractice()}>Kết thúc lượt luyện</button></>}<span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
       {practiceNotes !== undefined && <section aria-label="Bản đồ học tập" className="transcript">
         <h2>Bản đồ học tập</h2>
         <p><strong>Tiến độ:</strong> {practiceLearning}</p>
@@ -345,7 +359,8 @@ function App() {
           setPracticeNotes(undefined);
           setCalendar(false); setCloudStorage(false); setTrustedLearning(false);
           select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true);
-        }}>Luyện ca được đề xuất</button>
+        }}>Luyện ca được đề xuất</button>{" "}
+        <button type="button" disabled={busy} onClick={beginMiniPractice}>Luyện nhanh 5 phút</button>
         {learningMap.completed > 0 && <div className="learning-map">
           {learningMap.topics.map(topic => <article className="learning-topic" key={topic.id}>
             <div className="learning-topic-heading"><strong>{topic.title}</strong><span>{topic.mastery}% tín hiệu tiến bộ</span></div>
@@ -434,7 +449,7 @@ function App() {
             onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(draft); } }} />
           <div className="controls">
             {last?.calendarContext && <button type="button" disabled={busy || !draft.trim()} onClick={() => void send(draft, conversation, conversation?.messages, uid(), last.calendarContext)}>Bổ sung cho lịch</button>}
-            <button type="button" disabled={busy || attachments.length >= 5} onClick={() => fileInput.current?.click()}>＋ Tệp</button>
+            <button type="button" disabled={busy || attachments.length >= 5 || !!conversation?.miniPractice} onClick={() => fileInput.current?.click()}>＋ Tệp</button>
             {busy ? <button type="button" onClick={() => request.current?.abort()}>Dừng</button> : <button className="primary" disabled={!draft.trim() && attachments.length === 0}>Gửi ↑</button>}
           </div>
         </form>

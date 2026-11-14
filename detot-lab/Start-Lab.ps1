@@ -141,6 +141,8 @@ foreach ($port in $GatewayPort, $WebPort) {
 if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
 & npm.cmd --prefix (Join-Path $root 'frontend') run build
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
+& $dotnet clean (Join-Path $root 'Detot.Lab.csproj') --nologo -v:q
+if ($LASTEXITCODE -ne 0) { throw 'Backend clean failed.' }
 & $dotnet build (Join-Path $root 'Detot.Lab.csproj') -o $buildDir
 if ($LASTEXITCODE -ne 0) { throw 'Backend build failed.' }
 
