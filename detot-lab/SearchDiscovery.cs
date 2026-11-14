@@ -65,7 +65,9 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
         if (!Uri.TryCreate(result.Url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps || uri.Port != 443 ||
             !string.IsNullOrEmpty(uri.UserInfo) || uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || IPAddress.TryParse(uri.Host, out _))
             return null;
-        var cleanUrl = new UriBuilder(uri) { Fragment = "", Query = "" }.Uri.AbsoluteUri;
+        var versionQuery = uri.Host.Equals("learn.microsoft.com", StringComparison.OrdinalIgnoreCase) &&
+            Regex.IsMatch(uri.Query, @"^\?view=[a-zA-Z0-9.-]+$") ? uri.Query : "";
+        var cleanUrl = new UriBuilder(uri) { Fragment = "", Query = versionQuery }.Uri.AbsoluteUri;
         var path = uri.AbsolutePath;
         var isGithub = uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
             path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries).Length == 2;

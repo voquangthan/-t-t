@@ -1209,7 +1209,12 @@ public sealed class TrustedLearningSources
             return "drive://datasets/" + category;
         }
         var uri = ValidatePublicHttps(value);
-        if (type == "website") return uri.GetLeftPart(UriPartial.Path);
+        if (type == "website")
+        {
+            if (uri.Host.Equals("learn.microsoft.com", StringComparison.OrdinalIgnoreCase) &&
+                Regex.IsMatch(uri.Query, @"^\?view=[a-zA-Z0-9.-]+$")) return uri.AbsoluteUri;
+            return uri.GetLeftPart(UriPartial.Path);
+        }
         if (!uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) || uri.Query.Length > 0 || uri.Fragment.Length > 0)
             throw new ArgumentException("GitHub scope phải là URL repository github.com/owner/repo.");
         var parts = uri.AbsolutePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
