@@ -294,6 +294,15 @@ static async Task TrustedLearningWorkflow()
         var conflictSync = await service.SyncAsync(pending.Id, CancellationToken.None);
         Assert(conflictSync.Quarantined > 0 && conflictSync.Accepted > 0,
             "similar statements that reverse negation should split into indexed and quarantined content");
+        var previouslyIndexed = service.Search("VLAN trunk allowed list").Single();
+        const string changedConflict = "{\"question\":\"How should a VLAN trunk be configured?\",\"answer\":\"Do not configure the switch trunk with an explicit allowed VLAN list; verify both endpoints before production changes.\"}";
+        var changedConflictBytes = Encoding.UTF8.GetBytes(changedConflict);
+        storage.SeedDownloadBytes = changedConflictBytes;
+        storage.Listed = storage.Listed.Select(item => item with { Sha256 = Convert.ToHexString(SHA256.HashData(changedConflictBytes)).ToLowerInvariant(), ModifiedTime = DateTimeOffset.UtcNow.AddSeconds(3) }).ToArray();
+        var changedConflictSync = await service.SyncAsync(pending.Id, CancellationToken.None);
+        Assert(changedConflictSync.Accepted == 0 && changedConflictSync.Quarantined > 0 &&
+            service.Search("VLAN trunk allowed list").Single().Text == previouslyIndexed.Text,
+            "a later source version that contradicts its own indexed knowledge should be quarantined while preserving the trusted version");
         storage.FailLists = true;
         var offline = await service.SyncAsync(pending.Id, CancellationToken.None);
         var retryState = service.List().Single();

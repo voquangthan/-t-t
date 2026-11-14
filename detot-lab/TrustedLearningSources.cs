@@ -763,10 +763,11 @@ public sealed class TrustedLearningSources
         {
             var accepted = 0; var review = 0; var duplicate = 0; var quarantined = 0; var additions = new List<KnowledgeItem>();
             var approvedIds = _state.Sources.Where(item => item.Status == "approved").Select(item => item.Id).ToHashSet();
-            var priorKnowledge = _state.Knowledge.Select(item => item.SourceId == source.Id && (item.State is "indexed" or "review")
-                ? item with { State = "superseded", QuarantineReason = "Nguồn đã thay đổi; phiên bản mới được kiểm tra." }
-                : item).ToArray();
-            var comparable = priorKnowledge.Where(item => approvedIds.Contains(item.SourceId) && item.SourceId != source.Id && item.State == "indexed").ToArray();
+            var previousSourceItems = _state.Knowledge.Where(item => item.SourceId == source.Id && item.State is "indexed" or "review").ToArray();
+            var previousSourceIds = previousSourceItems.Select(item => item.Id).ToHashSet();
+            var retainedSourceItems = new Dictionary<Guid, KnowledgeItem>();
+            var comparable = _state.Knowledge.Where(item => approvedIds.Contains(item.SourceId) && item.SourceId != source.Id && item.State == "indexed")
+                .Concat(previousSourceItems.Where(item => item.State == "indexed")).ToArray();
             var remainingChunks = MaxChunksPerRun;
             foreach (var document in documents.Take(50))
             {
@@ -777,7 +778,21 @@ public sealed class TrustedLearningSources
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var hash = Sha256(chunk);
-                    if (comparable.Any(item => item.Hash == hash) || additions.Any(item => item.Hash == hash)) { duplicate++; continue; }
+                    var exactFromThisSource = previousSourceItems.FirstOrDefault(item => item.State == "indexed" && item.Hash == hash);
+                    if (exactFromThisSource is not null)
+                    {
+                        retainedSourceItems[exactFromThisSource.Id] = exactFromThisSource with
+                        {
+                            SourceName = source.Name, Title = document.Title, Citation = document.Citation, License = document.License,
+                            UpdatedUtc = DateTimeOffset.UtcNow, VersionFingerprint = fingerprint,
+                            LicenseEvidenceUrl = document.LicenseEvidenceUrl, LicenseDetectionMethod = document.LicenseDetectionMethod,
+                            SourceVersion = document.Version ?? fingerprint,
+                        };
+                        duplicate++;
+                        continue;
+                    }
+                    if (comparable.Any(item => item.SourceId != source.Id && item.Hash == hash) || additions.Any(item => item.Hash == hash))
+                    { duplicate++; continue; }
                     string? reason = null;
                     var gate = "indexed";
                     if (ContainsPromptInjection(chunk))
@@ -791,10 +806,12 @@ public sealed class TrustedLearningSources
                             .Where(item => Similarity(chunk, item.Text) >= .82).ToArray();
                         if (similar.Length > 0 && similar.Any(item => HasNegation(chunk) != HasNegation(item.Text)))
                         {
+                            foreach (var prior in similar.Where(item => previousSourceIds.Contains(item.Id)))
+                                retainedSourceItems[prior.Id] = prior;
                             gate = "quarantined";
                             reason = "Đoạn gần giống kiến thức hiện có nhưng có dấu hiệu mâu thuẫn; cần xem xét.";
                         }
-                        else if (similar.Length > 0)
+                        else if (similar.Any(item => !previousSourceIds.Contains(item.Id)))
                         {
                             duplicate++;
                             continue;
@@ -806,6 +823,10 @@ public sealed class TrustedLearningSources
                     if (gate == "quarantined") quarantined++; else if (gate == "review") review++; else accepted++;
                 }
             }
+            var priorKnowledge = _state.Knowledge.Select(item => item.SourceId == source.Id && (item.State is "indexed" or "review")
+                ? retainedSourceItems.TryGetValue(item.Id, out var retained) ? retained :
+                    item with { State = "superseded", QuarantineReason = "Nguồn đã thay đổi; phiên bản mới được kiểm tra." }
+                : item).ToArray();
             _state = _state with { Knowledge = [.. priorKnowledge, .. additions] }; SaveState();
             return (accepted, review, duplicate, quarantined);
         }
@@ -961,7 +982,7 @@ public sealed class TrustedLearningSources
         .Select(item => $"{item.Id}|{item.Name}|{item.License}|{item.Sha256}|{item.Size}|{item.ModifiedTime:O}|{item.Version}")
         .OrderBy(value => value, StringComparer.Ordinal)));
     private static string ContentFingerprint(IEnumerable<SourceDocument> documents) => Sha256(string.Join("\n", documents
-        .Select(document => $"{document.Citation}\n{document.License}\n{Sha256(document.Text)}")
+        .Select(document => $"{document.Citation}\n{document.License}\n{document.LicenseEvidenceUrl}\n{document.LicenseDetectionMethod}\n{document.Version}\n{Sha256(document.Text)}")
         .OrderBy(value => value, StringComparer.Ordinal)));
     private static string? DetectLicense(string metadata)
     {
