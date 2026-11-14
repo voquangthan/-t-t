@@ -23,6 +23,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("universal reader rejects unsupported formats and filters unsafe ZIP paths", ReaderRejectsAndFilters),
     ("universal URL reader blocks local and non-HTTPS destinations", UrlReaderRejectsUnsafeTargets),
     ("universal URL reader extracts main content and labels search pages", UrlReaderExtractsContent),
+    ("universal URL reader sends conditional validators and handles unchanged sources", UrlReaderHandlesNotModified),
 };
 
 var failed = 0;
@@ -123,6 +124,18 @@ static async Task UrlReaderExtractsContent()
     var page = await new UniversalUrlReader(factory).ReadAsync("https://docs.example.test/search?q=reader", CancellationToken.None);
     Assert(page.Title == "Docs" && page.IsSearchPage, "page metadata should identify search results");
     Assert(page.Text.Contains("Reader guide", StringComparison.Ordinal) && !page.Text.Contains("Menu noise", StringComparison.Ordinal), "main content should be extracted without navigation");
+}
+
+static async Task UrlReaderHandlesNotModified()
+{
+    var modified = new DateTimeOffset(2026, 11, 14, 1, 0, 0, TimeSpan.Zero);
+    var handler = new ConditionalResponseHandler();
+    var factory = new DelegatingHttpClientFactory(handler);
+    var result = await new UniversalUrlReader(factory).ReadVersionedAsync("https://docs.example.test/guide", "\"revision-7\"", modified, CancellationToken.None);
+    Assert(handler.IfNoneMatch == "\"revision-7\"", "ETag validator should be sent on subsequent fetches");
+    Assert(handler.IfModifiedSince?.ToUniversalTime() == modified, "Last-Modified validator should be sent on subsequent fetches");
+    Assert(result.NotModified && result.ETag == "\"revision-7\"" && result.LastModifiedUtc == modified,
+        "HTTP 304 should return metadata without attempting to extract an empty body");
 }
 
 static async Task ReaderExtractsPdf()
@@ -520,6 +533,24 @@ sealed class FakeHttpClientFactory : IHttpClientFactory
 sealed class StaticResponseHttpClientFactory(Func<HttpResponseMessage> response) : IHttpClientFactory
 {
     public HttpClient CreateClient(string name) => new(new StaticResponseHandler(response), disposeHandler: true);
+}
+
+sealed class DelegatingHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+}
+
+sealed class ConditionalResponseHandler : HttpMessageHandler
+{
+    public string? IfNoneMatch { get; private set; }
+    public DateTimeOffset? IfModifiedSince { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        IfNoneMatch = request.Headers.IfNoneMatch.FirstOrDefault()?.Tag;
+        IfModifiedSince = request.Headers.IfModifiedSince;
+        return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotModified));
+    }
 }
 
 sealed class StaticResponseHandler(Func<HttpResponseMessage> response) : HttpMessageHandler

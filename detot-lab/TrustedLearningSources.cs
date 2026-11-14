@@ -327,6 +327,23 @@ public sealed class TrustedLearningSources
                 "drive-folder" => await ReadDriveFolderAsync(source, driveArtifacts!, cancellationToken),
                 _ => []
             };
+            if (documents.Count > 0 && documents.All(document => document.NotModified))
+            {
+                await _gate.WaitAsync(cancellationToken);
+                try
+                {
+                    var metadata = documents[0];
+                    var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
+                        RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
+                        LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
+                        LastSourceETag = metadata.ETag ?? source.LastSourceETag,
+                        LastSourceModifiedUtc = metadata.LastModifiedUtc ?? source.LastSourceModifiedUtc,
+                        CheckSummary = "Nguồn xác nhận không đổi qua HTTP validator; bỏ qua tải nội dung, quality processing và cập nhật RAG." };
+                    ReplaceSource(current); SaveState();
+                    return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
+                }
+                finally { _gate.Release(); }
+            }
             var fingerprint = ContentFingerprint(documents);
             var quarantinedDriveDocuments = driveArtifacts?.Count(item => !IsAutoAllowedLicense(item.License)) ?? source.QuarantinedDocuments;
             if (fingerprint.Equals(source.LastContentFingerprint, StringComparison.Ordinal))
@@ -337,6 +354,8 @@ public sealed class TrustedLearningSources
                     var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                         RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
                         LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
+                        LastSourceETag = documents.FirstOrDefault(document => document.ETag is not null)?.ETag ?? source.LastSourceETag,
+                        LastSourceModifiedUtc = documents.FirstOrDefault(document => document.LastModifiedUtc.HasValue)?.LastModifiedUtc ?? source.LastSourceModifiedUtc,
                         LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
                         QuarantinedDocuments = quarantinedDriveDocuments,
                         CheckSummary = "Nguồn không thay đổi; bỏ qua quality processing và cập nhật RAG." };
@@ -353,6 +372,8 @@ public sealed class TrustedLearningSources
                 var current = RequireSource(id);
                 var updated = current with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                     LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
+                    LastSourceETag = documents.FirstOrDefault(document => document.ETag is not null)?.ETag ?? source.LastSourceETag,
+                    LastSourceModifiedUtc = documents.FirstOrDefault(document => document.LastModifiedUtc.HasValue)?.LastModifiedUtc ?? source.LastSourceModifiedUtc,
                     LastContentFingerprint = fingerprint, RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "success",
                     LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
                     QuarantinedDocuments = quarantinedDriveDocuments,
@@ -710,26 +731,37 @@ public sealed class TrustedLearningSources
     {
         if (_urlReader is not null)
         {
-            var page = await _urlReader.ReadAsync(source.Scope, cancellationToken);
+            var page = await _urlReader.ReadVersionedAsync(source.Scope, source.LastSourceETag, source.LastSourceModifiedUtc, cancellationToken);
             if (!new Uri(page.FinalUrl).Host.Equals(new Uri(source.Scope).Host, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Nguồn chuyển hướng sang host khác với phạm vi đã phê duyệt.");
-            return new SourceDocument(page.Title, page.FinalUrl, source.License, page.Text, source.LicenseEvidenceUrl, source.LicenseDetectionMethod);
+            if (page.NotModified)
+                return new SourceDocument(source.Name, page.FinalUrl, source.License, "", source.LicenseEvidenceUrl,
+                    source.LicenseDetectionMethod, page.ETag ?? page.LastModifiedUtc?.ToString("O"), page.ETag, page.LastModifiedUtc, true);
+            return new SourceDocument(page.Title, page.FinalUrl, source.License, page.Text, source.LicenseEvidenceUrl,
+                source.LicenseDetectionMethod, page.ETag ?? page.LastModifiedUtc?.ToString("O"), page.ETag, page.LastModifiedUtc);
         }
         using var response = await GetPublicAsync(source.Scope, "text/html,text/plain,text/markdown,application/xhtml+xml", cancellationToken);
         var body = await ReadLimitedTextAsync(response, cancellationToken);
         var text = response.Content.Headers.ContentType?.MediaType is "text/html" or "application/xhtml+xml" ? HtmlToText(body) : body;
-        var version = response.Headers.ETag?.Tag ?? response.Content.Headers.LastModified?.ToString("O");
-        return new SourceDocument(source.Name, source.Scope, source.License, text, source.LicenseEvidenceUrl, source.LicenseDetectionMethod, version);
+        var etag = response.Headers.ETag?.Tag;
+        var modified = response.Content.Headers.LastModified;
+        return new SourceDocument(source.Name, source.Scope, source.License, text, source.LicenseEvidenceUrl,
+            source.LicenseDetectionMethod, etag ?? modified?.ToString("O"), etag, modified);
     }
 
     private async Task<SourceDocument> ReadGitHubAsync(Source source, CancellationToken cancellationToken)
     {
         var uri = GitHubRepoApi(source.Scope) + "/readme";
-        using var response = await GetPublicAsync(uri, "application/vnd.github.raw+json", cancellationToken);
+        using var response = await GetPublicAsync(uri, "application/vnd.github.raw+json", cancellationToken,
+            source.LastSourceETag, source.LastSourceModifiedUtc, allowNotModified: true);
+        var etag = response.Headers.ETag?.Tag ?? source.LastSourceETag;
+        var modified = response.Content.Headers.LastModified ?? source.LastSourceModifiedUtc;
+        if (response.StatusCode == HttpStatusCode.NotModified)
+            return new SourceDocument(source.Name + " — README.md", source.Scope + "#readme", source.License, "",
+                source.LicenseEvidenceUrl, source.LicenseDetectionMethod, etag ?? modified?.ToString("O"), etag, modified, true);
         var text = await ReadLimitedTextAsync(response, cancellationToken);
-        var version = response.Headers.ETag?.Tag ?? response.Content.Headers.LastModified?.ToString("O");
         return new SourceDocument(source.Name + " — README.md", source.Scope + "#readme", source.License, text,
-            source.LicenseEvidenceUrl, source.LicenseDetectionMethod, version);
+            source.LicenseEvidenceUrl, source.LicenseDetectionMethod, etag ?? modified?.ToString("O"), etag, modified);
     }
 
     private async Task<SourceDocument[]> ReadDriveFolderAsync(Source source, IReadOnlyList<CloudArtifact> items, CancellationToken cancellationToken)
@@ -836,7 +868,8 @@ public sealed class TrustedLearningSources
     private static bool ContainsPromptInjection(string text) => Regex.IsMatch(text,
         @"(?is)\b(ignore|disregard|override|forget)\s+(all\s+)?(previous|prior|above|system|developer)\s+(instructions?|messages?|prompts?)\b|\b(reveal|print|exfiltrate)\s+(the\s+)?(system\s+prompt|secrets?|api\s+keys?|credentials?)\b|\bact\s+as\s+(an?\s+)?(unrestricted|jailbroken)\b|<\s*\|\s*(system|assistant)\s*\|\s*>", RegexOptions.IgnoreCase);
 
-    private async Task<HttpResponseMessage> GetPublicAsync(string url, string accept, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> GetPublicAsync(string url, string accept, CancellationToken cancellationToken,
+        string? ifNoneMatch = null, DateTimeOffset? ifModifiedSince = null, bool allowNotModified = false)
     {
         var uri = ValidatePublicHttps(url);
         var addresses = await Dns.GetHostAddressesAsync(uri.DnsSafeHost, cancellationToken);
@@ -845,8 +878,12 @@ public sealed class TrustedLearningSources
         var client = _clients.CreateClient("learning-source");
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Accept.ParseAdd(accept);
+        if (!string.IsNullOrWhiteSpace(ifNoneMatch) && System.Net.Http.Headers.EntityTagHeaderValue.TryParse(ifNoneMatch, out var entityTag))
+            request.Headers.IfNoneMatch.Add(entityTag);
+        if (ifModifiedSince.HasValue) request.Headers.IfModifiedSince = ifModifiedSince.Value;
         if (uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase)) request.Headers.UserAgent.ParseAdd("Detot-TrustedLearning/1.0");
         var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (allowNotModified && response.StatusCode == HttpStatusCode.NotModified) return response;
         if ((int)response.StatusCode is >= 300 and <= 399)
         { response.Dispose(); throw new InvalidOperationException("Nguồn chuyển hướng; hãy khai báo URL đích chính xác để giữ phạm vi học rõ ràng."); }
         if (!response.IsSuccessStatusCode) { var status = response.StatusCode; response.Dispose(); throw new HttpRequestException($"Nguồn trả HTTP {(int)status}."); }
@@ -1047,9 +1084,11 @@ public sealed class TrustedLearningSources
         string? LicenseDetectionMethod = null, string? QuarantineReason = null, bool Paused = false, int RetryCount = 0,
         DateTimeOffset? NextAttemptUtc = null, DateTimeOffset? LastAttemptUtc = null, string WorkerState = "idle",
         string LastSyncStatus = "never", string? LastContentFingerprint = null, int LastQuarantined = 0, int QuarantinedDocuments = 0,
-        string? LastManifestFingerprint = null, long LastDurationMilliseconds = 0);
+        string? LastManifestFingerprint = null, long LastDurationMilliseconds = 0, string? LastSourceETag = null,
+        DateTimeOffset? LastSourceModifiedUtc = null);
     private sealed record SourceDocument(string Title, string Citation, string License, string Text,
-        string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? Version = null);
+        string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? Version = null,
+        string? ETag = null, DateTimeOffset? LastModifiedUtc = null, bool NotModified = false);
     private sealed record KnowledgeItem(Guid Id, Guid SourceId, string SourceName, string Title, string Text,
         string Citation, string License, string Hash, string State, DateTimeOffset UpdatedUtc,
         string? QuarantineReason = null, string? VersionFingerprint = null, string? LicenseEvidenceUrl = null,

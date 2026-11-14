@@ -394,6 +394,9 @@ public sealed class UniversalFileReader
     private static InvalidDataException Unsupported(string name, string reason) => new($"{name}: {reason}");
 }
 
+public sealed record UniversalUrlReadResult(string Title, string FinalUrl, string Text, bool IsSearchPage,
+    string? ETag, DateTimeOffset? LastModifiedUtc, bool NotModified);
+
 public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFileReader? files = null)
 {
     private const int MaxBytes = 2 * 1024 * 1024;
@@ -406,6 +409,13 @@ public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFile
     };
     public async Task<(string Title, string FinalUrl, string Text, bool IsSearchPage)> ReadAsync(string value, CancellationToken cancellationToken)
     {
+        var result = await ReadVersionedAsync(value, null, null, cancellationToken);
+        return (result.Title, result.FinalUrl, result.Text, result.IsSearchPage);
+    }
+
+    public async Task<UniversalUrlReadResult> ReadVersionedAsync(string value, string? etag, DateTimeOffset? lastModifiedUtc,
+        CancellationToken cancellationToken)
+    {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "https" || uri.Port != 443 ||
             !string.IsNullOrEmpty(uri.UserInfo) || uri.Fragment.Length > 0 || IPAddress.TryParse(uri.Host, out _) ||
             uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
@@ -414,7 +424,13 @@ public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFile
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.Accept.ParseAdd("text/html,text/plain,application/xhtml+xml,application/pdf,application/json");
+            if (!string.IsNullOrWhiteSpace(etag) && System.Net.Http.Headers.EntityTagHeaderValue.TryParse(etag, out var entityTag))
+                request.Headers.IfNoneMatch.Add(entityTag);
+            if (lastModifiedUtc.HasValue) request.Headers.IfModifiedSince = lastModifiedUtc.Value;
             using var response = await clients.CreateClient("learning-source").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotModified)
+                return new UniversalUrlReadResult("", uri.ToString(), "", false, response.Headers.ETag?.Tag ?? etag,
+                    response.Content.Headers.LastModified ?? lastModifiedUtc, true);
             if ((int)response.StatusCode is >= 300 and <= 399)
             {
                 if (redirects == 3 || response.Headers.Location is null) throw new InvalidDataException("URL chuyển hướng quá số lần cho phép.");
@@ -460,7 +476,8 @@ public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFile
                 if (string.IsNullOrWhiteSpace(fileName) || Path.GetExtension(fileName).Length == 0) fileName = "document" + extension;
                 var document = await reader.ReadAsync(fileName, type, documentStream, cancellationToken);
                 var documentText = string.Join("\n\n", document.Excerpts.Select(item => $"[{item.Citation}]\n{item.Text}"));
-                return (fileName, uri.ToString(), documentText, false);
+                return new UniversalUrlReadResult(fileName, uri.ToString(), documentText, false, response.Headers.ETag?.Tag,
+                    response.Content.Headers.LastModified, false);
             }
             var charset = response.Content.Headers.ContentType?.CharSet?.Trim().Trim('"');
             Encoding encoding;
@@ -488,7 +505,8 @@ public sealed class UniversalUrlReader(IHttpClientFactory clients, UniversalFile
                 queryKeys.Any(key => key is not null && key.Equals("q", StringComparison.OrdinalIgnoreCase) ||
                                      key is not null && key.Equals("query", StringComparison.OrdinalIgnoreCase) ||
                                      key is not null && key.Equals("search", StringComparison.OrdinalIgnoreCase));
-            return (title, uri.ToString(), text, searchPage);
+            return new UniversalUrlReadResult(title, uri.ToString(), text, searchPage, response.Headers.ETag?.Tag,
+                response.Content.Headers.LastModified, false);
         }
         throw new InvalidOperationException("Không thể đọc URL.");
     }
