@@ -180,9 +180,66 @@ public sealed class GoogleDriveStorage : IStorageProvider
         try { return Results.Ok(await StatusAsync(context.RequestAborted)); }
         catch (Exception error) when (IsRemoteError(error))
         {
+            var message = DriveStatusMessage(error);
+            context.RequestServices.GetService<ILogger<GoogleDriveStorage>>()?.LogWarning(
+                "Drive status check failed ({ErrorType}, {Reason}).", error.GetType().Name,
+                error is DriveApiException driveError ? DriveApiReason(driveError.Body) ?? "unknown" : "non-drive-api-error");
             return Results.Ok(new CloudStorageStatus(true, true, account.Email, false, null,
-                "Drive đang tạm thời không truy cập được. Dữ liệu cục bộ và Đệ Tốt vẫn hoạt động."));
+                message));
         }
+    }
+
+    private static string DriveStatusMessage(Exception error)
+    {
+        if (error is not DriveApiException drive) return "Drive đang tạm thời không truy cập được. Kiểm tra kết nối rồi thử lại.";
+        var reason = DriveApiReason(drive.Body);
+        var detail = DriveApiMessage(drive.Body);
+        if (reason is "accessNotConfigured" or "SERVICE_DISABLED" || ContainsAny(detail, "has not been used", "has not been enabled", "API has not been", "API is disabled"))
+            return "Google Drive API chưa được bật trong Google Cloud project của OAuth client. Bật Drive API rồi làm mới trang.";
+        if (reason is "insufficientPermissions" or "insufficientFilePermissions" || ContainsAny(detail, "insufficient authentication scopes", "insufficient permission", "insufficient permissions"))
+            return "Google Drive từ chối quyền hiện tại. Kiểm tra drive.file đã được cấp trong Google consent rồi làm mới trạng thái.";
+        if (reason is "rateLimitExceeded" or "userRateLimitExceeded" or "backendError")
+            return "Google Drive API đang giới hạn hoặc tạm lỗi. Thử lại sau một lát.";
+        var safeDetail = new string(detail.Where(character => !char.IsControl(character)).Take(240).ToArray());
+        if (string.IsNullOrWhiteSpace(safeDetail))
+            safeDetail = new string(drive.Body.Where(character => !char.IsControl(character)).Take(240).ToArray());
+        return $"Google Drive API trả HTTP {(int)drive.Status}{(string.IsNullOrWhiteSpace(reason) ? "" : $" ({reason})")}" +
+            (string.IsNullOrWhiteSpace(safeDetail) ? ". Kiểm tra trạng thái API và quyền OAuth." : $": {safeDetail}");
+    }
+
+    private static bool ContainsAny(string value, params string[] phrases) =>
+        phrases.Any(phrase => value.Contains(phrase, StringComparison.OrdinalIgnoreCase));
+
+    private static string DriveApiMessage(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.GetProperty("error").TryGetProperty("message", out var message) &&
+                message.ValueKind == JsonValueKind.String ? message.GetString() ?? "" : "";
+        }
+        catch (JsonException) { return body; }
+        catch (KeyNotFoundException) { return ""; }
+    }
+
+    private static string? DriveApiReason(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            var error = document.RootElement.GetProperty("error");
+            if (error.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0 &&
+                errors[0].TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String)
+                return reason.GetString();
+            if (error.TryGetProperty("details", out var details) && details.ValueKind == JsonValueKind.Array && details.GetArrayLength() > 0 &&
+                details[0].TryGetProperty("reason", out var detailReason) && detailReason.ValueKind == JsonValueKind.String)
+                return detailReason.GetString();
+            if (error.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String)
+                return status.GetString();
+            return null;
+        }
+        catch (JsonException) { return null; }
+        catch (KeyNotFoundException) { return null; }
     }
 
     private async Task<IResult> Guard(HttpContext context, Func<Task<IResult>> action, bool requireAccount = true)
@@ -879,7 +936,11 @@ public sealed class GoogleDriveStorage : IStorageProvider
         string? Description, Dictionary<string, string>? AppProperties, string? WebViewLink);
     private sealed record SyncHistory(DateTimeOffset Utc, string Action, string Target, string Result, string? Sha256);
     public sealed record RetentionRequest(int Keep);
-    private sealed class DriveApiException(HttpStatusCode status, string body) : HttpRequestException($"Drive API returned {(int)status}.") { public string Body { get; } = body; }
+    private sealed class DriveApiException(HttpStatusCode status, string body) : HttpRequestException($"Drive API returned {(int)status}.")
+    {
+        public HttpStatusCode Status { get; } = status;
+        public string Body { get; } = body;
+    }
     private sealed class StorageConflictException(string message) : Exception(message);
     private sealed class SemaphoreLease(SemaphoreSlim gate) : IAsyncDisposable
     {
