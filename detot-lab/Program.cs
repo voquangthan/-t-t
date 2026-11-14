@@ -315,7 +315,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (previous is { Length: > 1500 } || (previous is not null && !IsCalendarCommand(previous)))
             return Results.BadRequest(new { error = "Ngữ cảnh tạo lịch không hợp lệ." });
         var command = !practicing && IsCalendarCommand(message) ? message : previous;
-        var googleCalendarRequest = command is not null && IsGoogleCalendarCommand(command);
+        var googleCalendarRequest = command is not null && IsCalendarCommand(command);
         var calendarRequest = command is not null && (googleCalendarRequest || calendarTrialEnabled);
         var calendarTool = googleCalendarRequest ? "detot_google_calendar_create" : "detot_trial_calendar_create";
         var calendarInput = calendarRequest && previous is not null && !IsCalendarCommand(message)

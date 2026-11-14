@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 
-const lab = `http://127.0.0.1:${process.env.DETOT_WEB_PORT || "5183"}`;
+const lab = `http://localhost:${process.env.DETOT_WEB_PORT || "5183"}`;
 const workspace = new URL("/workspace", process.env.DETOT_PUBLIC_ORIGIN || lab).href;
 const devOrigins = new Set(["http://127.0.0.1:5173", "http://localhost:5173"]);
 
