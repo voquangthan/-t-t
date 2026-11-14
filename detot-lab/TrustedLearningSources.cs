@@ -463,7 +463,8 @@ public sealed class TrustedLearningSources
             .Select(item => (Item: item, Score: Tokens(item.Text).Count(words.Contains)))
             .Where(pair => pair.Score > 0)
             .OrderByDescending(pair => pair.Score).ThenByDescending(pair => pair.Item.UpdatedUtc).Take(Math.Clamp(take, 1, 40))
-            .Select(pair => new KnowledgeView(pair.Item.Text, pair.Item.SourceName, pair.Item.Citation, pair.Item.License, pair.Item.Hash, pair.Score))
+            .Select(pair => new KnowledgeView(pair.Item.Text, pair.Item.SourceName, pair.Item.Citation, pair.Item.License, pair.Item.Hash, pair.Score,
+                pair.Item.LicenseEvidenceUrl, pair.Item.LicenseDetectionMethod, pair.Item.SourceVersion))
             .ToArray();
     }
 
@@ -712,12 +713,13 @@ public sealed class TrustedLearningSources
             var page = await _urlReader.ReadAsync(source.Scope, cancellationToken);
             if (!new Uri(page.FinalUrl).Host.Equals(new Uri(source.Scope).Host, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Nguồn chuyển hướng sang host khác với phạm vi đã phê duyệt.");
-            return new SourceDocument(page.Title, page.FinalUrl, source.License, page.Text);
+            return new SourceDocument(page.Title, page.FinalUrl, source.License, page.Text, source.LicenseEvidenceUrl, source.LicenseDetectionMethod);
         }
         using var response = await GetPublicAsync(source.Scope, "text/html,text/plain,text/markdown,application/xhtml+xml", cancellationToken);
         var body = await ReadLimitedTextAsync(response, cancellationToken);
         var text = response.Content.Headers.ContentType?.MediaType is "text/html" or "application/xhtml+xml" ? HtmlToText(body) : body;
-        return new SourceDocument(source.Name, source.Scope, source.License, text);
+        var version = response.Headers.ETag?.Tag ?? response.Content.Headers.LastModified?.ToString("O");
+        return new SourceDocument(source.Name, source.Scope, source.License, text, source.LicenseEvidenceUrl, source.LicenseDetectionMethod, version);
     }
 
     private async Task<SourceDocument> ReadGitHubAsync(Source source, CancellationToken cancellationToken)
@@ -725,7 +727,9 @@ public sealed class TrustedLearningSources
         var uri = GitHubRepoApi(source.Scope) + "/readme";
         using var response = await GetPublicAsync(uri, "application/vnd.github.raw+json", cancellationToken);
         var text = await ReadLimitedTextAsync(response, cancellationToken);
-        return new SourceDocument(source.Name + " — README.md", source.Scope + "#readme", source.License, text);
+        var version = response.Headers.ETag?.Tag ?? response.Content.Headers.LastModified?.ToString("O");
+        return new SourceDocument(source.Name + " — README.md", source.Scope + "#readme", source.License, text,
+            source.LicenseEvidenceUrl, source.LicenseDetectionMethod, version);
     }
 
     private async Task<SourceDocument[]> ReadDriveFolderAsync(Source source, IReadOnlyList<CloudArtifact> items, CancellationToken cancellationToken)
@@ -742,7 +746,8 @@ public sealed class TrustedLearningSources
                 await using var input = File.OpenRead(download.Path);
                 var extracted = await _fileReader.ReadAsync(download.Name, download.ContentType, input, cancellationToken);
                 foreach (var excerpt in extracted.Excerpts)
-                    documents.Add(new SourceDocument(item.Name, $"drive://{item.Id}#{Uri.EscapeDataString(excerpt.Citation)}", item.License, excerpt.Text));
+                    documents.Add(new SourceDocument(item.Name, $"drive://{item.Id}#{Uri.EscapeDataString(excerpt.Citation)}", item.License, excerpt.Text,
+                        $"drive://{item.Id}", "CloudArtifact license metadata", $"{item.Version}|{item.Sha256}|{item.ModifiedTime:O}"));
             }
             catch (InvalidDataException error) { _logger.LogWarning("Skipping Drive artifact {ArtifactId}: {Reason}", item.Id, SafeError(error.Message)); }
             finally { try { File.Delete(download.Path); } catch (IOException) { } }
@@ -796,7 +801,8 @@ public sealed class TrustedLearningSources
                         }
                     }
                     additions.Add(new KnowledgeItem(Guid.NewGuid(), source.Id, source.Name, document.Title, chunk,
-                        document.Citation, document.License, hash, gate, DateTimeOffset.UtcNow, reason, fingerprint));
+                        document.Citation, document.License, hash, gate, DateTimeOffset.UtcNow, reason, fingerprint,
+                        document.LicenseEvidenceUrl, document.LicenseDetectionMethod, document.Version ?? fingerprint));
                     if (gate == "quarantined") quarantined++; else if (gate == "review") review++; else accepted++;
                 }
             }
@@ -1021,10 +1027,12 @@ public sealed class TrustedLearningSources
         DateTimeOffset? NextAttemptUtc = null, DateTimeOffset? LastAttemptUtc = null, string WorkerState = "idle",
         string LastSyncStatus = "never", string? LastContentFingerprint = null, int LastQuarantined = 0, int QuarantinedDocuments = 0,
         string? LastManifestFingerprint = null, long LastDurationMilliseconds = 0);
-    private sealed record SourceDocument(string Title, string Citation, string License, string Text);
+    private sealed record SourceDocument(string Title, string Citation, string License, string Text,
+        string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? Version = null);
     private sealed record KnowledgeItem(Guid Id, Guid SourceId, string SourceName, string Title, string Text,
         string Citation, string License, string Hash, string State, DateTimeOffset UpdatedUtc,
-        string? QuarantineReason = null, string? VersionFingerprint = null);
+        string? QuarantineReason = null, string? VersionFingerprint = null, string? LicenseEvidenceUrl = null,
+        string? LicenseDetectionMethod = null, string? SourceVersion = null);
     private sealed record SourceCheckResult(bool Ok, string Summary, int FileCount, string? DetectedLicense = null,
         string? EvidenceUrl = null, string? DetectionMethod = null, string? QuarantineReason = null, int QuarantinedDocuments = 0);
     private sealed record LicenseEvidence(string License, string Url, string Method);
@@ -1041,7 +1049,8 @@ public sealed class TrustedLearningSources
         bool CloudMirrorPending);
     public sealed record QuarantineView(string Type, Guid SourceId, string Source, string Reason, string Citation,
         string? Hash, DateTimeOffset? UpdatedUtc);
-    public sealed record KnowledgeView(string Text, string Source, string Citation, string License, string Sha256, int Relevance);
+    public sealed record KnowledgeView(string Text, string Source, string Citation, string License, string Sha256, int Relevance,
+        string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? SourceVersion = null);
     public sealed record SyncSummary(Guid Id, string Name, int Accepted, int NeedsReview, int Duplicates,
         DateTimeOffset? SyncedUtc, string? Message, int Quarantined = 0, bool Unchanged = false);
 }
