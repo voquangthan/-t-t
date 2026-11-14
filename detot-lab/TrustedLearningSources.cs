@@ -21,6 +21,8 @@ public sealed class TrustedLearningSources
     private readonly IHttpClientFactory _clients;
     private readonly IStorageProvider _drive;
     private readonly ILogger<TrustedLearningSources> _logger;
+    private readonly UniversalFileReader _fileReader;
+    private readonly UniversalUrlReader? _urlReader;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _mirrorGate = new(1, 1);
     private readonly SemaphoreSlim _cloudRefreshGate = new(1, 1);
@@ -28,13 +30,15 @@ public sealed class TrustedLearningSources
     private State _state;
 
     public TrustedLearningSources(string directory, IDataProtectionProvider protection, IHttpClientFactory clients,
-        IStorageProvider drive, ILogger<TrustedLearningSources> logger)
+        IStorageProvider drive, ILogger<TrustedLearningSources> logger, UniversalFileReader? fileReader = null, UniversalUrlReader? urlReader = null)
     {
         _path = Path.Combine(directory, "state.bin");
         _protector = protection.CreateProtector("Detot.TrustedLearning.v1");
         _clients = clients;
         _drive = drive;
         _logger = logger;
+        _fileReader = fileReader ?? new UniversalFileReader();
+        _urlReader = urlReader;
         _state = ReadState();
     }
 
@@ -470,13 +474,20 @@ public sealed class TrustedLearningSources
             .Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToArray();
         if (unknownLicenses.Length > 0)
             return (false, $"Giấy phép metadata chưa được nhận diện: {string.Join(", ", unknownLicenses)}. Sửa metadata trong Cloud Storage rồi kiểm tra lại.", scoped.Length);
-        var extractable = scoped.Count(item => new[] { ".json", ".jsonl", ".csv", ".txt", ".md" }.Contains(Path.GetExtension(item.Name), StringComparer.OrdinalIgnoreCase));
-        if (extractable == 0) return (false, "Dataset có giấy phép nhưng chưa có định dạng trích xuất được. PDF và Parquet chưa được lập chỉ mục.", scoped.Length);
-        return (true, $"Drive truy cập được; {scoped.Length} dataset có giấy phép, {extractable} tệp có thể trích xuất. PDF/Parquet bị bỏ qua. Phạm vi chỉ là DETOT-AI/datasets/{category}.", scoped.Length);
+        var extractable = scoped.Count(item => IsSupportedLearningFile(item.Name));
+        if (extractable == 0) return (false, "Dataset có giấy phép nhưng chưa có định dạng trích xuất được. PDF scan, ảnh, SQLite và Office cũ cần adapter riêng.", scoped.Length);
+        return (true, $"Drive truy cập được; {scoped.Length} dataset có giấy phép, {extractable} tệp thuộc định dạng Reader hỗ trợ. PDF scan, ảnh, SQLite và Office cũ bị bỏ qua. Phạm vi chỉ là DETOT-AI/datasets/{category}.", scoped.Length);
     }
 
     private async Task<SourceDocument> ReadWebsiteAsync(Source source, CancellationToken cancellationToken)
     {
+        if (_urlReader is not null)
+        {
+            var page = await _urlReader.ReadAsync(source.Scope, cancellationToken);
+            if (!new Uri(page.FinalUrl).Host.Equals(new Uri(source.Scope).Host, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Nguồn chuyển hướng sang host khác với phạm vi đã phê duyệt.");
+            return new SourceDocument(page.Title, page.FinalUrl, source.License, page.Text);
+        }
         using var response = await GetPublicAsync(source.Scope, "text/html,text/plain,text/markdown,application/xhtml+xml", cancellationToken);
         var body = await ReadLimitedTextAsync(response, cancellationToken);
         var text = response.Content.Headers.ContentType?.MediaType is "text/html" or "application/xhtml+xml" ? HtmlToText(body) : body;
@@ -504,13 +515,13 @@ public sealed class TrustedLearningSources
             var download = await _drive.DownloadVerifiedAsync(item.Id, cancellationToken);
             try
             {
-                if (download.Size > MaxSourceBytes) continue;
-                var extension = Path.GetExtension(download.Name).ToLowerInvariant();
-                if (extension is not (".json" or ".jsonl" or ".csv" or ".txt" or ".md")) continue;
-                var raw = await File.ReadAllTextAsync(download.Path, Encoding.UTF8, cancellationToken);
-                var text = DatasetText(raw, extension);
-                documents.Add(new SourceDocument(item.Name, $"drive://{item.Id}", item.License, text));
+                if (download.Size > UniversalFileReader.MaxFileBytes || !IsSupportedLearningFile(download.Name)) continue;
+                await using var input = File.OpenRead(download.Path);
+                var extracted = await _fileReader.ReadAsync(download.Name, download.ContentType, input, cancellationToken);
+                foreach (var excerpt in extracted.Excerpts)
+                    documents.Add(new SourceDocument(item.Name, $"drive://{item.Id}#{Uri.EscapeDataString(excerpt.Citation)}", item.License, excerpt.Text));
             }
+            catch (InvalidDataException error) { _logger.LogWarning("Skipping Drive artifact {ArtifactId}: {Reason}", item.Id, SafeError(error.Message)); }
             finally { try { File.Delete(download.Path); } catch (IOException) { } }
         }
         return documents.ToArray();
@@ -615,17 +626,33 @@ public sealed class TrustedLearningSources
         return uri;
     }
 
+    private static bool IsSupportedLearningFile(string name) => new[]
+    {
+        ".txt", ".md", ".markdown", ".json", ".jsonl", ".ndjson", ".xml", ".csv", ".tsv",
+        ".cs", ".py", ".js", ".jsx", ".ts", ".tsx", ".sql", ".html", ".css", ".yml", ".yaml",
+        ".toml", ".ini", ".sh", ".ps1", ".java", ".go", ".rs", ".php", ".rb", ".c", ".h", ".cpp", ".hpp",
+        ".docx", ".xlsx", ".pptx", ".pdf", ".zip", ".parquet", ".sqlite", ".sqlite3", ".db"
+    }.Contains(Path.GetExtension(name), StringComparer.OrdinalIgnoreCase);
+
     public static bool IsPublicAddress(IPAddress address)
     {
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
         if (IPAddress.IsLoopback(address) || address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6Multicast) return false;
         var bytes = address.GetAddressBytes();
         if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
-            return (bytes[0] & 0xfe) != 0xfc && !(bytes.Take(15).All(value => value == 0) && bytes[15] <= 1);
+            return (bytes[0] & 0xfe) != 0xfc && !(bytes.Take(15).All(value => value == 0) && bytes[15] <= 1) &&
+                !(bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xff && bytes[3] == 0x9b) &&
+                !(bytes[0] == 0x20 && bytes[1] == 0x02) &&
+                !(bytes[0] == 0x20 && bytes[1] == 0x01 &&
+                  ((bytes[2] == 0x0d && bytes[3] == 0xb8) || bytes[2] == 0x00));
         return !(bytes[0] == 0 || bytes[0] == 10 || bytes[0] == 127 || bytes[0] >= 224 ||
             (bytes[0] == 169 && bytes[1] == 254) || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) ||
             (bytes[0] == 192 && bytes[1] == 168) || (bytes[0] == 100 && bytes[1] is >= 64 and <= 127) ||
-            (bytes[0] == 198 && bytes[1] is 18 or 19));
+            (bytes[0] == 198 && bytes[1] is 18 or 19) ||
+            (bytes[0] == 192 && bytes[1] == 0 && bytes[2] is 0 or 2) ||
+            (bytes[0] == 192 && bytes[1] == 88 && bytes[2] == 99) ||
+            (bytes[0] == 198 && bytes[1] == 51 && bytes[2] == 100) ||
+            (bytes[0] == 203 && bytes[1] == 0 && bytes[2] == 113) || bytes[0] >= 240);
     }
 
     private static string GitHubRepoApi(string scope)
@@ -641,37 +668,6 @@ public sealed class TrustedLearningSources
         content = Regex.Replace(content, "(?s)<[^>]+>", " ");
         content = WebUtility.HtmlDecode(content);
         return Regex.Replace(content, @"[\t \u00a0]+|\n{3,}", match => match.Value.Contains('\n') ? "\n\n" : " ").Trim();
-    }
-
-    private static string DatasetText(string raw, string extension)
-    {
-        if (extension is ".txt" or ".md") return raw;
-        var values = new List<string>();
-        if (extension == ".jsonl")
-        {
-            foreach (var line in raw.Split('\n').Take(5000))
-            {
-                try { using var json = JsonDocument.Parse(line); CollectStrings(json.RootElement, values, 30); }
-                catch (JsonException) { }
-            }
-        }
-        else if (extension == ".json")
-        {
-            using var json = JsonDocument.Parse(raw);
-            CollectStrings(json.RootElement, values, 5000);
-        }
-        else values.AddRange(raw.Split('\n').Take(5000).Select(line => line.Replace(',', ' ')));
-        return string.Join("\n", values);
-    }
-
-    private static void CollectStrings(JsonElement element, List<string> output, int max)
-    {
-        if (output.Count >= max) return;
-        if (element.ValueKind == JsonValueKind.String) { var value = element.GetString(); if (!string.IsNullOrWhiteSpace(value)) output.Add(value); }
-        else if (element.ValueKind == JsonValueKind.Object)
-            foreach (var property in element.EnumerateObject()) CollectStrings(property.Value, output, max);
-        else if (element.ValueKind == JsonValueKind.Array)
-            foreach (var child in element.EnumerateArray()) CollectStrings(child, output, max);
     }
 
     private static IEnumerable<string> Chunks(string text)

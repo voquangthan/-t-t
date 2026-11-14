@@ -24,11 +24,19 @@ Memory backup chỉ nhận các nguồn được cấu hình rõ ràng bằng `D
 
 Dung lượng hiển thị là tổng byte artifact trong cây `DETOT-AI` mà API cho phép liệt kê, không phải toàn bộ quota tài khoản. Chưa có OAuth consent trong môi trường triển khai thì giao diện sẽ báo chưa cấu hình/chưa kết nối, không hiển thị dữ liệu mẫu.
 
+## File & URL Reader
+
+Trong chat, có thể kéo thả/chọn tối đa 5 tệp hoặc gửi URL HTTPS công khai. Reader trích xuất văn bản ngay trong lab, đưa vào đúng lượt hỏi đáp rồi bỏ khỏi ngữ cảnh request; Read Mode không thêm nội dung vào Memory/RAG. Dataset Drive đã được phê duyệt dùng chung `UniversalFileReader` trước khi chạy Quality Gate. Các trích đoạn có SHA-256 và nhãn dòng, phần DOCX, hàng/sheet XLSX và slide PPTX; ZIP chỉ đọc tối đa 100 mục và 32 MiB giải nén, không ghi file ra đĩa hay chạy nội dung bên trong.
+
+Văn bản, JSON/JSONL, XML, CSV/TSV, source code, DOCX, XLSX, PPTX, PDF có lớp văn bản, Parquet, SQLite và ZIP văn bản được trích xuất cục bộ. PDF giữ số trang; PDF scan cần OCR riêng. XLSX giữ tên phần sheet và hàng; SQLite mở read-only, chỉ đọc tối đa 20 bảng/1000 hàng, không thực thi SQL từ người dùng; Parquet giới hạn 2000 hàng. JPEG/PNG/GIF/WebP được gửi dạng ảnh qua Responses API tới model `deepseek-flash` đang khai báo Vision trong cấu hình lab; giới hạn 3 ảnh, 4 MiB mỗi ảnh. Phần văn bản/ảnh được gửi tới nhà cung cấp LLM để trả lời. URL reader chỉ lấy HTTPS, giới hạn 2 MiB, timeout và 3 lần redirect; client khóa proxy và từ chối DNS trả địa chỉ private. Trang chỉ có nội dung JavaScript, redirect ra HTTP, CAPTCHA hoặc đăng nhập không được vượt qua.
+
+PDF scan, TIFF/BMP và DOC/XLS/PPT cũ hiện trả lỗi adapter chưa được cài, không báo đã đọc thành công. Ảnh nhúng trong Office/PDF, citation theo trang in DOCX và PDF renderer/preview chưa có. Không dùng HTML renderer bên ngoài cho nội dung chat. Đây là các giới hạn rõ ràng thay vì kết quả giả.
+
 ## Trusted Learning Sources
 
 Trang **Nguồn học** quản lý các nguồn ở trạng thái `pending → checked → approved`. Người dùng phải thêm, kiểm tra phạm vi/giấy phép và bấm **Phê duyệt**; worker chỉ đọc nguồn đã duyệt. Website được giới hạn ở đúng một URL (không theo liên kết), GitHub chỉ đọc README của một repository, còn Drive chỉ đọc một nhóm dataset con trong `DETOT-AI/datasets`. Không có chức năng tự tìm nguồn trên Internet. Website cần URL bằng chứng giấy phép; GitHub đối chiếu SPDX license với metadata repository; Drive kiểm tra license từng artifact.
 
-Worker chạy mỗi 15 phút, đồng bộ lại nguồn tối đa mỗi 6 giờ hoặc theo yêu cầu thủ công. HTML, README và dataset JSON/JSONL/CSV/TXT/Markdown được tách thành đoạn, bỏ trùng theo SHA-256, gắn citation và giấy phép. Trường hợp có dấu hiệu mâu thuẫn theo heuristic được giữ ở hàng **Ứng viên cần xem lại**; người dùng duyệt đoạn đó riêng trước khi đưa vào RAG. PDF và Parquet hiện chưa được trích xuất. Đây là cập nhật chỉ mục RAG, không tự huấn luyện hoặc thay đổi trọng số model.
+Worker chạy mỗi 15 phút, đồng bộ lại nguồn tối đa mỗi 6 giờ hoặc theo yêu cầu thủ công. HTML/README và định dạng file được Reader hỗ trợ trích thành đoạn, bỏ trùng theo SHA-256, gắn citation và giấy phép. Trường hợp có dấu hiệu mâu thuẫn theo heuristic được giữ ở hàng **Ứng viên cần xem lại**; người dùng duyệt đoạn đó riêng trước khi đưa vào RAG. PDF scan và Office cũ chưa được trích xuất. Đây là cập nhật chỉ mục RAG, không tự huấn luyện hoặc thay đổi trọng số model.
 
 Danh sách nguồn và chỉ mục cục bộ được mã hóa bằng Data Protection; snapshot có kiểm tra checksum được đồng bộ vào `DETOT-AI/documents` để máy khác nạp lại. Thu hồi nguồn sẽ gỡ các đoạn của nguồn khỏi chỉ mục hoạt động và cập nhật snapshot Drive; file dataset gốc vẫn được giữ nguyên. Vì người dùng phê duyệt việc thu thập, nội dung trích xuất của nguồn được lưu trong snapshot Drive.
 

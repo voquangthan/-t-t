@@ -12,6 +12,14 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("restore verifies encryption and external session revocation authority", RestoreIsVerified),
     ("trusted learning requires source check and user approval before Drive indexing", TrustedLearningWorkflow),
     ("trusted learning rejects unknown licenses and unsafe URL scopes", TrustedLearningRejectsUnsafeSources),
+    ("universal reader extracts text with checksum and line citations", ReaderExtractsText),
+    ("universal reader extracts office XML with structural citations", ReaderExtractsDocx),
+    ("universal reader extracts PDF text with page citations", ReaderExtractsPdf),
+    ("universal reader extracts Parquet rows with row group citations", ReaderExtractsParquet),
+    ("universal reader opens SQLite read-only and returns table citations", ReaderExtractsSqlite),
+    ("universal reader rejects unsupported formats and filters unsafe ZIP paths", ReaderRejectsAndFilters),
+    ("universal URL reader blocks local and non-HTTPS destinations", UrlReaderRejectsUnsafeTargets),
+    ("universal URL reader extracts main content and labels search pages", UrlReaderExtractsContent),
 };
 
 var failed = 0;
@@ -41,6 +49,131 @@ static async Task DatasetRejects()
     await Throws<ArgumentException>(() => manager.StartUploadAsync(new("dataset", "vietnamese", "faq.exe", "v1", "", "source", "CC BY 4.0", 12), CancellationToken.None));
     Assert(DatasetLicenseCatalog.IsRecognized("CC BY 4.0"), "common license display names should map to a recognized license");
     Assert(provider.Started is null, "invalid metadata must not start a cloud upload");
+}
+
+static async Task ReaderExtractsText()
+{
+    var reader = new UniversalFileReader();
+    var data = Encoding.UTF8.GetBytes("Question,Answer\r\nXin chào,Xin chào bạn");
+    await using var stream = new MemoryStream(data);
+    var result = await reader.ReadAsync("faq.csv", "text/csv", stream, CancellationToken.None);
+    Assert(result.Sha256 == Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant(), "reader should return source SHA-256");
+    Assert(result.Excerpts.Count == 1 && result.Excerpts[0].Citation.Contains("dòng 1-", StringComparison.Ordinal), "CSV should retain line citation");
+    Assert(result.Excerpts[0].Text.Contains("Xin chào", StringComparison.Ordinal), "CSV content should remain readable");
+}
+
+static async Task ReaderExtractsDocx()
+{
+    using var archiveBytes = new MemoryStream();
+    using (var archive = new System.IO.Compression.ZipArchive(archiveBytes, System.IO.Compression.ZipArchiveMode.Create, true))
+    {
+        var entry = archive.CreateEntry("word/document.xml");
+        await using var output = entry.Open();
+        var xml = System.Text.Encoding.UTF8.GetBytes("<document xmlns:w=\"urn:w\"><body><p><r><t>Hello from DOCX</t></r></p></body></document>");
+        await output.WriteAsync(xml);
+    }
+    archiveBytes.Position = 0;
+    var result = await new UniversalFileReader().ReadAsync("sample.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", archiveBytes, CancellationToken.None);
+    Assert(result.Excerpts.Any(item => item.Text.Contains("Hello from DOCX", StringComparison.Ordinal)), "DOCX paragraph should be extracted");
+    Assert(result.Excerpts[0].Citation.Contains("document · đoạn", StringComparison.Ordinal), "DOCX citation should identify document part and paragraph range");
+}
+
+static async Task ReaderRejectsAndFilters()
+{
+    var reader = new UniversalFileReader();
+    await using (var pdf = new MemoryStream(Encoding.ASCII.GetBytes("%PDF-1.7")))
+        await Throws<InvalidDataException>(() => reader.ReadAsync("scan.pdf", "application/pdf", pdf, CancellationToken.None));
+    using var zipBytes = new MemoryStream();
+    using (var archive = new System.IO.Compression.ZipArchive(zipBytes, System.IO.Compression.ZipArchiveMode.Create, true))
+    {
+        foreach (var (name, value) in new[] { ("../outside.txt", "must not read"), ("safe/readme.txt", "safe text") })
+        {
+            var entry = archive.CreateEntry(name);
+            await using var output = entry.Open();
+            await output.WriteAsync(Encoding.UTF8.GetBytes(value));
+        }
+    }
+    zipBytes.Position = 0;
+    var extracted = await reader.ReadAsync("sample.zip", "application/zip", zipBytes, CancellationToken.None);
+    Assert(extracted.Excerpts.Any(item => item.Text.Contains("safe text", StringComparison.Ordinal)), "safe text should be read from archive");
+    Assert(extracted.Excerpts.All(item => !item.Text.Contains("must not read", StringComparison.Ordinal)), "path traversal entry must be ignored");
+}
+
+static async Task UrlReaderRejectsUnsafeTargets()
+{
+    var reader = new UniversalUrlReader(new FakeHttpClientFactory());
+    await Throws<ArgumentException>(() => reader.ReadAsync("http://127.0.0.1/admin", CancellationToken.None));
+    await Throws<ArgumentException>(() => reader.ReadAsync("https://192.168.1.10/private", CancellationToken.None));
+    await Throws<ArgumentException>(() => reader.ReadAsync("https://user:pass@example.com/", CancellationToken.None));
+    Assert(!TrustedLearningSources.IsPublicAddress(System.Net.IPAddress.Parse("192.0.2.12")), "reserved IPv4 documentation ranges must be blocked");
+    Assert(!TrustedLearningSources.IsPublicAddress(System.Net.IPAddress.Parse("203.0.113.12")), "reserved IPv4 example ranges must be blocked");
+    Assert(TrustedLearningSources.IsPublicAddress(System.Net.IPAddress.Parse("8.8.8.8")), "a public resolver address should remain permitted");
+}
+
+static async Task UrlReaderExtractsContent()
+{
+    var html = "<html><head><title>Docs</title></head><body><nav>Menu noise</nav><main><h1>Reader guide</h1><p>Stable article content for this extraction check.</p></main></body></html>";
+    var factory = new StaticResponseHttpClientFactory(() => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+    {
+        Content = new StringContent(html, Encoding.UTF8, "text/html")
+    });
+    var page = await new UniversalUrlReader(factory).ReadAsync("https://docs.example.test/search?q=reader", CancellationToken.None);
+    Assert(page.Title == "Docs" && page.IsSearchPage, "page metadata should identify search results");
+    Assert(page.Text.Contains("Reader guide", StringComparison.Ordinal) && !page.Text.Contains("Menu noise", StringComparison.Ordinal), "main content should be extracted without navigation");
+}
+
+static async Task ReaderExtractsPdf()
+{
+    var builder = new UglyToad.PdfPig.Writer.PdfDocumentBuilder();
+    var page = builder.AddPage(UglyToad.PdfPig.Content.PageSize.A4);
+    var font = builder.AddStandard14Font(UglyToad.PdfPig.Fonts.Standard14Fonts.Standard14Font.Helvetica);
+    page.AddText("Detot PDF test text", 12, new UglyToad.PdfPig.Core.PdfPoint(25, 700), font);
+    await using var input = new MemoryStream(builder.Build());
+    var result = await new UniversalFileReader().ReadAsync("sample.pdf", "application/pdf", input, CancellationToken.None);
+    Assert(result.Excerpts.Count == 1 && result.Excerpts[0].Text.Contains("Detot PDF test text", StringComparison.Ordinal), "PDF text should be extracted");
+    Assert(result.Excerpts[0].Citation == "page 1", "PDF citation should preserve page number");
+}
+
+static async Task ReaderExtractsParquet()
+{
+    var field = new Parquet.Schema.DataField<string>("city");
+    var countField = new Parquet.Schema.DataField<int>("count");
+    var schema = new Parquet.Schema.ParquetSchema(field, countField);
+    using var data = new MemoryStream();
+    await using (var writer = await Parquet.ParquetWriter.CreateAsync(schema, data))
+    {
+        using var group = writer.CreateRowGroup();
+        await group.WriteAsync(field, new[] { "Hà Nội", "Đà Nẵng" });
+        await group.WriteAsync(countField, new ReadOnlyMemory<int>(new[] { 12, 25 }));
+    }
+    data.Position = 0;
+    var result = await new UniversalFileReader().ReadAsync("cities.parquet", "application/vnd.apache.parquet", data, CancellationToken.None);
+    Assert(result.Excerpts.Count == 2 && result.Excerpts[0].Text.Contains("Hà Nội", StringComparison.Ordinal), "Parquet values should be extracted");
+    Assert(result.Excerpts[0].Text.Contains("count=12", StringComparison.Ordinal), "Parquet primitive values should be rendered");
+    Assert(result.Excerpts[0].Citation.Contains("row group 1", StringComparison.Ordinal), "Parquet row location should be preserved");
+}
+
+static async Task ReaderExtractsSqlite()
+{
+    var path = Path.Combine(Path.GetTempPath(), "detot-test-" + Guid.NewGuid().ToString("N") + ".sqlite");
+    try
+    {
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        { DataSource = path, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE notes(topic TEXT); INSERT INTO notes VALUES ('DNS');";
+            await command.ExecuteNonQueryAsync();
+        }
+        await using (var input = File.OpenRead(path))
+        {
+            var result = await new UniversalFileReader().ReadAsync("notes.sqlite", "application/x-sqlite3", input, CancellationToken.None);
+            Assert(result.Excerpts.Count == 1 && result.Excerpts[0].Text.Contains("DNS", StringComparison.Ordinal), "SQLite table values should be extracted");
+            Assert(result.Excerpts[0].Citation.Contains("table notes", StringComparison.Ordinal), "SQLite citation should preserve table and row");
+        }
+    }
+    finally { try { File.Delete(path); } catch (IOException) { } }
 }
 
 static async Task BackupIsEncrypted()
@@ -144,7 +277,8 @@ static async Task TrustedLearningWorkflow()
         var sync = await service.SyncAsync(pending.Id, CancellationToken.None);
         Assert(sync.Accepted > 0 && sync.NeedsReview == 0, "approved text dataset should pass quality checks and enter the index");
         var evidence = service.Search("VLAN trunk allowed list", 4);
-        Assert(evidence.Count == 1 && evidence[0].Citation == "drive://drive-learning-1", "RAG results must preserve the exact source citation");
+        Assert(evidence.Count == 1 && evidence[0].Citation.StartsWith("drive://drive-learning-1#", StringComparison.Ordinal) &&
+            Uri.UnescapeDataString(evidence[0].Citation).Contains("dòng", StringComparison.Ordinal), "RAG results must preserve source ID and extracted line citation");
         Assert(service.BuildContext("VLAN trunk")?.Contains("[K1]", StringComparison.Ordinal) == true, "chat context should include a stable citation marker");
         var secondMachine = new TrustedLearningSources(Path.Combine(root, "second-device"), new EphemeralDataProtectionProvider(),
             new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance);
@@ -232,4 +366,14 @@ sealed class FakeStorageProvider : IStorageProvider
 sealed class FakeHttpClientFactory : IHttpClientFactory
 {
     public HttpClient CreateClient(string name) => new(new HttpClientHandler());
+}
+
+sealed class StaticResponseHttpClientFactory(Func<HttpResponseMessage> response) : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(new StaticResponseHandler(response), disposeHandler: true);
+}
+
+sealed class StaticResponseHandler(Func<HttpResponseMessage> response) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(response());
 }

@@ -41,6 +41,20 @@ function Code({ className, children }: React.ComponentProps<"code">) {
   return <code className={className}>{children}</code>;
 }
 
+function AttachmentChip({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const [preview, setPreview] = useState<string>();
+  useEffect(() => {
+    if (!file.type.startsWith("image/")) { setPreview(undefined); return; }
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  return <span className="attachment-chip" title={`${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MiB`}>
+    {preview ? <img className="attachment-thumb" src={preview} alt={`Xem trước ${file.name}`} /> : "📎"} {file.name}
+    <button type="button" aria-label={`Bỏ ${file.name}`} onClick={onRemove}>×</button>
+  </span>;
+}
+
 function App() {
   const [calendar, setCalendar] = useState(() => new URLSearchParams(location.search).has("calendar"));
   const [cloudStorage, setCloudStorage] = useState(() => new URLSearchParams(location.search).has("drive"));
@@ -53,6 +67,7 @@ function App() {
   });
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<File[]>([]);
   const [side, setSide] = useState(false);
   const [dark, setDark] = useState(() => remoteWorkspace || localStorage.getItem("detot.theme") !== "light");
   const [error, setError] = useState("");
@@ -64,6 +79,7 @@ function App() {
   const retry = useRef<(() => void) | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const conversation = items.find(item => item.id === active);
   const visibleItems = visibleConversations(items, query);
   useEffect(() => {
@@ -134,22 +150,47 @@ function App() {
       setBusy(false);
     }
   }
-  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setActive(id); setDraft(""); setSide(false); setError(""); retry.current = null; };
+  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setActive(id); setDraft(""); setAttachments([]); setSide(false); setError(""); retry.current = null; };
 
-  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false) {
-    if (!text.trim() || request.current) return;
-    const user: Message = { id: requestId, role: "user", text: text.trim() };
+  const addAttachments = (incoming: File[]) => {
+    const combined = [...attachments, ...incoming];
+    if (combined.length > 5) { setError("Mỗi lượt gửi tối đa 5 tệp."); return; }
+    if (combined.some(file => file.size > 8 * 1024 * 1024)) { setError("Mỗi tệp tối đa 8 MiB."); return; }
+    setError("");
+    setAttachments(combined);
+  };
+
+  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false, files = attachments) {
+    if ((!text.trim() && files.length === 0) || request.current) return;
+    const prompt = [text.trim() || "Đọc và phân tích các tệp đính kèm.",
+      files.length ? `Tệp đính kèm: ${files.map(file => file.name).join(", ")}` : ""].filter(Boolean).join("\n").slice(0, 1500);
+    const displayText = (files.length ? `${prompt}\n📎 ${files.map(file => file.name).join(", ")}` : prompt).slice(0, 450);
+    const user: Message = { id: requestId, role: "user", text: displayText };
     const target = { ...base, practice: startPractice || base.practice, gatewayLinked: true,
-      title: prefix.length ? base.title : text.trim().slice(0, 52), messages: [...prefix, user] };
+      title: prefix.length ? base.title : prompt.slice(0, 52), messages: [...prefix, user] };
     save(target);
     setActive(target.id);
     setDraft("");
+    setAttachments([]);
     setError("");
     setBusy(true);
     const controller = new AbortController();
     request.current = controller;
-    retry.current = () => void send(text, base, prefix, requestId, context, startPractice);
+    retry.current = () => void send(text, base, prefix, requestId, context, startPractice, files);
     try {
+      let documentContext: string | undefined;
+      let visionImages: string[] = [];
+      if (files.length) {
+        if (files.reduce((total, file) => total + file.size, 0) > 9 * 1024 * 1024)
+          throw new Error("Tổng dung lượng tệp tối đa 9 MiB mỗi lượt.");
+        const form = new FormData();
+        files.forEach(file => form.append("files", file, file.name));
+        const read = await fetch("/api/chat/read-files", { method: "POST", body: form, signal: controller.signal });
+        const parsed = await read.json().catch(() => ({}));
+        if (!read.ok || typeof parsed.context !== "string") throw new Error(parsed.detail || parsed.error || `Không đọc được tệp (HTTP ${read.status}).`);
+        documentContext = parsed.context;
+        visionImages = Array.isArray(parsed.images) ? parsed.images.filter((item: unknown): item is string => typeof item === "string") : [];
+      }
       await sync(target);
       const suggestion = context || target.practice ? undefined : await suggestFromChat(user.text, controller.signal);
       if (suggestion !== undefined) {
@@ -165,7 +206,7 @@ function App() {
         method: "POST", headers: revision
           ? { "Content-Type": "application/json", "X-Detot-History-Revision": revision }
           : { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: user.text, requestId, calendarContext: context, conversationId: target.id, startPractice,
+        body: JSON.stringify({ message: prompt, requestId, calendarContext: context, conversationId: target.id, startPractice, documentContext, visionImages,
           history: prefix.slice(-8).map(message => ({ role: message.role, text: message.text.slice(0, 450) })) }),
         signal: controller.signal,
       });
@@ -302,15 +343,25 @@ function App() {
       </section>
       <footer>
         {error && <div className="error" role="alert">{error} {retry.current && <button onClick={() => retry.current?.()}>Thử lại</button>}</div>}
-        <form onSubmit={event => { event.preventDefault(); void send(draft); }}>
+        <form className={attachments.length ? "composer has-attachments" : "composer"} onDragOver={event => event.preventDefault()}
+          onDrop={event => { event.preventDefault(); addAttachments(Array.from(event.dataTransfer.files)); }}
+          onSubmit={event => { event.preventDefault(); void send(draft); }}>
+          <input ref={fileInput} className="file-input" type="file" multiple aria-label="Chọn tệp để phân tích"
+            accept=".txt,.md,.markdown,.json,.jsonl,.ndjson,.xml,.csv,.tsv,.cs,.py,.js,.jsx,.ts,.tsx,.sql,.html,.css,.yml,.yaml,.toml,.ini,.sh,.ps1,.java,.go,.rs,.php,.rb,.c,.h,.cpp,.hpp,.docx,.xlsx,.pptx,.zip,.pdf,.doc,.xls,.ppt,.parquet,.sqlite,.sqlite3,.db,.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.bmp"
+            onChange={event => { addAttachments(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
+          {attachments.length > 0 && <div className="attachment-list" aria-label="Tệp đính kèm">
+            {attachments.map((file, index) => <AttachmentChip key={`${file.name}-${index}`} file={file}
+              onRemove={() => setAttachments(old => old.filter((_, item) => item !== index))} />)}
+          </div>}
           <textarea ref={input} aria-label="Tin nhắn" rows={2} maxLength={1500} placeholder="Nhắn cho Đệ Tốt…" value={draft} onChange={event => setDraft(event.target.value)}
             onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(draft); } }} />
           <div className="controls">
             {last?.calendarContext && <button type="button" disabled={busy || !draft.trim()} onClick={() => void send(draft, conversation, conversation?.messages, uid(), last.calendarContext)}>Bổ sung cho lịch</button>}
-            {busy ? <button type="button" onClick={() => request.current?.abort()}>Dừng</button> : <button className="primary" disabled={!draft.trim()}>Gửi ↑</button>}
+            <button type="button" disabled={busy || attachments.length >= 5} onClick={() => fileInput.current?.click()}>＋ Tệp</button>
+            {busy ? <button type="button" onClick={() => request.current?.abort()}>Dừng</button> : <button className="primary" disabled={!draft.trim() && attachments.length === 0}>Gửi ↑</button>}
           </div>
         </form>
-        <p>{remoteWorkspace ? "Lịch sử tự lưu trên laptop." : "Lịch sử lưu trên trình duyệt."} Tin nhắn được gửi tới nhà cung cấp LLM.</p>
+        <p>{remoteWorkspace ? "Lịch sử tự lưu trên laptop." : "Lịch sử lưu trên trình duyệt."} Tệp được trích xuất trong lab; phần văn bản gửi tới nhà cung cấp LLM. PDF/ảnh cần OCR hoặc adapter tương ứng.</p>
       </footer>
       </>}
     </main>
