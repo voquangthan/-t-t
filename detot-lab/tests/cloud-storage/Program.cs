@@ -14,6 +14,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("trusted learning requires source check and user approval before Drive indexing", TrustedLearningWorkflow),
     ("trusted learning rejects unknown licenses and unsafe URL scopes", TrustedLearningRejectsUnsafeSources),
     ("search discovery filters unsafe, duplicate, spam and out-of-scope results", SearchDiscoveryFilters),
+    ("Microsoft Web IQ adapter sends the request contract and parses search results", SearchProviderContract),
     ("universal reader extracts text with checksum and line citations", ReaderExtractsText),
     ("universal reader extracts office XML with structural citations", ReaderExtractsDocx),
     ("universal reader extracts PDF text with page citations", ReaderExtractsPdf),
@@ -337,12 +338,23 @@ static async Task TrustedLearningWorkflow()
             "the verified Drive snapshot should preserve source state and keep quarantined content out of RAG");
         var listBeforeChat = storage.ListCount;
         var chatTimer = Stopwatch.StartNew();
+        storage.FailLists = true;
         for (var index = 0; index < 10; index++) await secondMachine.BuildContextAsync("VLAN trunk", CancellationToken.None);
         chatTimer.Stop();
         Assert(storage.ListCount == listBeforeChat, "chat context assembly must not trigger Drive enumeration");
         Console.WriteLine($"BENCH simulated chat context: {chatTimer.Elapsed.TotalMilliseconds / 10:F2} ms/call, Drive list calls: 0");
+        storage.FailLists = false;
+        storage.FailLists = true;
         await service.RemoveAsync(pending.Id, CancellationToken.None);
         Assert(service.Search("VLAN trunk").Count == 0, "revoking a source must remove its knowledge from retrieval");
+        Assert(service.Dashboard().CloudMirrorPending, "a failed Drive purge must remain marked for retry");
+        storage.FailLists = false;
+        await service.RunDueAsync(CancellationToken.None);
+        var revokedMirror = new TrustedLearningSources(Path.Combine(root, "after-revocation"), new EphemeralDataProtectionProvider(),
+            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance);
+        await revokedMirror.InitializeCloudSnapshotAsync(CancellationToken.None);
+        Assert(!service.Dashboard().CloudMirrorPending && revokedMirror.Search("VLAN trunk").Count == 0,
+            "a later successful mirror retry should purge revoked knowledge for other devices");
     }
     finally { try { Directory.Delete(root, recursive: true); } catch { } }
 }
@@ -380,6 +392,19 @@ static async Task SearchDiscoveryFilters()
     Assert(found.Candidates.Count == 1 && found.Candidates[0].OfficialSource && found.Candidates[0].LicenseStatus == "Chưa kiểm tra",
         "discovery should retain one official, in-scope unique candidate without claiming license verification");
     await Throws<ArgumentException>(() => service.SearchAsync(new("Networking", ["https://example.org/path"], "all"), CancellationToken.None));
+}
+
+static async Task SearchProviderContract()
+{
+    var handler = new WebIqSearchHandler();
+    using var client = new HttpClient(handler);
+    var provider = new MicrosoftWebSearchProvider(client, "test-key-only");
+    var results = await provider.SearchAsync(new("ASP.NET Core site:learn.microsoft.com", 12, "vi"), CancellationToken.None);
+    Assert(handler.Method == HttpMethod.Post && handler.Uri?.AbsoluteUri == "https://api.microsoft.ai/v3/search/web" &&
+        handler.ApiKey == "test-key-only" && handler.Body?.Contains("\"maxResults\":12", StringComparison.Ordinal) == true,
+        "Search Provider should use the configured Microsoft Web IQ REST request contract");
+    Assert(results.Count == 1 && results[0].Url == "https://learn.microsoft.com/en-us/aspnet/core/security/authentication/",
+        "Search Provider should parse webResults into replaceable provider results");
 }
 
 static void Assert(bool condition, string message)
@@ -469,4 +494,25 @@ sealed class FakeSearchDiscoveryProvider(IReadOnlyList<ProviderSearchResult> res
 {
     public string Name => "Fake Search";
     public Task<IReadOnlyList<ProviderSearchResult>> SearchAsync(ProviderSearchRequest request, CancellationToken cancellationToken) => Task.FromResult(results);
+}
+
+sealed class WebIqSearchHandler : HttpMessageHandler
+{
+    public HttpMethod? Method { get; private set; }
+    public Uri? Uri { get; private set; }
+    public string? ApiKey { get; private set; }
+    public string? Body { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Method = request.Method;
+        Uri = request.RequestUri;
+        ApiKey = request.Headers.GetValues("x-apikey").Single();
+        Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"webResults":[{"title":"Microsoft Learn ASP.NET Core Authentication","url":"https://learn.microsoft.com/en-us/aspnet/core/security/authentication/","content":"Official authentication guide with configuration examples."}]}""",
+                Encoding.UTF8, "application/json")
+        };
+    }
 }
