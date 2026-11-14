@@ -23,6 +23,7 @@ public sealed class TrustedLearningSources
     private readonly ILogger<TrustedLearningSources> _logger;
     private readonly UniversalFileReader _fileReader;
     private readonly UniversalUrlReader? _urlReader;
+    private readonly SearchDiscoveryService _searchDiscovery;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _mirrorGate = new(1, 1);
     private readonly SemaphoreSlim _cloudRefreshGate = new(1, 1);
@@ -30,7 +31,8 @@ public sealed class TrustedLearningSources
     private State _state;
 
     public TrustedLearningSources(string directory, IDataProtectionProvider protection, IHttpClientFactory clients,
-        IStorageProvider drive, ILogger<TrustedLearningSources> logger, UniversalFileReader? fileReader = null, UniversalUrlReader? urlReader = null)
+        IStorageProvider drive, ILogger<TrustedLearningSources> logger, UniversalFileReader? fileReader = null, UniversalUrlReader? urlReader = null,
+        ISearchDiscoveryProvider? searchProvider = null)
     {
         _path = Path.Combine(directory, "state.bin");
         _protector = protection.CreateProtector("Detot.TrustedLearning.v1");
@@ -39,6 +41,7 @@ public sealed class TrustedLearningSources
         _logger = logger;
         _fileReader = fileReader ?? new UniversalFileReader();
         _urlReader = urlReader;
+        _searchDiscovery = new SearchDiscoveryService(searchProvider);
         _state = ReadState();
     }
 
@@ -48,6 +51,21 @@ public sealed class TrustedLearningSources
         {
             await RefreshCloudSnapshotAsync(cancellationToken);
             return Results.Ok(List());
+        });
+        app.MapGet("/api/learning/dashboard", () => Results.Ok(Dashboard()));
+        app.MapGet("/api/learning/quarantine", () => Results.Ok(Quarantine()));
+        app.MapGet("/api/learning/discovery/status", () => Results.Ok(new
+        {
+            configured = _searchDiscovery.IsConfigured,
+            provider = _searchDiscovery.ProviderName,
+        }));
+        app.MapPost("/api/learning/discovery/search", async (SearchDiscoveryRequest request, HttpContext context) =>
+        {
+            if (!isLocalMutation(context)) return Results.StatusCode(403);
+            try { return Results.Ok(await _searchDiscovery.SearchAsync(request, context.RequestAborted)); }
+            catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
+            catch (InvalidOperationException error) { return Results.Problem(error.Message, statusCode: 503); }
+            catch (HttpRequestException error) { return Results.Problem(SafeError(error.Message), statusCode: 503); }
         });
         app.MapGet("/api/learning/drive-scopes", async (CancellationToken cancellationToken) =>
         {
@@ -78,6 +96,24 @@ public sealed class TrustedLearningSources
             catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException)
             { return Results.Problem(SafeError(error.Message), statusCode: 503); }
         });
+        app.MapPost("/api/learning/sources/{id:guid}/pause", async (Guid id, HttpContext context) =>
+        {
+            if (!isLocalMutation(context)) return Results.StatusCode(403);
+            try { return Results.Ok(await SetPausedAsync(id, true, context.RequestAborted)); }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+        app.MapPost("/api/learning/sources/{id:guid}/resume", async (Guid id, HttpContext context) =>
+        {
+            if (!isLocalMutation(context)) return Results.StatusCode(403);
+            try { return Results.Ok(await SetPausedAsync(id, false, context.RequestAborted)); }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+        app.MapPost("/api/learning/sources/{id:guid}/retry", async (Guid id, HttpContext context) =>
+        {
+            if (!isLocalMutation(context)) return Results.StatusCode(403);
+            try { return Results.Ok(await RetryAsync(id, context.RequestAborted)); }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
         app.MapPost("/api/learning/sources/{id:guid}/approve", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
@@ -106,8 +142,9 @@ public sealed class TrustedLearningSources
         app.MapGet("/api/learning/review", async (CancellationToken cancellationToken) =>
         {
             await RefreshCloudSnapshotAsync(cancellationToken);
-            return Results.Ok(_state.Knowledge.Where(item => item.State == "review")
-                .Select(item => new { item.Hash, item.SourceName, item.Title, item.Text, item.Citation, item.License }).ToArray());
+            return Results.Ok(_state.Knowledge.Where(item => item.State is "review" or "quarantined")
+                .Select(item => new { item.Hash, item.SourceName, item.Title, item.Text, item.Citation, item.License,
+                    state = item.State, reason = item.QuarantineReason }).ToArray());
         });
         app.MapPost("/api/learning/review/{hash}/accept", async (string hash, HttpContext context) =>
         {
@@ -128,14 +165,17 @@ public sealed class TrustedLearningSources
         if (type is not ("website" or "github" or "drive-folder"))
             throw new ArgumentException("Nguồn hiện hỗ trợ Website, GitHub repository hoặc thư mục dataset DETOT-AI trên Drive.");
         var scope = NormalizeScope(type, draft.Scope);
-        var license = type == "drive-folder" ? "Per-artifact-metadata" : draft.License?.Trim() ?? "";
-        var licenseUrl = draft.LicenseUrl?.Trim() ?? "";
-        if (type != "drive-folder" && !IsKnownLicense(license)) throw new ArgumentException("Chọn giấy phép đã biết; không thể phê duyệt nguồn khi giấy phép chưa rõ.");
+        var permission = draft.AccessPermission?.Trim().ToLowerInvariant() ?? "read";
+        if (permission != "read")
+            throw new ArgumentException("Các connector Trusted Learning hiện chỉ hỗ trợ quyền Chỉ đọc.");
+        // Permission is enforced separately from copyright license metadata.
+        // A submitted license string is never treated as evidence. The backend must detect
+        // a machine-readable license or quarantine the source for policy review.
+        var license = type == "drive-folder" ? "Per-artifact-metadata" : "";
+        var licenseUrl = "";
         if (type != "drive-folder")
         {
-            var uri = ValidatePublicHttps(type == "github" ? GitHubRepoApi(scope) : scope);
-            if (type == "website" && string.IsNullOrWhiteSpace(licenseUrl)) throw new ArgumentException("Cần URL trang giấy phép hoặc trang chủ sở hữu nội dung.");
-            if (!string.IsNullOrWhiteSpace(licenseUrl)) _ = ValidatePublicHttps(licenseUrl);
+            _ = ValidatePublicHttps(type == "github" ? GitHubRepoApi(scope) : scope);
         }
         else if (!string.IsNullOrWhiteSpace(licenseUrl)) throw new ArgumentException("Thư mục Drive dùng giấy phép metadata của từng artifact.");
 
@@ -145,7 +185,7 @@ public sealed class TrustedLearningSources
             if (_state.Sources.Any(item => item.Type == type && item.Scope.Equals(scope, StringComparison.OrdinalIgnoreCase)))
                 throw new ArgumentException("Nguồn này đã được thêm.");
             var source = new Source(Guid.NewGuid(), type, draft.Name?.Trim() is { Length: > 0 and <= 120 } name ? name : DefaultName(type, scope),
-                scope, license, licenseUrl, "pending", false, DateTimeOffset.UtcNow, null, null, 0, null);
+                scope, permission, license, licenseUrl, "pending", false, DateTimeOffset.UtcNow, null, null, 0, null);
             _state = _state with { Sources = [.. _state.Sources, source] };
             SaveState();
             return View(source);
@@ -167,11 +207,45 @@ public sealed class TrustedLearningSources
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            var updated = source with { Status = details.Ok ? "checked" : "check-failed", CheckedUtc = DateTimeOffset.UtcNow,
-                CheckSummary = details.Summary, FileCount = details.FileCount };
+            var updated = source with
+            {
+                License = details.DetectedLicense ?? source.License,
+                LicenseEvidenceUrl = details.EvidenceUrl ?? source.LicenseEvidenceUrl,
+                LicenseDetectionMethod = details.DetectionMethod ?? source.LicenseDetectionMethod,
+                QuarantineReason = details.QuarantineReason,
+                Status = details.QuarantineReason is not null ? "quarantined" : details.Ok ? "checked" : "check-failed",
+                CheckedUtc = DateTimeOffset.UtcNow, CheckSummary = details.Summary, FileCount = details.FileCount,
+                QuarantinedDocuments = details.QuarantinedDocuments,
+            };
             ReplaceSource(updated);
             SaveState();
             return View(updated);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<SourceView> SetPausedAsync(Guid id, bool paused, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var source = RequireSource(id);
+            var updated = source with { Paused = paused, WorkerState = paused ? "paused" : "idle" };
+            ReplaceSource(updated);
+            SaveState();
+            return View(updated);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<SourceView> RetryAsync(Guid id, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var source = RequireSource(id);
+            var updated = source with { RetryCount = 0, NextAttemptUtc = null, LastError = null, WorkerState = "queued" };
+            ReplaceSource(updated); SaveState(); return View(updated);
         }
         finally { _gate.Release(); }
     }
@@ -211,27 +285,78 @@ public sealed class TrustedLearningSources
         await RefreshCloudSnapshotAsync(cancellationToken);
         var source = GetSource(id);
         if (source.Status != "approved") throw new InvalidOperationException("Chỉ nguồn đã được phê duyệt mới được đồng bộ.");
+        if (source.Paused) throw new InvalidOperationException("Nguồn đang tạm dừng.");
         try
         {
-            var documents = source.Type switch
+            await _gate.WaitAsync(cancellationToken);
+            try
             {
-                "website" => new[] { await ReadWebsiteAsync(source, cancellationToken) },
-                "github" => new[] { await ReadGitHubAsync(source, cancellationToken) },
-                "drive-folder" => await ReadDriveFolderAsync(source, cancellationToken),
+                source = RequireSource(id) with { WorkerState = "running", LastAttemptUtc = DateTimeOffset.UtcNow };
+                ReplaceSource(source); SaveState();
+            }
+            finally { _gate.Release(); }
+            IReadOnlyList<CloudArtifact>? driveArtifacts = null;
+            string? manifestFingerprint = null;
+            if (source.Type == "drive-folder")
+            {
+                var category = source.Scope[("drive://datasets/".Length)..];
+                driveArtifacts = (await _drive.ListAsync("dataset", null, cancellationToken)).Where(item => item.Category == category)
+                    .OrderBy(item => item.Id, StringComparer.Ordinal).Take(50).ToArray();
+                manifestFingerprint = DriveManifestFingerprint(driveArtifacts);
+                if (manifestFingerprint == source.LastManifestFingerprint)
+                {
+                    await _gate.WaitAsync(cancellationToken);
+                    try
+                    {
+                        var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
+                            RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
+                            CheckSummary = "Manifest Drive không đổi; bỏ qua tải tệp, trích xuất, quality processing và cập nhật RAG." };
+                        ReplaceSource(current); SaveState();
+                        return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
+                    }
+                    finally { _gate.Release(); }
+                }
+            }
+            IReadOnlyList<SourceDocument> documents = source.Type switch
+            {
+                "website" => [await ReadWebsiteAsync(source, cancellationToken)],
+                "github" => [await ReadGitHubAsync(source, cancellationToken)],
+                "drive-folder" => await ReadDriveFolderAsync(source, driveArtifacts!, cancellationToken),
                 _ => []
             };
-            var result = await QualityGateAsync(source, documents, cancellationToken);
+            var fingerprint = ContentFingerprint(documents);
+            var quarantinedDriveDocuments = driveArtifacts?.Count(item => !IsAutoAllowedLicense(item.License)) ?? source.QuarantinedDocuments;
+            if (fingerprint.Equals(source.LastContentFingerprint, StringComparison.Ordinal))
+            {
+                await _gate.WaitAsync(cancellationToken);
+                try
+                {
+                    var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
+                        RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
+                        LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
+                        QuarantinedDocuments = quarantinedDriveDocuments,
+                        CheckSummary = "Nguồn không thay đổi; bỏ qua quality processing và cập nhật RAG." };
+                    ReplaceSource(current); SaveState();
+                    return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
+                }
+                finally { _gate.Release(); }
+            }
+            var result = await QualityGateAsync(source, documents, fingerprint, cancellationToken);
             SyncSummary summary;
             await _gate.WaitAsync(cancellationToken);
             try
             {
                 var current = RequireSource(id);
                 var updated = current with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
+                    LastContentFingerprint = fingerprint, RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "success",
+                    LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
+                    QuarantinedDocuments = quarantinedDriveDocuments,
                     LastAccepted = result.Accepted, LastReview = result.Review, LastDuplicate = result.Duplicate,
-                    CheckSummary = $"Đồng bộ xong: {result.Accepted} đoạn được lập chỉ mục, {result.Review} cần xem lại, {result.Duplicate} trùng lặp." };
+                    LastQuarantined = result.Quarantined,
+                    CheckSummary = $"Đồng bộ xong: {result.Accepted} đoạn lập chỉ mục, {result.Review} cần xem lại, {result.Quarantined} cách ly, {result.Duplicate} trùng lặp." };
                 ReplaceSource(updated);
                 SaveState();
-                summary = new SyncSummary(updated.Id, updated.Name, result.Accepted, result.Review, result.Duplicate, updated.LastSyncUtc, updated.CheckSummary);
+                summary = new SyncSummary(updated.Id, updated.Name, result.Accepted, result.Review, result.Duplicate, updated.LastSyncUtc, updated.CheckSummary, result.Quarantined);
             }
             finally { _gate.Release(); }
             var mirrorError = await TryPersistCloudSnapshotAsync(cancellationToken);
@@ -249,12 +374,16 @@ public sealed class TrustedLearningSources
             await _gate.WaitAsync(cancellationToken);
             try
             {
-                var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = SafeError(error.Message) };
+                var currentSource = RequireSource(id);
+                var retryCount = Math.Min(currentSource.RetryCount + 1, 12);
+                var delayMinutes = Math.Min(360, Math.Pow(2, Math.Min(retryCount, 8)) * 2);
+                var current = currentSource with { LastAttemptUtc = DateTimeOffset.UtcNow, LastError = SafeError(error.Message),
+                    RetryCount = retryCount, NextAttemptUtc = DateTimeOffset.UtcNow.AddMinutes(delayMinutes), WorkerState = "retry-wait", LastSyncStatus = "failed" };
                 ReplaceSource(current); SaveState();
             }
             finally { _gate.Release(); }
             _logger.LogWarning("Trusted learning source sync failed for {SourceId}: {ErrorType}", id, error.GetType().Name);
-            return new SyncSummary(id, source.Name, 0, 0, 0, DateTimeOffset.UtcNow, SafeError(error.Message));
+            return new SyncSummary(id, source.Name, 0, 0, 0, source.LastSyncUtc, SafeError(error.Message));
         }
     }
 
@@ -291,6 +420,33 @@ public sealed class TrustedLearningSources
 
     public IReadOnlyList<SourceView> List() => _state.Sources.Select(View).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
 
+    public LearningDashboard Dashboard()
+    {
+        var sources = _state.Sources;
+        return new LearningDashboard(
+            sources.Length,
+            sources.Count(item => item.Status == "approved"),
+            sources.Count(item => item.Paused),
+            sources.Sum(item => item.LastAccepted),
+            sources.Sum(item => item.LastDuplicate),
+            sources.Sum(item => item.LastQuarantined + item.QuarantinedDocuments) + _state.Knowledge.Count(item => item.State == "quarantined"),
+            sources.Count(item => item.LastError is not null),
+            sources.Select(item => item.LastAttemptUtc).Where(item => item.HasValue).Max(),
+            sources.Select(item => item.LastSyncUtc).Where(item => item.HasValue).Max());
+    }
+
+    public IReadOnlyList<QuarantineView> Quarantine()
+    {
+        var quarantinedSources = _state.Sources.Where(item => item.Status == "quarantined")
+            .Select(item => new QuarantineView("source", item.Id, item.Name, item.QuarantineReason ?? item.CheckSummary ?? "Nguồn bị cách ly.",
+                item.LicenseEvidenceUrl ?? item.Scope, null, item.CheckedUtc));
+        var quarantinedKnowledge = _state.Knowledge.Where(item => item.State is "quarantined" or "review")
+            .Select(item => new QuarantineView(item.State, item.SourceId, item.SourceName,
+                item.QuarantineReason ?? (item.State == "review" ? "Có dấu hiệu mâu thuẫn cần xem lại." : "Quality Gate cách ly nội dung."),
+                item.Citation, item.Hash, item.UpdatedUtc));
+        return quarantinedSources.Concat(quarantinedKnowledge).OrderByDescending(item => item.UpdatedUtc).Take(1000).ToArray();
+    }
+
     public IReadOnlyList<KnowledgeView> Search(string query, int take = 6)
     {
         var words = Tokens(query).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -315,15 +471,17 @@ public sealed class TrustedLearningSources
 
     public async Task<string?> BuildContextAsync(string query, CancellationToken cancellationToken)
     {
-        await RefreshCloudSnapshotAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         return BuildContext(query);
     }
 
     public async Task RunDueAsync(CancellationToken cancellationToken)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
-        foreach (var source in _state.Sources.Where(item => item.Status == "approved" &&
-            (item.LastError is not null || item.LastSyncUtc is null || item.LastSyncUtc < DateTimeOffset.UtcNow.AddHours(-6))))
+        foreach (var source in _state.Sources.Where(item => item.Status == "approved" && !item.Paused &&
+            (item.WorkerState is "queued" or "running" || item.NextAttemptUtc is not null ?
+                item.WorkerState is "queued" or "running" || item.NextAttemptUtc <= DateTimeOffset.UtcNow :
+                item.LastSyncUtc is null || item.LastSyncUtc < DateTimeOffset.UtcNow.AddHours(-6))))
         {
             cancellationToken.ThrowIfCancellationRequested();
             await SyncAsync(source.Id, cancellationToken);
@@ -335,6 +493,9 @@ public sealed class TrustedLearningSources
         using var timer = new PeriodicTimer(TimeSpan.FromMinutes(15));
         try
         {
+            try { await RunDueAsync(cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch (Exception error) { _logger.LogWarning("Trusted learning startup cycle failed ({ErrorType}).", error.GetType().Name); }
             while (await timer.WaitForNextTickAsync(cancellationToken))
             {
                 try { await RunDueAsync(cancellationToken); }
@@ -364,10 +525,11 @@ public sealed class TrustedLearningSources
                 if (download.Size > 64L * 1024 * 1024) throw new InvalidDataException("Cloud learning snapshot vượt 64 MiB.");
                 var snapshot = JsonSerializer.Deserialize<CloudSnapshot>(await File.ReadAllTextAsync(download.Path, Encoding.UTF8, cancellationToken), Json)
                     ?? throw new InvalidDataException("Cloud learning snapshot không hợp lệ.");
-                if (snapshot.Version != 1 || snapshot.Sources.Length > 1000 || snapshot.Knowledge.Length > 100_000 ||
-                    snapshot.Sources.Any(item => item.Status is not ("pending" or "checked" or "check-failed" or "approved") ||
-                        (item.Type == "drive-folder" ? item.License != "Per-artifact-metadata" : !IsKnownLicense(item.License))) ||
-                    snapshot.Knowledge.Any(item => item.Hash.Length != 64 || item.State is not ("indexed" or "review")))
+                if (snapshot.Version is not (1 or 2) || snapshot.Sources.Length > 1000 || snapshot.Knowledge.Length > 100_000 ||
+                    snapshot.Sources.Any(item => item.Status is not ("pending" or "checked" or "check-failed" or "quarantined" or "approved") ||
+                        (item.Type == "drive-folder" ? item.License != "Per-artifact-metadata" :
+                            item.Status != "quarantined" && !IsKnownLicense(item.License))) ||
+                    snapshot.Knowledge.Any(item => item.Hash.Length != 64 || item.State is not ("indexed" or "review" or "quarantined" or "superseded")))
                     throw new InvalidDataException("Cloud learning snapshot không đạt kiểm tra cấu trúc.");
                 await _gate.WaitAsync(cancellationToken);
                 try
@@ -399,7 +561,7 @@ public sealed class TrustedLearningSources
             if (!status.Connected || !status.Available) return status.Message ?? "Google Drive chưa sẵn sàng.";
             CloudSnapshot snapshot;
             await _gate.WaitAsync(cancellationToken);
-            try { snapshot = new CloudSnapshot(1, _state.Sources, _state.Knowledge, _state.UpdatedUtc); }
+            try { snapshot = new CloudSnapshot(2, _state.Sources, _state.Knowledge, _state.UpdatedUtc); }
             finally { _gate.Release(); }
             var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(snapshot, Json));
             if (payload.Length > 64 * 1024 * 1024) return "Cloud learning snapshot vượt 64 MiB.";
@@ -433,50 +595,95 @@ public sealed class TrustedLearningSources
     private static bool IsCloudSnapshot(CloudArtifact item) => item.Pipeline == "trusted-learning" &&
         item.Source == "Trusted Learning Sources" && item.Name.StartsWith("trusted-learning-snapshot", StringComparison.OrdinalIgnoreCase);
 
-    private async Task<(bool Ok, string Summary, int FileCount)> CheckWebsiteAsync(Source source, CancellationToken cancellationToken)
+    private async Task<SourceCheckResult> CheckWebsiteAsync(Source source, CancellationToken cancellationToken)
     {
         using var response = await GetPublicAsync(source.Scope, "text/html,text/plain,text/markdown,application/xhtml+xml", cancellationToken);
         var text = await ReadLimitedTextAsync(response, cancellationToken);
-        if (text.Length < 80) return (false, "URL truy cập được nhưng không có nội dung văn bản đủ để kiểm tra.", 0);
+        if (text.Length < 80) return new(false, "URL truy cập được nhưng không có nội dung văn bản đủ để kiểm tra.", 0);
+        var detectedLicense = DetectLicense(text) is { } pageLicense
+            ? new LicenseEvidence(pageLicense, source.Scope, "Metadata trang nguồn") : null;
+        detectedLicense ??= await DetectHuggingFaceLicenseAsync(source.Scope, cancellationToken);
         if (!string.IsNullOrEmpty(source.LicenseUrl))
         {
             using var license = await GetPublicAsync(source.LicenseUrl, "text/html,text/plain,text/markdown,application/xhtml+xml", cancellationToken);
-            _ = await ReadLimitedTextAsync(license, cancellationToken);
+            var licenseText = await ReadLimitedTextAsync(license, cancellationToken);
+            if (detectedLicense is null && DetectLicense(licenseText) is { } licensePage)
+                detectedLicense = new LicenseEvidence(licensePage, source.LicenseUrl, "Trang license được liên kết");
         }
-        return (true, "URL và trang giấy phép truy cập được. Phạm vi chỉ là đúng URL này; worker không dò các trang liên kết.", 1);
+        if (detectedLicense is null)
+            return new(false, "Không tìm thấy bằng chứng license máy đọc được. Nguồn bị cách ly, không tự suy đoán license.", 0,
+                QuarantineReason: "Thiếu bằng chứng license máy đọc được.");
+        if (!IsAutoAllowedLicense(detectedLicense.License))
+            return new(false, $"License {detectedLicense.License} chưa nằm trong chính sách tự động.", 0, detectedLicense.License,
+                detectedLicense.Url, detectedLicense.Method, $"License {detectedLicense.License} cần đánh giá chính sách trước khi lưu nội dung.");
+        return new(true, $"Đã nhận diện license {detectedLicense.License} từ {detectedLicense.Method}. Đang kiểm tra đúng URL được khai báo.", 1,
+            detectedLicense.License, detectedLicense.Url, detectedLicense.Method);
     }
 
-    private async Task<(bool Ok, string Summary, int FileCount)> CheckGitHubAsync(Source source, CancellationToken cancellationToken)
+    private async Task<LicenseEvidence?> DetectHuggingFaceLicenseAsync(string sourceUrl, CancellationToken cancellationToken)
+    {
+        var uri = new Uri(sourceUrl);
+        var parts = uri.AbsolutePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (!uri.Host.Equals("huggingface.co", StringComparison.OrdinalIgnoreCase) || parts.Length != 3 || parts[0] != "datasets") return null;
+        var metadataUrl = $"https://huggingface.co/api/datasets/{Uri.EscapeDataString(parts[1])}/{Uri.EscapeDataString(parts[2])}";
+        try
+        {
+            using var response = await GetPublicAsync(metadataUrl, "application/json", cancellationToken);
+            using var metadata = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+            if (!metadata.RootElement.TryGetProperty("cardData", out var card) || card.ValueKind != JsonValueKind.Object ||
+                !card.TryGetProperty("license", out var license)) return null;
+            var value = license.ValueKind switch
+            {
+                JsonValueKind.String => license.GetString(),
+                JsonValueKind.Array => license.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()).FirstOrDefault(),
+                _ => null,
+            };
+            return !string.IsNullOrWhiteSpace(value) && IsKnownLicense(value)
+                ? new LicenseEvidence(value, metadataUrl, "Hugging Face dataset cardData.license") : null;
+        }
+        catch (Exception error) when (error is HttpRequestException or IOException or JsonException)
+        {
+            _logger.LogDebug("Hugging Face license metadata was unavailable ({ErrorType}).", error.GetType().Name);
+            return null;
+        }
+    }
+
+    private async Task<SourceCheckResult> CheckGitHubAsync(Source source, CancellationToken cancellationToken)
     {
         var repo = GitHubRepoApi(source.Scope);
         using var response = await GetPublicAsync(repo, "application/vnd.github+json", cancellationToken);
         using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
         var license = json.RootElement.TryGetProperty("license", out var licenseNode) && licenseNode.ValueKind == JsonValueKind.Object &&
             licenseNode.TryGetProperty("spdx_id", out var id) ? id.GetString() : null;
-        if (string.IsNullOrWhiteSpace(license) || !license.Equals(source.License, StringComparison.OrdinalIgnoreCase))
-            return (false, $"GitHub báo giấy phép “{license ?? "không xác định"}”; khai báo là “{source.License}”. Cần khớp giấy phép trước khi duyệt.", 0);
-        var count = 1;
+        var evidenceUrl = repo;
+        if (string.IsNullOrWhiteSpace(license) || !IsKnownLicense(license))
+            return new(false, $"GitHub báo license “{license ?? "không xác định"}” chưa được nhận diện. Nguồn bị cách ly.", 0,
+                QuarantineReason: "GitHub không cung cấp license SPDX được nhận diện.");
+        if (!IsAutoAllowedLicense(license))
+            return new(false, $"License {license} chưa nằm trong chính sách tự động.", 0, license, evidenceUrl,
+                "GitHub repository SPDX metadata", $"License {license} cần đánh giá chính sách trước khi lưu nội dung.");
         using var readme = await GetPublicAsync(repo + "/readme", "application/vnd.github.raw+json", cancellationToken);
         var content = await ReadLimitedTextAsync(readme, cancellationToken);
-        if (content.Length < 80) return (false, "Repository có giấy phép phù hợp nhưng README không đọc được.", 0);
-        return (true, "Đã kiểm tra repository và SPDX license. Worker chỉ đọc README.md của repository, không tải mã nguồn hoặc duyệt liên kết.", count);
+        if (content.Length < 80) return new(false, "Repository có license hợp lệ nhưng README quá ngắn hoặc rỗng.", 0, license, evidenceUrl, "GitHub repository SPDX metadata");
+        return new(true, $"Đã nhận diện license {license} từ metadata GitHub. Worker chỉ đọc README của repository.", 1,
+            license, evidenceUrl, "GitHub repository SPDX metadata");
     }
 
-    private async Task<(bool Ok, string Summary, int FileCount)> CheckDriveFolderAsync(Source source, CancellationToken cancellationToken)
+    private async Task<SourceCheckResult> CheckDriveFolderAsync(Source source, CancellationToken cancellationToken)
     {
         var status = await _drive.StatusAsync(cancellationToken);
-        if (!status.Connected || !status.Available) return (false, status.Message ?? "Google Drive chưa sẵn sàng.", 0);
+        if (!status.Connected || !status.Available) return new(false, status.Message ?? "Google Drive chưa sẵn sàng.", 0);
         var category = source.Scope[("drive://datasets/".Length)..];
         var items = await _drive.ListAsync("dataset", null, cancellationToken);
         var scoped = items.Where(item => item.Category == category).ToArray();
-        if (scoped.Length == 0) return (false, "Thư mục dataset được chọn đang rỗng.", 0);
-        var unknownLicenses = scoped.Where(item => !IsKnownLicense(item.License)).Select(item => SafeError(item.License))
-            .Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToArray();
-        if (unknownLicenses.Length > 0)
-            return (false, $"Giấy phép metadata chưa được nhận diện: {string.Join(", ", unknownLicenses)}. Sửa metadata trong Cloud Storage rồi kiểm tra lại.", scoped.Length);
-        var extractable = scoped.Count(item => IsSupportedLearningFile(item.Name));
-        if (extractable == 0) return (false, "Dataset có giấy phép nhưng chưa có định dạng trích xuất được. PDF scan, ảnh, SQLite và Office cũ cần adapter riêng.", scoped.Length);
-        return (true, $"Drive truy cập được; {scoped.Length} dataset có giấy phép, {extractable} tệp thuộc định dạng Reader hỗ trợ. PDF scan, ảnh, SQLite và Office cũ bị bỏ qua. Phạm vi chỉ là DETOT-AI/datasets/{category}.", scoped.Length);
+        if (scoped.Length == 0) return new(false, "Thư mục dataset được chọn đang rỗng.", 0);
+        var unknown = scoped.Count(item => !IsAutoAllowedLicense(item.License));
+        var extractable = scoped.Count(item => IsAutoAllowedLicense(item.License) && IsSupportedLearningFile(item.Name));
+        if (extractable == 0)
+            return new(false, $"Không có tệp vừa hỗ trợ trích xuất vừa có license trong chính sách tự động. {unknown} tệp bị cách ly.", scoped.Length,
+                QuarantineReason: "Không có artifact đủ bằng chứng license và định dạng được hỗ trợ.", QuarantinedDocuments: unknown);
+        return new(true, $"Drive truy cập được; {extractable} tệp đủ điều kiện; {unknown} tệp bị cách ly do license. Phạm vi DETOT-AI/datasets/{category}.",
+            scoped.Length, QuarantinedDocuments: unknown);
     }
 
     private async Task<SourceDocument> ReadWebsiteAsync(Source source, CancellationToken cancellationToken)
@@ -502,16 +709,13 @@ public sealed class TrustedLearningSources
         return new SourceDocument(source.Name + " — README.md", source.Scope + "#readme", source.License, text);
     }
 
-    private async Task<SourceDocument[]> ReadDriveFolderAsync(Source source, CancellationToken cancellationToken)
+    private async Task<SourceDocument[]> ReadDriveFolderAsync(Source source, IReadOnlyList<CloudArtifact> items, CancellationToken cancellationToken)
     {
-        var category = source.Scope[("drive://datasets/".Length)..];
-        var items = (await _drive.ListAsync("dataset", null, cancellationToken)).Where(item => item.Category == category)
-            .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).Take(50).ToArray();
         var documents = new List<SourceDocument>();
-        foreach (var item in items)
+        foreach (var item in items.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!IsKnownLicense(item.License)) continue;
+            if (!IsAutoAllowedLicense(item.License)) continue;
             var download = await _drive.DownloadVerifiedAsync(item.Id, cancellationToken);
             try
             {
@@ -527,35 +731,64 @@ public sealed class TrustedLearningSources
         return documents.ToArray();
     }
 
-    private async Task<(int Accepted, int Review, int Duplicate)> QualityGateAsync(Source source, IReadOnlyList<SourceDocument> documents, CancellationToken cancellationToken)
+    private async Task<(int Accepted, int Review, int Duplicate, int Quarantined)> QualityGateAsync(Source source,
+        IReadOnlyList<SourceDocument> documents, string fingerprint, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            var accepted = 0; var review = 0; var duplicate = 0; var additions = new List<KnowledgeItem>();
+            var accepted = 0; var review = 0; var duplicate = 0; var quarantined = 0; var additions = new List<KnowledgeItem>();
             var approvedIds = _state.Sources.Where(item => item.Status == "approved").Select(item => item.Id).ToHashSet();
+            var priorKnowledge = _state.Knowledge.Select(item => item.SourceId == source.Id && (item.State is "indexed" or "review")
+                ? item with { State = "superseded", QuarantineReason = "Nguồn đã thay đổi; phiên bản mới được kiểm tra." }
+                : item).ToArray();
+            var comparable = priorKnowledge.Where(item => approvedIds.Contains(item.SourceId) && item.SourceId != source.Id && item.State == "indexed").ToArray();
+            var remainingChunks = MaxChunksPerRun;
             foreach (var document in documents.Take(50))
             {
-                var chunks = Chunks(document.Text).Take(MaxChunksPerRun).ToArray();
+                if (remainingChunks <= 0) break;
+                var chunks = Chunks(document.Text).Take(remainingChunks).ToArray();
+                remainingChunks -= chunks.Length;
                 foreach (var chunk in chunks)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var hash = Sha256(chunk);
-                    if (_state.Knowledge.Any(item => approvedIds.Contains(item.SourceId) && item.Hash == hash) || additions.Any(item => item.Hash == hash)) { duplicate++; continue; }
-                    var similar = _state.Knowledge.Where(item => approvedIds.Contains(item.SourceId)).Concat(additions)
-                        .Where(item => Similarity(chunk, item.Text) >= .82).ToArray();
-                    var conflict = similar.Any(item => HasNegation(chunk) != HasNegation(item.Text));
-                    var gate = conflict ? "review" : "indexed";
+                    if (comparable.Any(item => item.Hash == hash) || additions.Any(item => item.Hash == hash)) { duplicate++; continue; }
+                    string? reason = null;
+                    var gate = "indexed";
+                    if (ContainsPromptInjection(chunk))
+                    {
+                        gate = "quarantined";
+                        reason = "Đoạn có dấu hiệu chứa chỉ dẫn nhắm vào AI; không đưa vào RAG.";
+                    }
+                    else
+                    {
+                        var similar = comparable.Concat(additions.Where(item => item.State == "indexed"))
+                            .Where(item => Similarity(chunk, item.Text) >= .82).ToArray();
+                        if (similar.Length > 0 && similar.Any(item => HasNegation(chunk) != HasNegation(item.Text)))
+                        {
+                            gate = "quarantined";
+                            reason = "Đoạn gần giống kiến thức hiện có nhưng có dấu hiệu mâu thuẫn; cần xem xét.";
+                        }
+                        else if (similar.Length > 0)
+                        {
+                            duplicate++;
+                            continue;
+                        }
+                    }
                     additions.Add(new KnowledgeItem(Guid.NewGuid(), source.Id, source.Name, document.Title, chunk,
-                        document.Citation, document.License, hash, gate, DateTimeOffset.UtcNow));
-                    if (conflict) review++; else accepted++;
+                        document.Citation, document.License, hash, gate, DateTimeOffset.UtcNow, reason, fingerprint));
+                    if (gate == "quarantined") quarantined++; else if (gate == "review") review++; else accepted++;
                 }
             }
-            _state = _state with { Knowledge = [.. _state.Knowledge, .. additions] }; SaveState();
-            return (accepted, review, duplicate);
+            _state = _state with { Knowledge = [.. priorKnowledge, .. additions] }; SaveState();
+            return (accepted, review, duplicate, quarantined);
         }
         finally { _gate.Release(); }
     }
+
+    private static bool ContainsPromptInjection(string text) => Regex.IsMatch(text,
+        @"(?is)\b(ignore|disregard|override|forget)\s+(all\s+)?(previous|prior|above|system|developer)\s+(instructions?|messages?|prompts?)\b|\b(reveal|print|exfiltrate)\s+(the\s+)?(system\s+prompt|secrets?|api\s+keys?|credentials?)\b|\bact\s+as\s+(an?\s+)?(unrestricted|jailbroken)\b|<\s*\|\s*(system|assistant)\s*\|\s*>", RegexOptions.IgnoreCase);
 
     private async Task<HttpResponseMessage> GetPublicAsync(string url, string accept, CancellationToken cancellationToken)
     {
@@ -693,14 +926,43 @@ public sealed class TrustedLearningSources
 
     private static bool HasNegation(string value) => Regex.IsMatch(value, @"\b(no|not|never|cannot|can't|don't|doesn't|isn't|aren't|không|chưa|chẳng|không thể)\b", RegexOptions.IgnoreCase);
     private static bool IsKnownLicense(string value) => DatasetLicenseCatalog.IsRecognized(value);
+    private static bool IsAutoAllowedLicense(string value)
+    {
+        var normalized = Regex.Replace(value.Trim().ToUpperInvariant(), @"\s+", "-");
+        return normalized is "CC0-1.0" or "CC0" or "CC-BY-4.0" or "CC-BY-SA-4.0" or "MIT" or "APACHE-2.0" or
+            "BSD-2-CLAUSE" or "BSD-3-CLAUSE" or "PSF-2.0" or "PYTHON-2.0" or "MPL-2.0";
+    }
+    private static string DriveManifestFingerprint(IEnumerable<CloudArtifact> artifacts) => Sha256(string.Join("\n", artifacts
+        .Select(item => $"{item.Id}|{item.Name}|{item.License}|{item.Sha256}|{item.Size}|{item.ModifiedTime:O}|{item.Version}")
+        .OrderBy(value => value, StringComparer.Ordinal)));
+    private static string ContentFingerprint(IEnumerable<SourceDocument> documents) => Sha256(string.Join("\n", documents
+        .Select(document => $"{document.Citation}\n{document.License}\n{Sha256(document.Text)}")
+        .OrderBy(value => value, StringComparer.Ordinal)));
+    private static string? DetectLicense(string metadata)
+    {
+        var candidates = new[] { "CC-BY-4.0", "CC-BY-SA-4.0", "CC0-1.0", "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MPL-2.0", "GPL-3.0-only", "GPL-3.0-or-later", "PSF-2.0", "Python-2.0" };
+        const string hintPattern = """(?is)(?:rel\s*=\s*['"]license['"]|name\s*=\s*['"](?:license|dcterms.license)['"]|['"](?:license|license_id)['"]\s*:\s*['"][^'"]{1,100}['"]).{0,500}|https?://(?:creativecommons.org/licenses|opensource.org/licenses)/[^\s'"]+|SPDX-License-Identifier\s*:\s*[A-Za-z0-9.+-]+""";
+        var hints = Regex.Matches(metadata, hintPattern)
+            .Select(match => WebUtility.HtmlDecode(match.Value));
+        foreach (var hint in hints)
+        foreach (var license in candidates)
+            if (hint.Contains(license, StringComparison.OrdinalIgnoreCase) ||
+                license == "CC-BY-4.0" && Regex.IsMatch(hint, "creativecommons.org/licenses/by/4.0", RegexOptions.IgnoreCase) ||
+                license == "CC-BY-SA-4.0" && Regex.IsMatch(hint, "creativecommons.org/licenses/by-sa/4.0", RegexOptions.IgnoreCase) ||
+                license == "CC0-1.0" && Regex.IsMatch(hint, "creativecommons.org/publicdomain/zero/1.0", RegexOptions.IgnoreCase))
+                return license;
+        return null;
+    }
     private static IEnumerable<string> Tokens(string value) => Regex.Matches(value.ToLowerInvariant(), @"[\p{L}\p{N}]{3,}")
         .Select(match => match.Value).Where(token => !StopWords.Contains(token));
     private static string Sha256(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static string SafeError(string value) => new string(value.Where(character => !char.IsControl(character)).Take(240).ToArray());
     private static string DefaultName(string type, string scope) => type == "drive-folder" ? scope.Split('/').Last() : new Uri(scope).Host + (type == "github" ? " repository" : "");
-    private static SourceView View(Source source) => new(source.Id, source.Type, source.Name, source.Scope, source.License, source.LicenseUrl,
+    private static SourceView View(Source source) => new(source.Id, source.Type, source.Name, source.Scope, source.AccessPermission ?? "read", source.License, source.LicenseUrl,
         source.Status, source.CheckedUtc, source.ApprovedUtc, source.LastSyncUtc, source.FileCount, source.LastAccepted, source.LastReview,
-        source.LastDuplicate, source.CheckSummary, source.LastError);
+        source.LastDuplicate, source.CheckSummary, source.LastError, source.LicenseEvidenceUrl, source.LicenseDetectionMethod, source.QuarantineReason,
+        source.Paused, source.WorkerState, source.RetryCount, source.NextAttemptUtc, source.LastAttemptUtc, source.LastSyncStatus,
+        source.LastQuarantined, source.QuarantinedDocuments);
 
     private Source GetSource(Guid id) => _state.Sources.FirstOrDefault(item => item.Id == id) ?? throw new KeyNotFoundException();
     private Source RequireSource(Guid id) => GetSource(id);
@@ -709,7 +971,12 @@ public sealed class TrustedLearningSources
     private State ReadState()
     {
         if (!File.Exists(_path)) return new State([], []);
-        try { return JsonSerializer.Deserialize<State>(_protector.Unprotect(File.ReadAllText(_path)), Json) ?? new State([], []); }
+        try
+        {
+            var state = JsonSerializer.Deserialize<State>(_protector.Unprotect(File.ReadAllText(_path)), Json) ?? new State([], []);
+            // Requeue an interrupted sync after restart; content and manifest fingerprints make the replay idempotent.
+            return state with { Sources = state.Sources.Select(item => item.WorkerState == "running" ? item with { WorkerState = "queued" } : item).ToArray() };
+        }
         catch (CryptographicException) { _logger.LogError("Trusted learning data could not be decrypted; refusing to overwrite it."); return new State([], [], Corrupt: true); }
         catch (JsonException) { _logger.LogError("Trusted learning data is invalid; refusing to overwrite it."); return new State([], [], Corrupt: true); }
     }
@@ -726,21 +993,36 @@ public sealed class TrustedLearningSources
 
     private sealed record State(Source[] Sources, KnowledgeItem[] Knowledge, DateTimeOffset UpdatedUtc = default, bool Corrupt = false);
     private sealed record CloudSnapshot(int Version, Source[] Sources, KnowledgeItem[] Knowledge, DateTimeOffset UpdatedUtc);
-    private sealed record Source(Guid Id, string Type, string Name, string Scope, string License, string LicenseUrl,
+    private sealed record Source(Guid Id, string Type, string Name, string Scope, string? AccessPermission, string License, string LicenseUrl,
         string Status, bool Enabled, DateTimeOffset CreatedUtc, DateTimeOffset? CheckedUtc, DateTimeOffset? ApprovedUtc,
         int FileCount, string? CheckSummary, DateTimeOffset? LastSyncUtc = null, string? LastError = null,
-        int LastAccepted = 0, int LastReview = 0, int LastDuplicate = 0);
+        int LastAccepted = 0, int LastReview = 0, int LastDuplicate = 0, string? LicenseEvidenceUrl = null,
+        string? LicenseDetectionMethod = null, string? QuarantineReason = null, bool Paused = false, int RetryCount = 0,
+        DateTimeOffset? NextAttemptUtc = null, DateTimeOffset? LastAttemptUtc = null, string WorkerState = "idle",
+        string LastSyncStatus = "never", string? LastContentFingerprint = null, int LastQuarantined = 0, int QuarantinedDocuments = 0,
+        string? LastManifestFingerprint = null);
     private sealed record SourceDocument(string Title, string Citation, string License, string Text);
     private sealed record KnowledgeItem(Guid Id, Guid SourceId, string SourceName, string Title, string Text,
-        string Citation, string License, string Hash, string State, DateTimeOffset UpdatedUtc);
+        string Citation, string License, string Hash, string State, DateTimeOffset UpdatedUtc,
+        string? QuarantineReason = null, string? VersionFingerprint = null);
+    private sealed record SourceCheckResult(bool Ok, string Summary, int FileCount, string? DetectedLicense = null,
+        string? EvidenceUrl = null, string? DetectionMethod = null, string? QuarantineReason = null, int QuarantinedDocuments = 0);
+    private sealed record LicenseEvidence(string License, string Url, string Method);
 
-    public sealed record SourceDraft(string? Type, string? Name, string? Scope, string? License, string? LicenseUrl);
-    public sealed record SourceView(Guid Id, string Type, string Name, string Scope, string License, string LicenseUrl,
+    public sealed record SourceDraft(string? Type, string? Name, string? Scope, string? License, string? LicenseUrl, string? AccessPermission = null);
+    public sealed record SourceView(Guid Id, string Type, string Name, string Scope, string AccessPermission, string License, string LicenseUrl,
         string Status, DateTimeOffset? CheckedUtc, DateTimeOffset? ApprovedUtc, DateTimeOffset? LastSyncUtc,
-        int FileCount, int LastAccepted, int LastReview, int LastDuplicate, string? CheckSummary, string? LastError);
+        int FileCount, int LastAccepted, int LastReview, int LastDuplicate, string? CheckSummary, string? LastError,
+        string? LicenseEvidenceUrl, string? LicenseDetectionMethod, string? QuarantineReason, bool Paused, string WorkerState,
+        int RetryCount, DateTimeOffset? NextAttemptUtc, DateTimeOffset? LastAttemptUtc, string LastSyncStatus,
+        int LastQuarantined, int QuarantinedDocuments);
+    public sealed record LearningDashboard(int SourceCount, int ApprovedCount, int PausedCount, int IndexedChunks,
+        int DuplicateChunks, int QuarantinedItems, int ErrorCount, DateTimeOffset? LastAttemptUtc, DateTimeOffset? LastSyncUtc);
+    public sealed record QuarantineView(string Type, Guid SourceId, string Source, string Reason, string Citation,
+        string? Hash, DateTimeOffset? UpdatedUtc);
     public sealed record KnowledgeView(string Text, string Source, string Citation, string License, string Sha256, int Relevance);
     public sealed record SyncSummary(Guid Id, string Name, int Accepted, int NeedsReview, int Duplicates,
-        DateTimeOffset? SyncedUtc, string? Message);
+        DateTimeOffset? SyncedUtc, string? Message, int Quarantined = 0, bool Unchanged = false);
 }
 
 public sealed class TrustedLearningWorker(TrustedLearningSources sources, ILogger<TrustedLearningWorker> logger) : BackgroundService
