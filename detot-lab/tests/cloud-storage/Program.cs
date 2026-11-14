@@ -432,27 +432,34 @@ static async Task AutonomousScopeSurvivesRestart()
     var directory = Directory.CreateTempSubdirectory("detot-auto-learning-");
     try
     {
-    var keys = new EphemeralDataProtectionProvider();
-    var storage = new FakeStorageProvider();
-    var clients = new StaticResponseHttpClientFactory(() => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
-    {
-        Content = new StringContent("<meta name='license' content='CC-BY-4.0'>\nASP.NET Core middleware composes request delegates and each component can invoke the next delegate and inspect the response.", Encoding.UTF8, "text/html"),
-    });
-    TrustedLearningSources Open() => new(directory.FullName, keys, clients, storage, NullLogger<TrustedLearningSources>.Instance,
-        searchProvider: new FakeSearchDiscoveryProvider([
-            new("ASP.NET Core middleware", "https://example.org/middleware", "Middleware pipeline documentation"),
-            new("Out of scope", "https://example.com/middleware", "Middleware pipeline documentation"),
-        ]));
-    var service = Open();
-    await Throws<ArgumentException>(() => service.QueueLearningAsync(new("middleware", null, []), CancellationToken.None));
-    var queued = await service.QueueLearningAsync(new("ASP.NET Core middleware", null, ["example.org"]), CancellationToken.None);
-    Assert(queued.Count == 1 && queued[0].Status == "pending", "only explicitly scoped results may be queued before verification");
-    var restarted = Open();
-    await restarted.RunDueAsync(CancellationToken.None);
-    Assert(restarted.List().Single().Status == "approved", "worker must verify and approve after restarting");
-    Assert(restarted.Search("middleware delegates").Any(item => item.Citation.Contains("example.org/middleware")), "worker must index cited content");
-    await restarted.RemoveAsync(queued[0].Id, CancellationToken.None);
-    Assert(restarted.Search("middleware delegates").Count == 0, "revoked content must immediately leave retrieval");
+        var keys = new EphemeralDataProtectionProvider();
+        var storage = new FakeStorageProvider();
+        var licensed = true;
+        var clients = new StaticResponseHttpClientFactory(() => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent((licensed ? "<meta name='license' content='CC-BY-4.0'>" : "") +
+                "\nASP.NET Core middleware composes request delegates and each component can invoke the next delegate and inspect the response.", Encoding.UTF8, "text/html"),
+        });
+        TrustedLearningSources Open() => new(directory.FullName, keys, clients, storage, NullLogger<TrustedLearningSources>.Instance,
+            searchProvider: new FakeSearchDiscoveryProvider([
+                new("ASP.NET Core middleware", "https://example.org/middleware", "Middleware pipeline documentation"),
+                new("Out of scope", "https://example.com/middleware", "Middleware pipeline documentation"),
+            ]));
+        var service = Open();
+        await Throws<ArgumentException>(() => service.QueueLearningAsync(new("middleware", null, []), CancellationToken.None));
+        var queued = await service.QueueLearningAsync(new("ASP.NET Core middleware", null, ["example.org"]), CancellationToken.None);
+        Assert(queued.Count == 1 && queued[0].Status == "pending", "only explicitly scoped results may be queued before verification");
+        var restarted = Open();
+        await restarted.RunDueAsync(CancellationToken.None);
+        Assert(restarted.List().Single().Status == "approved", "worker must verify and approve after restarting");
+        Assert(restarted.Search("middleware delegates").Any(item => item.Citation.Contains("example.org/middleware")), "worker must index cited content");
+        await restarted.RemoveAsync(queued[0].Id, CancellationToken.None);
+        Assert(restarted.Search("middleware delegates").Count == 0, "revoked content must immediately leave retrieval");
+        licensed = false;
+        await restarted.QueueLearningAsync(new("middleware", "https://example.org/unlicensed", null), CancellationToken.None);
+        await restarted.RunDueAsync(CancellationToken.None);
+        Assert(restarted.List().Single().Status == "quarantined" && restarted.Search("middleware").Count == 0,
+            "an explicitly permitted URL still needs independent license evidence");
     }
     finally { directory.Delete(recursive: true); }
 }

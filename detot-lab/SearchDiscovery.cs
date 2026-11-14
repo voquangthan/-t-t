@@ -56,8 +56,6 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
             .DistinctBy(candidate => CanonicalUrl(candidate.Url), StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(candidate => candidate.OfficialSource)
             .ThenBy(candidate => DomainPriority(candidate.Domain))
-            .ThenByDescending(candidate => candidate.LastUpdatedUtc ?? DateTimeOffset.MinValue)
-            .ThenBy(candidate => candidate.Title, StringComparer.OrdinalIgnoreCase)
             .Take(10).ToArray();
         return new SearchDiscoveryResponse(provider.Name, candidates);
     }
@@ -67,7 +65,7 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
         if (!Uri.TryCreate(result.Url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps || uri.Port != 443 ||
             !string.IsNullOrEmpty(uri.UserInfo) || uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || IPAddress.TryParse(uri.Host, out _))
             return null;
-        var cleanUrl = new UriBuilder(uri) { Fragment = "", Query = "" }.Uri.AbsoluteUri.TrimEnd('/');
+        var cleanUrl = new UriBuilder(uri) { Fragment = "", Query = "" }.Uri.AbsoluteUri;
         var path = uri.AbsolutePath;
         var isGithub = uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
             path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries).Length == 2;
