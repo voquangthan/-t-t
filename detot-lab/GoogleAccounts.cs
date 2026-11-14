@@ -24,8 +24,7 @@ static class GoogleAccounts
             Path = callbackPath
         };
         var group = app.MapGroup("/api/google");
-        var clientId = app.Configuration["DETOT_GOOGLE_CLIENT_ID"] ?? app.Configuration["DETOT_GOOGLE_DRIVE_CLIENT_ID"];
-        var secret = app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"] ?? app.Configuration["DETOT_GOOGLE_DRIVE_CLIENT_SECRET"];
+        var (clientId, secret) = GoogleOAuthClientSelection.Resolve(app.Configuration);
         var configured = (!string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret))
             || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-client.json"))
             || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-drive-client.json"));

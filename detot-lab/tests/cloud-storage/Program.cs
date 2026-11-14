@@ -7,6 +7,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 var checks = new List<(string Name, Func<Task> Run)>
 {
+    ("Google token refresh prefers the issuing client over a dedicated Drive client", GoogleOAuthClientSelectionKeepsTokenOwner),
+    ("Google OAuth client selection falls back to the Drive client when no primary client exists", GoogleOAuthClientSelectionFallsBack),
     ("dataset manager accepts licensed supported dataset metadata", DatasetAccepts),
     ("dataset manager rejects unknown license and unsupported formats", DatasetRejects),
     ("backup encrypts source data before provider upload", BackupIsEncrypted),
@@ -39,6 +41,36 @@ foreach (var (name, run) in checks)
 }
 Console.WriteLine($"{checks.Count - failed}/{checks.Count} checks passed");
 return failed == 0 ? 0 : 1;
+
+static Task GoogleOAuthClientSelectionKeepsTokenOwner()
+{
+    var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["DETOT_GOOGLE_CLIENT_ID"] = "jarvis-client",
+        ["DETOT_GOOGLE_CLIENT_SECRET"] = "jarvis-secret",
+        ["DETOT_GOOGLE_DRIVE_CLIENT_ID"] = "detotdrive-client",
+        ["DETOT_GOOGLE_DRIVE_CLIENT_SECRET"] = "detotdrive-secret"
+    }).Build();
+
+    var selected = GoogleOAuthClientSelection.Resolve(configuration);
+    if (selected.ClientId != "jarvis-client" || selected.ClientSecret != "jarvis-secret")
+        throw new InvalidOperationException("Google refresh credentials must match the primary account token issuer.");
+    return Task.CompletedTask;
+}
+
+static Task GoogleOAuthClientSelectionFallsBack()
+{
+    var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["DETOT_GOOGLE_DRIVE_CLIENT_ID"] = "detotdrive-client",
+        ["DETOT_GOOGLE_DRIVE_CLIENT_SECRET"] = "detotdrive-secret"
+    }).Build();
+
+    var selected = GoogleOAuthClientSelection.Resolve(configuration);
+    if (selected.ClientId != "detotdrive-client" || selected.ClientSecret != "detotdrive-secret")
+        throw new InvalidOperationException("The dedicated Drive client remains a supported fallback.");
+    return Task.CompletedTask;
+}
 
 static async Task DatasetAccepts()
 {

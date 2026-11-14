@@ -179,7 +179,7 @@ function Start-LabChild($Executable, $Arguments, $Variables) {
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.Arguments = ($Arguments | ForEach-Object { ConvertTo-LabProcessArgument $_ }) -join ' '
-    $allowed = @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','PROGRAMDATA','PROGRAMFILES','PROGRAMFILES(X86)','PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS','USERNAME','USERDOMAIN','HOMEDRIVE','HOMEPATH')
+    $allowed = @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','PROGRAMDATA','PROGRAMFILES','PROGRAMFILES(X86)','PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS','USERNAME','USERDOMAIN','HOMEDRIVE','HOMEPATH','XDG_CACHE_HOME')
     foreach ($name in @($info.EnvironmentVariables.Keys)) {
         if ($name -notin $allowed) { $info.EnvironmentVariables.Remove($name) }
     }
@@ -221,6 +221,7 @@ try {
         OPENCLAW_GATEWAY_TOKEN = $token
         OPENCLAW_STATE_DIR = $state
         OPENCLAW_CONFIG_PATH = $configPath
+        XDG_CACHE_HOME = Join-Path $root '.local/openclaw-cache'
         OPENCLAW_SKIP_CHANNELS = '1'
         OPENCLAW_DISABLE_BONJOUR = '1'
         DETOT_COPY_AUTHORITY_DIR = $authority
