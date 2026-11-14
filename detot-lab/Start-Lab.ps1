@@ -8,6 +8,13 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
+$openClawCache = if ([string]::IsNullOrWhiteSpace($env:DETOT_OPENCLAW_CACHE_DIR)) {
+    Join-Path $root '.local/openclaw-cache'
+} else {
+    [IO.Path]::GetFullPath($env:DETOT_OPENCLAW_CACHE_DIR)
+}
+if (![IO.Path]::IsPathRooted($openClawCache)) { throw 'DETOT_OPENCLAW_CACHE_DIR must be an absolute path.' }
+New-Item -ItemType Directory -Path $openClawCache -Force | Out-Null
 $PublicOrigin = ([string]$PublicOrigin).TrimEnd('/')
 $workspaceOrigin = if ($PublicOrigin) { $PublicOrigin } else { "http://localhost:$WebPort" }
 $googleConfig = Join-Path $root '.local/google-client.json'
@@ -186,11 +193,13 @@ function ConvertTo-LabProcessArgument([string]$Argument) {
     '"' + $escaped + '"'
 }
 
-function Start-LabChild($Executable, $Arguments, $Variables) {
+function Start-LabChild($Executable, $Arguments, $Variables, [switch]$CaptureOutput) {
     $info = [Diagnostics.ProcessStartInfo]::new($Executable)
     $info.WorkingDirectory = $root
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $CaptureOutput
+    $info.RedirectStandardError = $CaptureOutput
     $info.Arguments = ($Arguments | ForEach-Object { ConvertTo-LabProcessArgument $_ }) -join ' '
     $allowed = @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','PROGRAMDATA','PROGRAMFILES','PROGRAMFILES(X86)','PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS','USERNAME','USERDOMAIN','HOMEDRIVE','HOMEPATH','XDG_CACHE_HOME')
     foreach ($name in @($info.EnvironmentVariables.Keys)) {
@@ -198,6 +207,19 @@ function Start-LabChild($Executable, $Arguments, $Variables) {
     }
     foreach ($entry in $Variables.GetEnumerator()) { $info.EnvironmentVariables[$entry.Key] = $entry.Value }
     [Diagnostics.Process]::Start($info)
+}
+
+function Get-GatewayFailureDetail($Process, $OutputTask, $ErrorTask, $Secrets) {
+    try { $Process.WaitForExit() } catch { }
+    $text = @($OutputTask.GetAwaiter().GetResult(), $ErrorTask.GetAwaiter().GetResult()) -join "`n"
+    foreach ($secret in $Secrets) {
+        if ($secret) { $text = $text.Replace($secret, '[REDACTED]') }
+    }
+    $text = $text -replace '(?i)(api[_ -]?key|token|secret|password)(\s*[:=]\s*)[^\s,;]+', '$1$2[REDACTED]'
+    $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 12)
+    $detail = ($lines -join ' | ').Trim()
+    if ($detail.Length -gt 1500) { $detail = $detail.Substring(0, 1500) }
+    return $detail
 }
 
 function Save-LabProcesses {
@@ -229,17 +251,20 @@ try {
     if ($provider.Password.Trim() -cnotmatch '^[!-~]{8,512}$') {
         throw 'Invalid DeepSeek key format. Run Start-Lab.ps1 -ConfigureDeepSeek and enter the complete API key without spaces.'
     }
+    $gatewaySecrets = @($provider.Password.Trim(), $token)
     $gatewayProcess = Start-LabChild $node @($gateway, 'gateway', 'run') @{
         DEEPSEEK_API_KEY = $provider.Password.Trim()
         OPENCLAW_GATEWAY_TOKEN = $token
         OPENCLAW_STATE_DIR = $state
         OPENCLAW_CONFIG_PATH = $configPath
-        XDG_CACHE_HOME = Join-Path $root '.local/openclaw-cache'
+        XDG_CACHE_HOME = $openClawCache
         OPENCLAW_SKIP_CHANNELS = '1'
         OPENCLAW_DISABLE_BONJOUR = '1'
         DETOT_COPY_AUTHORITY_DIR = $authority
         DETOT_RESTORE_AUTHORITY = if ($RestoredState) { $authority } else { '' }
-    }
+    } -CaptureOutput
+    $gatewayOutput = $gatewayProcess.StandardOutput.ReadToEndAsync()
+    $gatewayError = $gatewayProcess.StandardError.ReadToEndAsync()
     Save-LabProcesses
     $provider = $null
     $key.Dispose()
@@ -251,7 +276,10 @@ try {
     try {
         $deadline = [DateTime]::UtcNow.AddMinutes(5)
         do {
-            if ($gatewayProcess.HasExited) { throw "Gateway exited ($($gatewayProcess.ExitCode))." }
+            if ($gatewayProcess.HasExited) {
+                $detail = Get-GatewayFailureDetail $gatewayProcess $gatewayOutput $gatewayError $gatewaySecrets
+                throw "Gateway exited ($($gatewayProcess.ExitCode)). $detail"
+            }
             try {
                 $response = $probe.GetAsync("http://127.0.0.1:$GatewayPort/readyz").GetAwaiter().GetResult()
                 $ready = $response.IsSuccessStatusCode
@@ -312,7 +340,10 @@ try {
     while (!$appProcess.HasExited -and !$gatewayProcess.HasExited) {
         Start-Sleep -Seconds 1
     }
-    if ($gatewayProcess.HasExited) { throw "Gateway exited ($($gatewayProcess.ExitCode))." }
+    if ($gatewayProcess.HasExited) {
+        $detail = Get-GatewayFailureDetail $gatewayProcess $gatewayOutput $gatewayError $gatewaySecrets
+        throw "Gateway exited ($($gatewayProcess.ExitCode)). $detail"
+    }
     throw "Backend exited ($($appProcess.ExitCode))."
 } finally {
     if ($key) { $key.Dispose() }
