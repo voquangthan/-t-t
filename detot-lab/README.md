@@ -24,6 +24,14 @@ Memory backup chỉ nhận các nguồn được cấu hình rõ ràng bằng `D
 
 Dung lượng hiển thị là tổng byte artifact trong cây `DETOT-AI` mà API cho phép liệt kê, không phải toàn bộ quota tài khoản. Chưa có OAuth consent trong môi trường triển khai thì giao diện sẽ báo chưa cấu hình/chưa kết nối, không hiển thị dữ liệu mẫu.
 
+## Trusted Learning Sources
+
+Trang **Nguồn học** quản lý các nguồn ở trạng thái `pending → checked → approved`. Người dùng phải thêm, kiểm tra phạm vi/giấy phép và bấm **Phê duyệt**; worker chỉ đọc nguồn đã duyệt. Website được giới hạn ở đúng một URL (không theo liên kết), GitHub chỉ đọc README của một repository, còn Drive chỉ đọc một nhóm dataset con trong `DETOT-AI/datasets`. Không có chức năng tự tìm nguồn trên Internet. Website cần URL bằng chứng giấy phép; GitHub đối chiếu SPDX license với metadata repository; Drive kiểm tra license từng artifact.
+
+Worker chạy mỗi 15 phút, đồng bộ lại nguồn tối đa mỗi 6 giờ hoặc theo yêu cầu thủ công. HTML, README và dataset JSON/JSONL/CSV/TXT/Markdown được tách thành đoạn, bỏ trùng theo SHA-256, gắn citation và giấy phép. Trường hợp có dấu hiệu mâu thuẫn theo heuristic được giữ ở hàng **Ứng viên cần xem lại**; người dùng duyệt đoạn đó riêng trước khi đưa vào RAG. PDF và Parquet hiện chưa được trích xuất. Đây là cập nhật chỉ mục RAG, không tự huấn luyện hoặc thay đổi trọng số model.
+
+Danh sách nguồn và chỉ mục cục bộ được mã hóa bằng Data Protection; snapshot có kiểm tra checksum được đồng bộ vào `DETOT-AI/documents` để máy khác nạp lại. Thu hồi nguồn sẽ gỡ các đoạn của nguồn khỏi chỉ mục hoạt động và cập nhật snapshot Drive; file dataset gốc vẫn được giữ nguyên. Vì người dùng phê duyệt việc thu thập, nội dung trích xuất của nguồn được lưu trong snapshot Drive.
+
 ## Môi trường
 
 Git 2.56.1 đã có trên máy. Node.js 24.22.3, .NET SDK 10.0.404 và OpenClaw 2026.11.3 được đặt trong `.local/`. OpenClaw chạy trực tiếp trên Windows vì trình cài WSL trả mã 1603. Binding fs-safe x64 đã nạp thành công sau khi bổ sung DLL runtime có chữ ký Microsoft riêng trong lab.
@@ -47,7 +55,7 @@ Ghim OpenClaw `2026.11.3` cho mục đích thử nghiệm trên loopback. Cấu 
 ## Kiểm thử
 
 - Chạy `dotnet build --no-restore` để build ASP.NET Core.
-- Chạy `dotnet run --project tests/cloud-storage/CloudStorageChecks.csproj` để kiểm tra Dataset Manager và backup mã hóa bằng storage provider giả lập; không gọi Google Drive.
+- Chạy `dotnet run --project tests/cloud-storage/CloudStorageChecks.csproj` để kiểm tra Dataset Manager, backup mã hóa và vòng đời Trusted Learning bằng storage provider giả lập; không gọi Google Drive thật.
 - Chạy `npm test` và `npm run build` trong `frontend/`.
 - Edge headless gửi câu mẫu qua ASP.NET Core, Gateway OpenClaw thật và provider giả lập trên loopback. Provider chỉ nhận `detot_lab_fixture`. Frontend hiển thị `DETOT-LAB-003`.
 - Backend từ chối origin khác và tên tool ngoài allowlist.

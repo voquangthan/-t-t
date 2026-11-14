@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Extensions.Logging.Abstractions;
 
 var checks = new List<(string Name, Func<Task> Run)>
 {
@@ -8,6 +10,8 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("dataset manager rejects unknown license and unsupported formats", DatasetRejects),
     ("backup encrypts source data before provider upload", BackupIsEncrypted),
     ("restore verifies encryption and external session revocation authority", RestoreIsVerified),
+    ("trusted learning requires source check and user approval before Drive indexing", TrustedLearningWorkflow),
+    ("trusted learning rejects unknown licenses and unsafe URL scopes", TrustedLearningRejectsUnsafeSources),
 };
 
 var failed = 0;
@@ -109,6 +113,60 @@ static async Task RestoreIsVerified()
     finally { try { Directory.Delete(root, recursive: true); } catch { } }
 }
 
+static async Task TrustedLearningWorkflow()
+{
+    var root = Path.Combine(Path.GetTempPath(), "detot-learning-tests-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    const string content = "{\"question\":\"How to configure a VLAN trunk safely\",\"answer\":\"Configure the switch trunk with an explicit allowed VLAN list, verify the native VLAN on both ends, and inspect the link status before changing production traffic.\"}";
+    var storage = new FakeStorageProvider
+    {
+        Listed = [new CloudArtifact("drive-learning-1", "network.jsonl", "dataset", "programming", "1.0.0", "", "curated", "CC-BY-4.0", Encoding.UTF8.GetByteCount(content), DateTimeOffset.UtcNow, "", "PASS", null)],
+        SeedDownloadBytes = Encoding.UTF8.GetBytes(content),
+        SeedDownloadName = "network.jsonl",
+    };
+    try
+    {
+        var service = new TrustedLearningSources(root, new EphemeralDataProtectionProvider(), new FakeHttpClientFactory(), storage,
+            NullLogger<TrustedLearningSources>.Instance);
+        var pending = await service.AddAsync(new("drive-folder", "Programming docs", "drive://datasets/programming", "CC-BY-4.0", ""), CancellationToken.None);
+        Assert(pending.Status == "pending" && pending.ApprovedUtc is null, "new sources must begin pending, not approved");
+        await Throws<InvalidOperationException>(() => service.ApproveAsync(pending.Id, CancellationToken.None));
+        var checkedSource = await service.CheckAsync(pending.Id, CancellationToken.None);
+        Assert(checkedSource.Status == "checked" && checkedSource.FileCount == 1, "check should verify the selected Drive category and its license");
+        var approved = await service.ApproveAsync(pending.Id, CancellationToken.None);
+        Assert(approved.Status == "approved", "only an explicit approval should activate collection");
+        var sync = await service.SyncAsync(pending.Id, CancellationToken.None);
+        Assert(sync.Accepted > 0 && sync.NeedsReview == 0, "approved text dataset should pass quality checks and enter the index");
+        var evidence = service.Search("VLAN trunk allowed list", 4);
+        Assert(evidence.Count == 1 && evidence[0].Citation == "drive://drive-learning-1", "RAG results must preserve the exact source citation");
+        Assert(service.BuildContext("VLAN trunk")?.Contains("[K1]", StringComparison.Ordinal) == true, "chat context should include a stable citation marker");
+        var secondMachine = new TrustedLearningSources(Path.Combine(root, "second-device"), new EphemeralDataProtectionProvider(),
+            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance);
+        await secondMachine.InitializeCloudSnapshotAsync(CancellationToken.None);
+        Assert(secondMachine.Search("VLAN trunk").Count == 1 && secondMachine.List().Single().Status == "approved",
+            "the verified Drive snapshot should carry approved sources and indexed knowledge to another device");
+        await service.RemoveAsync(pending.Id, CancellationToken.None);
+        Assert(service.Search("VLAN trunk").Count == 0, "revoking a source must remove its knowledge from retrieval");
+    }
+    finally { try { Directory.Delete(root, recursive: true); } catch { } }
+}
+
+static async Task TrustedLearningRejectsUnsafeSources()
+{
+    var root = Path.Combine(Path.GetTempPath(), "detot-learning-tests-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var service = new TrustedLearningSources(root, new EphemeralDataProtectionProvider(), new FakeHttpClientFactory(), new FakeStorageProvider(),
+            NullLogger<TrustedLearningSources>.Instance);
+        await Throws<ArgumentException>(() => service.AddAsync(new("website", "Unsafe", "https://localhost/private", "CC-BY-4.0", "https://example.org/license"), CancellationToken.None));
+        await Throws<ArgumentException>(() => service.AddAsync(new("website", "Unlicensed", "https://example.org/docs", "unknown", "https://example.org/license"), CancellationToken.None));
+        await Throws<ArgumentException>(() => service.AddAsync(new("github", "Wide scope", "https://github.com/example", "MIT", ""), CancellationToken.None));
+        Assert(service.List().Count == 0, "invalid sources must not be saved");
+    }
+    finally { try { Directory.Delete(root, recursive: true); } catch { } }
+}
+
 static void Assert(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
@@ -127,9 +185,13 @@ sealed class FakeStorageProvider : IStorageProvider
     private long _size;
     public UploadSpec? Started { get; private set; }
     public byte[] Uploaded => _upload.ToArray();
+    public IReadOnlyList<CloudArtifact> Listed { get; set; } = [];
+    private readonly List<CloudArtifact> _generated = [];
+    public byte[]? SeedDownloadBytes { get; set; }
+    public string? SeedDownloadName { get; set; }
 
     public Task<CloudStorageStatus> StatusAsync(CancellationToken cancellationToken) => Task.FromResult(new CloudStorageStatus(true, true, "test@example.invalid", true, _upload.Length, null));
-    public Task<IReadOnlyList<CloudArtifact>> ListAsync(string? kind, string? pipeline, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CloudArtifact>>([]);
+    public Task<IReadOnlyList<CloudArtifact>> ListAsync(string? kind, string? pipeline, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CloudArtifact>>([.. Listed, .. _generated]);
     public Task<UploadSession> StartUploadAsync(UploadSpec spec, long size, CancellationToken cancellationToken)
     {
         Started = spec; _size = size; _upload.SetLength(0);
@@ -142,18 +204,26 @@ sealed class FakeStorageProvider : IStorageProvider
         var complete = _upload.Length == _size;
         if (!complete) return new UploadProgress(id, _size, _upload.Length, false, false, null, null, null);
         var hash = Convert.ToHexString(SHA256.HashData(_upload.ToArray())).ToLowerInvariant();
-        var artifact = new CloudArtifact("test-id", Started!.FileName, Started.Kind, Started.Category, Started.Version, Started.Pipeline, Started.Source, Started.License, _size, DateTimeOffset.UtcNow, hash, "PASS", null);
+        var artifact = new CloudArtifact("fake-cloud-" + Guid.NewGuid().ToString("N"), Started!.FileName, Started.Kind, Started.Category, Started.Version, Started.Pipeline, Started.Source, Started.License, _size, DateTimeOffset.UtcNow, hash, "PASS", null);
+        _generated.Add(artifact);
         return new UploadProgress(id, _size, _upload.Length, true, false, hash, artifact, null);
     }
     public Task<UploadProgress> UploadStatusAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult(new UploadProgress(id, _size, _upload.Length, _upload.Length == _size, false, null, null, null));
     public async Task<VerifiedDownload> DownloadVerifiedAsync(string id, CancellationToken cancellationToken)
     {
-        var path = Path.Combine(Path.GetTempPath(), "detot-fake-cloud-" + Guid.NewGuid().ToString("N") + ".enc");
-        var bytes = _upload.ToArray();
+        var generated = _generated.FirstOrDefault(item => item.Id == id);
+        var bytes = generated is not null ? _upload.ToArray() : SeedDownloadBytes ?? _upload.ToArray();
+        var name = generated?.Name ?? SeedDownloadName ?? "fake.detot.enc";
+        var path = Path.Combine(Path.GetTempPath(), "detot-fake-cloud-" + Guid.NewGuid().ToString("N") + Path.GetExtension(name));
         await File.WriteAllBytesAsync(path, bytes, cancellationToken);
         var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        return new VerifiedDownload(path, "fake.detot.enc", "application/octet-stream", bytes.Length, sha);
+        return new VerifiedDownload(path, name, "application/octet-stream", bytes.Length, sha);
     }
     public Task<bool> VerifyAsync(string id, CancellationToken cancellationToken) => Task.FromResult(true);
-    public Task DeleteAsync(string id, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task DeleteAsync(string id, CancellationToken cancellationToken) { _generated.RemoveAll(item => item.Id == id); return Task.CompletedTask; }
+}
+
+sealed class FakeHttpClientFactory : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(new HttpClientHandler());
 }

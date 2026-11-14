@@ -3,6 +3,7 @@ import { Calendar } from "./Calendar";
 import { suggestFromChat } from "./GoogleCalendar";
 import { GoogleProfiles } from "./GoogleProfiles";
 import { CloudStorage } from "./CloudStorage";
+import { TrustedLearning } from "./TrustedLearning";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
@@ -43,6 +44,7 @@ function Code({ className, children }: React.ComponentProps<"code">) {
 function App() {
   const [calendar, setCalendar] = useState(() => new URLSearchParams(location.search).has("calendar"));
   const [cloudStorage, setCloudStorage] = useState(() => new URLSearchParams(location.search).has("drive"));
+  const [trustedLearning, setTrustedLearning] = useState(false);
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string | undefined>(() => {
     if (remoteWorkspace) return undefined;
@@ -132,7 +134,7 @@ function App() {
       setBusy(false);
     }
   }
-  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setActive(id); setDraft(""); setSide(false); setError(""); retry.current = null; };
+  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setActive(id); setDraft(""); setSide(false); setError(""); retry.current = null; };
 
   async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false) {
     if (!text.trim() || request.current) return;
@@ -229,7 +231,8 @@ function App() {
         </div>)}
       </nav>
       <div className="sidebar-footer">
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(true); setPracticeNotes(undefined); setSide(false); }}>Cloud Storage</button>{" "}
+        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(true); setTrustedLearning(false); setPracticeNotes(undefined); setSide(false); }}>Cloud Storage</button>{" "}
+        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setPracticeNotes(undefined); setSide(false); }}>Nguồn học</button>{" "}
         <button disabled={busy} onClick={() => { select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true); }}>Ca trực giả lập</button>{" "}
         <button disabled={busy} onClick={async () => {
           setBusy(true);
@@ -241,16 +244,17 @@ function App() {
             setPracticeLearning(data.learning ?? "");
             setCalendar(false);
             setCloudStorage(false);
+            setTrustedLearning(false);
             setSide(false);
           } catch (cause) { setCalendar(false); setCloudStorage(false); setError((cause as Error).message); }
           finally { setBusy(false); }
         }}>Ghi chú học tập</button>{" "}
-        <button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setCloudStorage(false); setSide(false); }}>Lịch</button>{" "}
+        <button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setCloudStorage(false); setTrustedLearning(false); setSide(false); }}>Lịch</button>{" "}
         <button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button>
       </div>
     </aside>
     <main>
-      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{cloudStorage ? "Cloud Storage" : calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
+      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{cloudStorage ? "Cloud Storage" : trustedLearning ? "Nguồn học" : calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
       {practiceNotes !== undefined && <section aria-label="Ghi chú học tập" className="transcript">
         <p><strong>Tiến độ tự học:</strong> {practiceLearning}</p>
         <form onSubmit={async event => {
@@ -274,7 +278,7 @@ function App() {
           <button type="button" disabled={busy} onClick={() => setPracticeNotes(undefined)}>Đóng</button>
         </form>
       </section>}
-      {cloudStorage ? <CloudStorage /> : calendar ? <Calendar /> : <>
+      {cloudStorage ? <CloudStorage /> : trustedLearning ? <TrustedLearning /> : calendar ? <Calendar /> : <>
       <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
         {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
         {conversation?.messages.map((message, index) => <article key={message.id} className={message.role}>
