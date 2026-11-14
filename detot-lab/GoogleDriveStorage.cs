@@ -76,9 +76,11 @@ public sealed class GoogleDriveStorage : IStorageProvider
 
     private void MapRoutes(WebApplication app)
     {
-        app.MapGet("/api/drive/status", async (HttpContext context) => await StatusRoute(context));
+        Func<HttpContext, Task<IResult>> statusRoute = StatusRoute;
+        app.MapGet("/api/drive/status", (Delegate)statusRoute);
         app.MapPost("/api/drive/connect", (Delegate)((HttpContext context) => Guard(context, () => ConnectRoute(context), requireAccount: false)));
-        app.MapGet("/api/drive/callback", async (HttpContext context) => await CallbackRoute(context));
+        Func<HttpContext, Task<IResult>> callbackRoute = CallbackRoute;
+        app.MapGet("/api/drive/callback", (Delegate)callbackRoute);
         Func<HttpContext, Task<IResult>> refreshRoute = context => Guard(context, async () =>
         {
             _accessToken = null;
