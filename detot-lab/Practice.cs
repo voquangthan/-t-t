@@ -13,6 +13,7 @@ sealed class Practice(IDataProtector protector, string directory)
 
     public string Notes => Read<string>(ProfilePath) ?? "";
     public string LearningSummary => SummarizeLearning(Read<LearningProfile>(LearningPath) ?? LearningProfile.Empty);
+    public LearningSnapshot LearningMap => BuildLearningMap(Read<LearningProfile>(LearningPath) ?? LearningProfile.Empty);
     public string? Case(Guid id) => Read<string>(CasePath(id));
     public void SaveNotes(string notes) => Write(ProfilePath, notes.Trim());
     public void SaveCase(Guid id, string? state)
@@ -178,6 +179,44 @@ sealed class Practice(IDataProtector protector, string directory)
         return $"Đã hoàn tất {profile.Completed} ca · chẩn đoán đúng {accurate}/{profile.Completed} · bàn giao đạt {handoffs}/{profile.Completed}. Chủ đề Đệ Tốt đề xuất: {next.Title} ({level}).";
     }
 
+    private LearningSnapshot BuildLearningMap(LearningProfile profile)
+    {
+        var topics = Scenarios.Select(scenario =>
+        {
+            var progress = profile.Domains.GetValueOrDefault(scenario.Id) ?? DomainProgress.Empty;
+            var sample = progress.Completed;
+            var diagnosis = (progress.CorrectDiagnoses + 1d) / (sample + 2d);
+            var handoff = (progress.GoodHandoffs + 1d) / (sample + 2d);
+            var completion = (sample - progress.EarlyEnds + 1d) / (sample + 2d);
+            var mastery = (int)Math.Round(100 * (diagnosis * 0.55 + handoff * 0.35 + completion * 0.10));
+            var confidence = sample switch
+            {
+                0 => "Chưa luyện",
+                < 3 => "Đang thu thập thêm dữ liệu",
+                _ => "Có vài lượt luyện để so sánh"
+            };
+            var signal = sample < 3
+                ? "Chưa đủ lượt để kết luận"
+                : progress.WrongDiagnoses >= progress.CorrectDiagnoses + 2
+                    ? "Thử kiểm chứng giả thuyết trước khi chốt nguyên nhân"
+                    : progress.GoodHandoffs * 2 < sample
+                        ? "Luyện tóm tắt nguyên nhân và bước xử lý khi bàn giao"
+                        : progress.EarlyEnds * 2 >= sample
+                            ? "Thử đi thêm một bước kiểm tra trước khi kết thúc ca"
+                            : "Đang tiến bộ ổn định, có thể tăng độ khó";
+
+            return new LearningTopic(scenario.Id, scenario.Title, sample, progress.CorrectDiagnoses,
+                progress.WrongDiagnoses, progress.GoodHandoffs, progress.EarlyEnds, mastery, confidence, signal);
+        }).Where(topic => topic.Completed > 0).OrderBy(topic => topic.Mastery).ToArray();
+
+        var next = SelectScenario("", profile);
+        var weak = topics.FirstOrDefault(topic => topic.Completed >= 3);
+        var nextStep = weak is null
+            ? $"Thử ca «{next.Title}» để Đệ Tốt có thêm dữ liệu cá nhân hóa."
+            : $"Ca tiếp theo «{next.Title}». Chủ đề cần luyện thêm là «{weak.Title}»: {weak.Signal}.";
+        return new LearningSnapshot(profile.Completed, SummarizeLearning(profile), nextStep, topics);
+    }
+
     private static Scenario SelectScenario(string prompt, LearningProfile? profile = null)
     {
         var text = Normalize(prompt);
@@ -248,6 +287,9 @@ sealed class Practice(IDataProtector protector, string directory)
     }
     public sealed record NoteEdit(string? Notes);
     public sealed record Turn(string Reply, bool ToolUsed);
+    public sealed record LearningSnapshot(int Completed, string Summary, string NextStep, LearningTopic[] Topics);
+    public sealed record LearningTopic(string Id, string Title, int Completed, int CorrectDiagnoses,
+        int WrongDiagnoses, int GoodHandoffs, int EarlyEnds, int Mastery, string Confidence, string Signal);
 
     private static readonly Scenario[] Scenarios =
     [

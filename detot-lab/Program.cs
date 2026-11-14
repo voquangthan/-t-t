@@ -145,7 +145,7 @@ app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
 app.MapGet("/api/practice/notes", () => practice is null
-    ? Results.StatusCode(503) : Results.Ok(new { notes = practice.Notes, learning = practice.LearningSummary }));
+    ? Results.StatusCode(503) : Results.Ok(new { notes = practice.Notes, learning = practice.LearningSummary, map = practice.LearningMap }));
 app.MapPut("/api/practice/notes", (Practice.NoteEdit edit, HttpContext context) =>
 {
     if (!IsLocalMutation(context)) return Results.StatusCode(403);

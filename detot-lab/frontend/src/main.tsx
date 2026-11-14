@@ -99,6 +99,10 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [practiceNotes, setPracticeNotes] = useState<string>();
   const [practiceLearning, setPracticeLearning] = useState("");
+  const [learningMap, setLearningMap] = useState<{ completed: number; nextStep: string; topics: Array<{
+    id: string; title: string; completed: number; correctDiagnoses: number; wrongDiagnoses: number;
+    goodHandoffs: number; earlyEnds: number; mastery: number; confidence: string; signal: string;
+  }> }>({ completed: 0, nextStep: "", topics: [] });
   const revisions = useRef(new Map<string, string>());
   const request = useRef<AbortController | null>(null);
   const retry = useRef<(() => void) | null>(null);
@@ -311,24 +315,41 @@ function App() {
           try {
             const response = await fetch("/api/practice/notes");
             if (!response.ok) throw new Error("Không tải được ghi chú học tập.");
-            const data: { notes: string; learning?: string } = await response.json();
+            const data: { notes: string; learning?: string; map?: typeof learningMap } = await response.json();
             setPracticeNotes(data.notes);
             setPracticeLearning(data.learning ?? "");
+            setLearningMap(data.map ?? { completed: 0, nextStep: "", topics: [] });
             setCalendar(false);
             setCloudStorage(false);
             setTrustedLearning(false);
             setSide(false);
           } catch (cause) { setCalendar(false); setCloudStorage(false); setError((cause as Error).message); }
           finally { setBusy(false); }
-        }}>Ghi chú học tập</button>{" "}
+        }}>Bản đồ học tập</button>{" "}
         <button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setCloudStorage(false); setTrustedLearning(false); setSide(false); }}>Lịch</button>{" "}
         <button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button>
       </div>
     </aside>
     <main>
       <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{cloudStorage ? "Cloud Storage" : trustedLearning ? "Nguồn học" : calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
-      {practiceNotes !== undefined && <section aria-label="Ghi chú học tập" className="transcript">
-        <p><strong>Tiến độ tự học:</strong> {practiceLearning}</p>
+      {practiceNotes !== undefined && <section aria-label="Bản đồ học tập" className="transcript">
+        <h2>Bản đồ học tập</h2>
+        <p><strong>Tiến độ:</strong> {practiceLearning}</p>
+        <p>{learningMap.nextStep}</p>
+        <button type="button" disabled={busy} onClick={() => {
+          setPracticeNotes(undefined);
+          setCalendar(false); setCloudStorage(false); setTrustedLearning(false);
+          select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true);
+        }}>Luyện ca được đề xuất</button>
+        {learningMap.completed > 0 && <div className="learning-map">
+          {learningMap.topics.map(topic => <article className="learning-topic" key={topic.id}>
+            <div className="learning-topic-heading"><strong>{topic.title}</strong><span>{topic.mastery}% tín hiệu tiến bộ</span></div>
+            <progress max={100} value={topic.mastery} aria-label={`Tiến độ ${topic.title}`} />
+            <p>{topic.confidence} · {topic.completed} ca · chẩn đoán đúng {topic.correctDiagnoses}, sai {topic.wrongDiagnoses} · bàn giao tốt {topic.goodHandoffs}</p>
+            <p>{topic.signal}</p>
+          </article>)}
+        </div>}
+        <p className="muted">Điểm tiến bộ được làm mượt khi còn ít lượt. Đệ Tốt chỉ lưu số liệu tổng hợp, không lưu log, mã nguồn hay nội dung trò chuyện trong bản đồ này.</p>
         <form onSubmit={async event => {
           event.preventDefault();
           setBusy(true);
