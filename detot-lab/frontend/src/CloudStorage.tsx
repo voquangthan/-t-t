@@ -7,6 +7,7 @@ type DriveHistory = { utc: string; action: string; target: string; result: strin
 type UploadSession = { id: string; size: number; receivedBytes: number; chunkSize: number };
 type UploadProgress = UploadSession & { complete: boolean; duplicate: boolean; sha256?: string | null; artifact?: Artifact | null; message?: string | null };
 const resumeKey = "detot.drive.pending-upload.v1";
+const supportedLicenses = ["CC-BY-4.0", "CC-BY-SA-4.0", "CC0-1.0", "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "PSF-2.0", "Python-2.0", "MPL-2.0", "GPL-3.0-only", "GPL-3.0-or-later", "Public-Domain", "Proprietary-Owner-Provided"];
 const bytes = (value: number) => value < 1024 ** 2 ? `${(value / 1024).toFixed(0)} KiB` : value < 1024 ** 3 ? `${(value / 1024 ** 2).toFixed(1)} MiB` : `${(value / 1024 ** 3).toFixed(2)} GiB`;
 const date = (value: string) => new Intl.DateTimeFormat("vi-VN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 
@@ -38,6 +39,7 @@ export function CloudStorage() {
   const [restorePassphrase, setRestorePassphrase] = useState("");
   const [restoreUrl, setRestoreUrl] = useState("");
   const [keep, setKeep] = useState(5);
+  const [editingMetadata, setEditingMetadata] = useState<{ id: string; source: string; license: string } | null>(null);
 
   const reload = useCallback(async () => {
     setError("");
@@ -164,6 +166,18 @@ export function CloudStorage() {
     finally { setBusy(false); }
   };
 
+  const saveDatasetMetadata = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingMetadata) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      await driveApi(`items/${encodeURIComponent(editingMetadata.id)}/metadata`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: editingMetadata.source, license: editingMetadata.license }) });
+      setNotice("Đã cập nhật metadata giấy phép/nguồn trên Drive; nội dung và SHA-256 của file không thay đổi.");
+      setEditingMetadata(null); await reload();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Cập nhật metadata thất bại."); }
+    finally { setBusy(false); }
+  };
+
   return <section className="transcript cloud-storage">
     <div className="cloud-heading"><div><h1>Cloud Storage</h1><p>Kho riêng <strong>DETOT-AI</strong> trên Google Drive. Dataset và artifact đồng bộ giữa máy được cấp quyền.</p></div><button disabled={busy || !status?.connected} onClick={async () => { setBusy(true); setError(""); try { await driveApi("refresh", { method: "POST" }); setNotice("Token Drive đã làm mới."); await reload(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Làm mới token thất bại."); } finally { setBusy(false); } }}>Làm mới token</button></div>
     {notice && <p role="status" className="cloud-notice">{notice}</p>}{error && <p role="alert" className="cloud-error">{error}</p>}
@@ -179,7 +193,14 @@ export function CloudStorage() {
           <button className="primary" disabled={busy || !file}>{busy ? "Đang xử lý…" : "Tải lên và xác minh SHA-256"}</button>{progress && <span className="progress">{progress}</span>}
         </form>
         <div className="cloud-filter"><label>Loại xem<select value={kind} onChange={event => setKind(event.target.value)}><option value="all">Tất cả</option><option value="dataset">Dataset</option><option value="model">Model</option><option value="backup">Backup</option><option value="training-result">Kết quả huấn luyện</option><option value="document">Tài liệu</option></select></label><label>Pipeline<input value={pipeline} onChange={event => setPipeline(event.target.value)} placeholder="Lọc theo pipeline"/></label></div>
-        <div className="cloud-list">{items.length === 0 ? <p>Chưa có artifact phù hợp trong DETOT-AI.</p> : items.map(item => <article className="cloud-item" key={item.id}><div className="cloud-item-title"><strong>{item.name}</strong><span>{item.kind} · v{item.version} · {bytes(item.size)} · {date(item.modifiedTime)}</span></div><p>Nguồn: {item.source || "—"} · Giấy phép: {item.license || "—"}{item.pipeline && ` · Pipeline: ${item.pipeline}`}</p><code>SHA-256 {item.sha256 || "chưa có"} · {item.integrity}</code><div className="cloud-actions"><button disabled={busy} onClick={() => void download(item)}>Tải xuống</button><button disabled={busy} onClick={() => void verify(item)}>Kiểm tra toàn vẹn</button>{item.kind === "backup" && <button disabled={busy} onClick={() => void restore(item)}>Khôi phục an toàn</button>}{item.webViewLink && <a href={item.webViewLink} target="_blank" rel="noreferrer">Mở trên Drive</a>}<button disabled={busy} onClick={() => void remove(item)}>Chuyển vào Thùng rác</button></div>{item.kind === "backup" && <label>Cụm mật khẩu khôi phục<input type="password" autoComplete="new-password" value={restorePassphrase} onChange={event => setRestorePassphrase(event.target.value)} /></label>}</article>)}</div>
+        <div className="cloud-list">{items.length === 0 ? <p>Chưa có artifact phù hợp trong DETOT-AI.</p> : items.map(item => <article className="cloud-item" key={item.id}>
+          <div className="cloud-item-title"><strong>{item.name}</strong><span>{item.kind} · v{item.version} · {bytes(item.size)} · {date(item.modifiedTime)}</span></div>
+          <p>Nguồn: {item.source || "—"} · Giấy phép: {item.license || "—"}{item.pipeline && ` · Pipeline: ${item.pipeline}`}</p>
+          <code>SHA-256 {item.sha256 || "chưa có"} · {item.integrity}</code>
+          <div className="cloud-actions"><button disabled={busy} onClick={() => void download(item)}>Tải xuống</button><button disabled={busy} onClick={() => void verify(item)}>Kiểm tra toàn vẹn</button>{item.kind === "dataset" && <button disabled={busy} onClick={() => setEditingMetadata({ id: item.id, source: item.source, license: item.license })}>Sửa metadata</button>}{item.kind === "backup" && <button disabled={busy} onClick={() => void restore(item)}>Khôi phục an toàn</button>}{item.webViewLink && <a href={item.webViewLink} target="_blank" rel="noreferrer">Mở trên Drive</a>}<button disabled={busy} onClick={() => void remove(item)}>Chuyển vào Thùng rác</button></div>
+          {editingMetadata?.id === item.id && <form className="cloud-upload" onSubmit={event => void saveDatasetMetadata(event)}><h3>Sửa metadata dataset</h3><label>Nguồn dữ liệu<input required maxLength={1000} value={editingMetadata.source} onChange={event => setEditingMetadata({ ...editingMetadata, source: event.target.value })}/></label><label>Giấy phép thật<select required value={editingMetadata.license} onChange={event => setEditingMetadata({ ...editingMetadata, license: event.target.value })}>{!supportedLicenses.includes(editingMetadata.license) && <option value={editingMetadata.license}>Giá trị hiện tại chưa được nhận diện: {editingMetadata.license}</option>}<option value="">Chọn giấy phép đúng</option>{supportedLicenses.map(value => <option key={value}>{value}</option>)}</select></label><p>Chỉ chọn giấy phép đúng theo nguồn. Lưu thay đổi này không tải lại file và không đổi checksum.</p><button className="primary" disabled={busy || !editingMetadata.source.trim() || !supportedLicenses.includes(editingMetadata.license)}>Lưu metadata</button><button type="button" disabled={busy} onClick={() => setEditingMetadata(null)}>Hủy</button></form>}
+          {item.kind === "backup" && <label>Cụm mật khẩu khôi phục<input type="password" autoComplete="new-password" value={restorePassphrase} onChange={event => setRestorePassphrase(event.target.value)} /></label>}
+        </article>)}</div>
         {restoreUrl && <p role="status"><a href={restoreUrl}>Tải gói restore đã kiểm tra (chỉ dùng một lần)</a></p>}
       </>}
       {tab === "backup" && <div className="cloud-upload"><h2>Sao lưu Memory Core và Dreaming</h2><p>Chỉ các nguồn được cấu hình rõ ràng trên máy chủ mới xuất hiện. Backup được mã hóa trước khi tải lên; passphrase không được lưu. Restore kiểm tra manifest, SHA-256 và danh sách thu hồi session ngoài snapshot.</p>{sources.length === 0 && <p>Chưa cấu hình nguồn backup (DETOT_MEMORY_CORE_PATH, DETOT_DREAMING_PATH, DETOT_MEMORY_RELATED_PATH).</p>}{sources.map(source => <label className="cloud-source" key={source.id}><input type="checkbox" disabled={!source.available} checked={selectedSources.includes(source.id)} onChange={event => setSelectedSources(event.target.checked ? [...selectedSources, source.id] : selectedSources.filter(id => id !== source.id))}/><span>{source.label} · {source.available ? `${source.files} tệp, ${bytes(source.bytes)}` : "không khả dụng"}</span></label>)}<label>Cụm mật khẩu riêng (tối thiểu 16 ký tự)<input type="password" autoComplete="new-password" value={passphrase} onChange={event => setPassphrase(event.target.value)}/></label><button className="primary" disabled={busy || !selectedSources.length} onClick={() => void createBackup()}>Tạo backup mã hóa</button>{progress && <span className="progress">{progress}</span>}<div className="cloud-retention"><label>Giữ lại <input type="number" min={1} max={100} value={keep} onChange={event => setKeep(Number(event.target.value))}/> bản gần nhất</label><button disabled={busy} onClick={async () => { if (!confirm(`Chuyển các backup vượt quá ${keep} bản vào Thùng rác Drive?`)) return; setBusy(true); try { const result = await driveApi<{ retained: number; movedToTrash: number }>("retention", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keep }) }); setNotice(`Giữ ${result.retained}; chuyển ${result.movedToTrash} backup cũ vào Thùng rác Drive.`); await reload(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Áp dụng retention thất bại."); } finally { setBusy(false); } }}>Áp dụng retention</button></div></div>}

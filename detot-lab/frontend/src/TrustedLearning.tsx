@@ -64,7 +64,7 @@ export function TrustedLearning() {
     finally { setBusy(false); }
   };
 
-  const mutate = async (id: string, action: "approve" | "sync" | "delete") => {
+  const mutate = async (id: string, action: "check" | "approve" | "sync" | "delete") => {
     if (action === "delete" && !confirm("Xóa nguồn và các trích đoạn kiến thức của nó khỏi chỉ mục? File gốc trên Drive không bị xóa.")) return;
     setBusy(true); setError(""); setMessage("");
     try {
@@ -107,7 +107,7 @@ export function TrustedLearning() {
       <p>{source.checkSummary || "Chưa kiểm tra."}{source.lastError && ` · Lỗi gần nhất: ${source.lastError}`}</p>
       <p>Kiểm tra: {date(source.checkedUtc)} · Duyệt: {date(source.approvedUtc)} · Đồng bộ: {date(source.lastSyncUtc)}</p>
       <p>{source.lastAccepted} đoạn được lập chỉ mục · {source.lastReview} cần xem lại · {source.lastDuplicate} trùng lặp</p>
-      <div className="cloud-actions">{source.status === "checked" && <button disabled={busy} onClick={() => void mutate(source.id, "approve")}>Phê duyệt</button>}{source.status === "approved" && <button disabled={busy} onClick={() => void mutate(source.id, "sync")}>Đồng bộ ngay</button>}<button disabled={busy} onClick={() => void mutate(source.id, "delete")}>Thu hồi và xóa chỉ mục</button></div>
+      <div className="cloud-actions">{source.status !== "approved" && <button disabled={busy} onClick={() => void mutate(source.id, "check")}>Kiểm tra lại</button>}{source.status === "checked" && <button disabled={busy} onClick={() => void mutate(source.id, "approve")}>Phê duyệt</button>}{source.status === "approved" && <button disabled={busy} onClick={() => void mutate(source.id, "sync")}>Đồng bộ ngay</button>}<button disabled={busy} onClick={() => void mutate(source.id, "delete")}>Thu hồi và xóa chỉ mục</button></div>
     </article>)}</div>
     <div className="cloud-list"><h2>Ứng viên cần xem lại · {review.length}</h2>{review.length === 0 ? <p>Chưa có trích đoạn bị đánh dấu mâu thuẫn tiềm năng.</p> : review.map(item => <article className="cloud-item" key={item.hash}><strong>{item.sourceName} · {item.license}</strong><p>{item.text}</p><a href={item.citation.startsWith("https://") ? item.citation : undefined} target="_blank" rel="noreferrer">Mở nguồn gốc</a><button disabled={busy} onClick={() => void acceptReview(item.hash)}>Duyệt trích đoạn</button></article>)}</div>
     <div className="cloud-filter"><label>Tìm kiến thức đã lập chỉ mục<input value={knowledgeQuery} onChange={event => setKnowledgeQuery(event.target.value)} placeholder="Nhập câu hỏi hoặc từ khóa" /></label><button disabled={busy || knowledgeQuery.trim().length < 2} onClick={() => void search()}>Tra cứu</button></div>

@@ -13,8 +13,6 @@ public sealed class TrustedLearningSources
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> DriveCategories = new(StringComparer.Ordinal)
         { "vietnamese", "programming", "it-support", "agent-training" };
-    private static readonly HashSet<string> AllowedLicenses = new(StringComparer.OrdinalIgnoreCase)
-        { "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "PSF-2.0", "Python-2.0", "MPL-2.0", "GPL-3.0-only", "GPL-3.0-or-later", "Public-Domain", "Proprietary-Owner-Provided" };
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
         { "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "have", "has", "your", "you", "của", "và", "cho", "các", "những", "được", "trong", "một", "này", "là", "khi", "từ", "với", "để" };
 
@@ -468,7 +466,10 @@ public sealed class TrustedLearningSources
         var items = await _drive.ListAsync("dataset", null, cancellationToken);
         var scoped = items.Where(item => item.Category == category).ToArray();
         if (scoped.Length == 0) return (false, "Thư mục dataset được chọn đang rỗng.", 0);
-        if (scoped.Any(item => !IsKnownLicense(item.License))) return (false, "Có dataset chưa dùng giấy phép được nhận diện; hãy sửa metadata trước khi duyệt.", scoped.Length);
+        var unknownLicenses = scoped.Where(item => !IsKnownLicense(item.License)).Select(item => SafeError(item.License))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToArray();
+        if (unknownLicenses.Length > 0)
+            return (false, $"Giấy phép metadata chưa được nhận diện: {string.Join(", ", unknownLicenses)}. Sửa metadata trong Cloud Storage rồi kiểm tra lại.", scoped.Length);
         var extractable = scoped.Count(item => new[] { ".json", ".jsonl", ".csv", ".txt", ".md" }.Contains(Path.GetExtension(item.Name), StringComparer.OrdinalIgnoreCase));
         if (extractable == 0) return (false, "Dataset có giấy phép nhưng chưa có định dạng trích xuất được. PDF và Parquet chưa được lập chỉ mục.", scoped.Length);
         return (true, $"Drive truy cập được; {scoped.Length} dataset có giấy phép, {extractable} tệp có thể trích xuất. PDF/Parquet bị bỏ qua. Phạm vi chỉ là DETOT-AI/datasets/{category}.", scoped.Length);
@@ -695,15 +696,7 @@ public sealed class TrustedLearningSources
     }
 
     private static bool HasNegation(string value) => Regex.IsMatch(value, @"\b(no|not|never|cannot|can't|don't|doesn't|isn't|aren't|không|chưa|chẳng|không thể)\b", RegexOptions.IgnoreCase);
-    private static bool IsKnownLicense(string value) => AllowedLicenses.Contains(value.Trim()) ||
-        (value.Trim().ToUpperInvariant() switch
-        {
-            "CC BY 4.0" or "CC-BY 4.0" => true,
-            "CC BY-SA 4.0" or "CC-BY-SA 4.0" => true,
-            "CC0" => true,
-            "BSD-3" => true,
-            _ => false
-        });
+    private static bool IsKnownLicense(string value) => DatasetLicenseCatalog.IsRecognized(value);
     private static IEnumerable<string> Tokens(string value) => Regex.Matches(value.ToLowerInvariant(), @"[\p{L}\p{N}]{3,}")
         .Select(match => match.Value).Where(token => !StopWords.Contains(token));
     private static string Sha256(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();

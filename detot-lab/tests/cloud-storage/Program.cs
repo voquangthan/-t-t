@@ -37,7 +37,9 @@ static async Task DatasetRejects()
     var provider = new FakeStorageProvider();
     var manager = new DatasetManager(provider);
     await Throws<ArgumentException>(() => manager.StartUploadAsync(new("dataset", "vietnamese", "faq.jsonl", "v1", "", "source", "unknown", 12), CancellationToken.None));
+    await Throws<ArgumentException>(() => manager.StartUploadAsync(new("dataset", "vietnamese", "faq.jsonl", "v1", "", "source", "fg", 12), CancellationToken.None));
     await Throws<ArgumentException>(() => manager.StartUploadAsync(new("dataset", "vietnamese", "faq.exe", "v1", "", "source", "CC BY 4.0", 12), CancellationToken.None));
+    Assert(DatasetLicenseCatalog.IsRecognized("CC BY 4.0"), "common license display names should map to a recognized license");
     Assert(provider.Started is null, "invalid metadata must not start a cloud upload");
 }
 
@@ -120,7 +122,7 @@ static async Task TrustedLearningWorkflow()
     const string content = "{\"question\":\"How to configure a VLAN trunk safely\",\"answer\":\"Configure the switch trunk with an explicit allowed VLAN list, verify the native VLAN on both ends, and inspect the link status before changing production traffic.\"}";
     var storage = new FakeStorageProvider
     {
-        Listed = [new CloudArtifact("drive-learning-1", "network.jsonl", "dataset", "programming", "1.0.0", "", "curated", "CC-BY-4.0", Encoding.UTF8.GetByteCount(content), DateTimeOffset.UtcNow, "", "PASS", null)],
+        Listed = [new CloudArtifact("drive-learning-1", "network.jsonl", "dataset", "programming", "1.0.0", "", "curated", "fg", Encoding.UTF8.GetByteCount(content), DateTimeOffset.UtcNow, "", "PASS", null)],
         SeedDownloadBytes = Encoding.UTF8.GetBytes(content),
         SeedDownloadName = "network.jsonl",
     };
@@ -131,6 +133,10 @@ static async Task TrustedLearningWorkflow()
         var pending = await service.AddAsync(new("drive-folder", "Programming docs", "drive://datasets/programming", "CC-BY-4.0", ""), CancellationToken.None);
         Assert(pending.Status == "pending" && pending.ApprovedUtc is null, "new sources must begin pending, not approved");
         await Throws<InvalidOperationException>(() => service.ApproveAsync(pending.Id, CancellationToken.None));
+        var failed = await service.CheckAsync(pending.Id, CancellationToken.None);
+        Assert(failed.Status == "check-failed" && failed.CheckSummary!.Contains("giấy phép", StringComparison.OrdinalIgnoreCase),
+            "unrecognized Drive metadata must stop before any dataset is read");
+        storage.Listed = storage.Listed.Select(item => item with { License = "CC-BY-4.0" }).ToArray();
         var checkedSource = await service.CheckAsync(pending.Id, CancellationToken.None);
         Assert(checkedSource.Status == "checked" && checkedSource.FileCount == 1, "check should verify the selected Drive category and its license");
         var approved = await service.ApproveAsync(pending.Id, CancellationToken.None);

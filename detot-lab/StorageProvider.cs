@@ -15,6 +15,22 @@ public sealed record UploadProgress(Guid Id, long Size, long ReceivedBytes, bool
     bool Duplicate, string? Sha256, CloudArtifact? Artifact, string? Message);
 public sealed record VerifiedDownload(string Path, string Name, string ContentType, long Size, string Sha256);
 
+public static class DatasetLicenseCatalog
+{
+    private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause",
+        "PSF-2.0", "Python-2.0", "MPL-2.0", "GPL-3.0-only", "GPL-3.0-or-later", "Public-Domain", "Proprietary-Owner-Provided"
+    };
+
+    public static bool IsRecognized(string? license)
+    {
+        var value = license?.Trim() ?? "";
+        if (Supported.Contains(value)) return true;
+        return value.ToUpperInvariant() is "CC BY 4.0" or "CC-BY 4.0" or "CC BY-SA 4.0" or "CC-BY-SA 4.0" or "CC0" or "BSD-3";
+    }
+}
+
 public interface IStorageProvider
 {
     Task<CloudStorageStatus> StatusAsync(CancellationToken cancellationToken);
@@ -78,9 +94,8 @@ public sealed class DatasetManager(IStorageProvider storage)
             throw new ArgumentException("Định dạng tệp không được hỗ trợ cho loại dữ liệu đã chọn.");
         if (source.Length is < 1 or > 1000 || license.Length is < 1 or > 300 || pipeline.Length > 80)
             throw new ArgumentException("Nguồn và giấy phép là bắt buộc; kiểm tra độ dài metadata.");
-        if (license.Contains("unknown", StringComparison.OrdinalIgnoreCase) || license.Contains("chưa rõ", StringComparison.OrdinalIgnoreCase) ||
-            license.Contains("không rõ", StringComparison.OrdinalIgnoreCase) || license.Equals("unspecified", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Không tải dataset khi chưa xác định được giấy phép.");
+        if (!DatasetLicenseCatalog.IsRecognized(license))
+            throw new ArgumentException("Chọn giấy phép được nhận diện hoặc cập nhật giấy phép của nguồn trước khi tải dataset.");
 
         var spec = new UploadSpec(kind, category, name, version, pipeline, source, license);
         return storage.StartUploadAsync(spec, request.Size, cancellationToken);

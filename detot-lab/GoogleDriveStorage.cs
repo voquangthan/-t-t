@@ -126,6 +126,8 @@ public sealed class GoogleDriveStorage : IStorageProvider
             RecordHistory("verify", id, passed ? "PASS" : "FAIL", null);
             return Results.Ok(new { result = passed ? "PASS" : "FAIL" });
         }));
+        app.MapPut("/api/drive/items/{id}/metadata", (string id, DatasetMetadataEdit edit, HttpContext context) => Guard(context, async () =>
+            Results.Ok(await UpdateDatasetMetadataAsync(id, edit, context.RequestAborted))));
         app.MapDelete("/api/drive/items/{id}", (string id, HttpContext context) => Guard(context, async () =>
         {
             await DeleteAsync(id, context.RequestAborted);
@@ -720,6 +722,28 @@ public sealed class GoogleDriveStorage : IStorageProvider
         await EnsureSuccess(response);
     }
 
+    private async Task<CloudArtifact> UpdateDatasetMetadataAsync(string id, DatasetMetadataEdit edit, CancellationToken cancellationToken)
+    {
+        var source = edit.Source?.Trim() ?? "";
+        var license = edit.License?.Trim() ?? "";
+        if (source.Length is < 1 or > 1000) throw new ArgumentException("Nguồn dữ liệu phải dài từ 1 đến 1000 ký tự.");
+        if (!DatasetLicenseCatalog.IsRecognized(license)) throw new ArgumentException("Chọn giấy phép được nhận diện; không lưu giá trị tùy ý như “fg”.");
+        var file = await GetOwnedFile(id, cancellationToken);
+        if (!TryAppValue(file, "detotKind", out var kind) || kind != "dataset")
+            throw new ArgumentException("Chỉ có thể sửa metadata của dataset do Đệ Tốt quản lý.");
+        var metadata = ParseMetadata(file.Description);
+        metadata["source"] = source;
+        metadata["license"] = license;
+        using var http = NewGoogleClient();
+        using var response = await AuthorizedRequest(http, new HttpMethod("PATCH"),
+            "https://www.googleapis.com/drive/v3/files/" + Uri.EscapeDataString(file.Id) + "?fields=" + Uri.EscapeDataString(FileFields),
+            new { description = JsonSerializer.Serialize(metadata, Json) }, cancellationToken);
+        await EnsureSuccess(response);
+        var updated = await GetOwnedFile(file.Id, cancellationToken);
+        RecordHistory("metadata", file.Name, "UPDATED_WITH_LICENSE", null);
+        return ToArtifact(updated);
+    }
+
     private async Task<string> AccessToken(CancellationToken cancellationToken)
     {
         if (_accessToken is not null && _accessTokenExpires > DateTimeOffset.UtcNow.AddMinutes(2)) return _accessToken;
@@ -936,6 +960,7 @@ public sealed class GoogleDriveStorage : IStorageProvider
         string? Description, Dictionary<string, string>? AppProperties, string? WebViewLink);
     private sealed record SyncHistory(DateTimeOffset Utc, string Action, string Target, string Result, string? Sha256);
     public sealed record RetentionRequest(int Keep);
+    public sealed record DatasetMetadataEdit(string? Source, string? License);
     private sealed class DriveApiException(HttpStatusCode status, string body) : HttpRequestException($"Drive API returned {(int)status}.")
     {
         public HttpStatusCode Status { get; } = status;
