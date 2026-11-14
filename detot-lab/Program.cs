@@ -92,7 +92,7 @@ app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
 app.MapGet("/api/practice/notes", () => practice is null
-    ? Results.StatusCode(503) : Results.Ok(new { notes = practice.Notes }));
+    ? Results.StatusCode(503) : Results.Ok(new { notes = practice.Notes, learning = practice.LearningSummary }));
 app.MapPut("/api/practice/notes", (Practice.NoteEdit edit, HttpContext context) =>
 {
     if (!IsLocalMutation(context)) return Results.StatusCode(403);
@@ -226,64 +226,9 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (history.Length > 8 || history.Any(turn => turn is null ||
             turn.Role is not ("user" or "assistant") || turn.Text is not { Length: > 0 and <= 450 }))
             return Results.BadRequest(new { error = "Lịch sử trò chuyện không hợp lệ." });
-        if (practice is not null && request.ConversationId is Guid practiceId)
-        {
-            if (request.StartPractice || caseState is not null)
-            {
-                using var answer = await CallGateway(gateway, new
-                {
-                    model = "openclaw/default",
-                    instructions = Practice.Instructions + " Gửi kết quả qua công cụ " + fixture + " đúng một lần.",
-                    input = JsonSerializer.Serialize(new { message, history, caseState, learningNotes = practice.Notes }),
-                    tools = new[] { new
-                    {
-                        type = "function", name = fixture, description = "Trả kết quả ca trực cho giao diện. Không thực thi hành động.",
-                        parameters = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                reply = new { type = "string" },
-                                caseState = new { type = new[] { "string", "null" } },
-                                learningNotes = new { type = new[] { "string", "null" } }
-                            },
-                            required = new[] { "reply", "caseState", "learningNotes" },
-                            additionalProperties = false
-                        }
-                    } }
-                }, cancellationToken);
-                var callsForPractice = answer.RootElement.GetProperty("output").EnumerateArray()
-                    .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
-                var json = callsForPractice.Length == 1 && callsForPractice[0].GetProperty("name").GetString() == fixture
-                    ? callsForPractice[0].GetProperty("arguments").GetString() ?? ""
-                    : GatewayText(answer.RootElement).Trim();
-                var objectStart = json.IndexOf('{');
-                var objectEnd = json.LastIndexOf('}');
-                var structured = objectStart >= 0 && objectEnd > objectStart && json.Contains("\"reply\"", StringComparison.OrdinalIgnoreCase);
-                Practice.Turn? turn;
-                try
-                {
-                    turn = structured
-                        ? JsonSerializer.Deserialize<Practice.Turn>(json[objectStart..(objectEnd + 1)], new JsonSerializerOptions(JsonSerializerDefaults.Web))
-                        : new Practice.Turn(json, caseState ?? "Ca đã bắt đầu. Dùng lịch sử để giữ nguyên dữ kiện.", null);
-                }
-                catch (JsonException) when (json.Length is > 0 and <= 8000 && !json.Contains('{') && !json.Contains("caseState", StringComparison.Ordinal))
-                {
-                    // Some providers answer in prose. Retain the case and leave notes untouched.
-                    turn = new Practice.Turn(json, caseState ?? "Ca đã bắt đầu. Dùng lịch sử để giữ nguyên dữ kiện.", null);
-                }
-                catch (JsonException)
-                {
-                    return Results.Problem("Câu trả lời ca trực sai định dạng. Hãy thử lại.", statusCode: 502);
-                }
-                if (turn?.Reply is not { Length: > 0 and <= 8000 } reply || string.IsNullOrWhiteSpace(reply) ||
-                    turn.CaseState is { Length: > 3000 } || turn.LearningNotes is { Length: > 2000 })
-                    return Results.Problem("Ca trực chưa trả được câu trả lời hợp lệ. Hãy thử lại.", statusCode: 502);
-                practice.SaveCase(practiceId, turn.CaseState);
-                if (turn.LearningNotes is { } notes) practice.SaveNotes(notes);
-                return Results.Ok(new { reply });
-            }
-        }
+        if (practice is not null && request.ConversationId is Guid practiceId &&
+            (request.StartPractice || caseState is not null))
+            return Results.Ok(new { reply = practice.Process(practiceId, message, request.StartPractice).Reply });
         object gatewayInput = history.Length == 0 || calendarRequest
             ? calendarInput
             : history.Select(turn => new { type = "message", role = turn.Role, content = turn.Text })

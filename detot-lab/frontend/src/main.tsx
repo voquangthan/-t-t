@@ -54,6 +54,7 @@ function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [practiceNotes, setPracticeNotes] = useState<string>();
+  const [practiceLearning, setPracticeLearning] = useState("");
   const revisions = useRef(new Map<string, string>());
   const request = useRef<AbortController | null>(null);
   const retry = useRef<(() => void) | null>(null);
@@ -232,7 +233,9 @@ function App() {
           try {
             const response = await fetch("/api/practice/notes");
             if (!response.ok) throw new Error("Không tải được ghi chú học tập.");
-            setPracticeNotes((await response.json()).notes);
+            const data: { notes: string; learning?: string } = await response.json();
+            setPracticeNotes(data.notes);
+            setPracticeLearning(data.learning ?? "");
             setCalendar(false);
             setSide(false);
           } catch (cause) { setCalendar(false); setError((cause as Error).message); }
@@ -245,6 +248,7 @@ function App() {
     <main>
       <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong><span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
       {practiceNotes !== undefined && <section aria-label="Ghi chú học tập" className="transcript">
+        <p><strong>Tiến độ tự học:</strong> {practiceLearning}</p>
         <form onSubmit={async event => {
           event.preventDefault();
           setBusy(true);
