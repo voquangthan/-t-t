@@ -11,7 +11,7 @@ type Source = {
 };
 type DriveScope = { id: string; name: string; files: number };
 type DiscoveryStatus = { configured: boolean; provider: string };
-type SearchCandidate = { title: string; url: string; domain: string; description: string; documentType: string; licenseStatus: string; officialSource: boolean; version?: string | null };
+type SearchCandidate = { title: string; url: string; domain: string; description: string; documentType: string; licenseStatus: string; officialSource: boolean; version?: string | null; lastUpdatedUtc?: string | null };
 type DiscoveryResponse = { provider: string; candidates: SearchCandidate[] };
 type Knowledge = { text: string; source: string; citation: string; license: string; sha256: string; relevance: number; licenseEvidenceUrl?: string | null; licenseDetectionMethod?: string | null; sourceVersion?: string | null };
 type ReviewItem = { hash: string; sourceName: string; title: string; text: string; citation: string; license: string };
@@ -162,7 +162,7 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
       {candidates.map(candidate => <article className="cloud-item" key={candidate.url}>
         <div className="cloud-item-title"><strong>{candidate.title}</strong><span>{candidate.domain} · {candidate.documentType} · License: {candidate.licenseStatus}</span></div>
         <p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.url}</a></p>
-        {candidate.description && <p>{candidate.description}</p>}{candidate.officialSource && <small>Nguồn chính thức</small>}{candidate.version && <small> · {candidate.version}</small>}
+        {candidate.description && <p>{candidate.description}</p>}{candidate.officialSource && <small>Nguồn chính thức</small>}{candidate.version && <small> · {candidate.version}</small>}{candidate.lastUpdatedUtc && <small> · cập nhật {date(candidate.lastUpdatedUtc)}</small>}
         <button type="button" disabled={busy} onClick={() => void checkCandidate(candidate)}>Kiểm tra nguồn</button>
       </article>)}
     </form>

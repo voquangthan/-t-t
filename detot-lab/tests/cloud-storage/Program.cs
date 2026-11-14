@@ -423,8 +423,9 @@ static async Task SearchProviderContract()
     Assert(handler.Method == HttpMethod.Post && handler.Uri?.AbsoluteUri == "https://api.microsoft.ai/v3/search/web" &&
         handler.ApiKey == "test-key-only" && handler.Body?.Contains("\"maxResults\":12", StringComparison.Ordinal) == true,
         "Search Provider should use the configured Microsoft Web IQ REST request contract");
-    Assert(results.Count == 1 && results[0].Url == "https://learn.microsoft.com/en-us/aspnet/core/security/authentication/",
-        "Search Provider should parse webResults into replaceable provider results");
+    Assert(results.Count == 1 && results[0].Url == "https://learn.microsoft.com/en-us/aspnet/core/security/authentication/" &&
+        results[0].LastUpdatedUtc == DateTimeOffset.Parse("2026-01-04T00:00:00Z"),
+        "Search Provider should preserve publisher update metadata from webResults");
 }
 
 static void Assert(bool condition, string message)
@@ -538,7 +539,7 @@ sealed class WebIqSearchHandler : HttpMessageHandler
         Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
         return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
-            Content = new StringContent("""{"webResults":[{"title":"Microsoft Learn ASP.NET Core Authentication","url":"https://learn.microsoft.com/en-us/aspnet/core/security/authentication/","content":"Official authentication guide with configuration examples."}]}""",
+            Content = new StringContent("""{"webResults":[{"title":"Microsoft Learn ASP.NET Core Authentication","url":"https://learn.microsoft.com/en-us/aspnet/core/security/authentication/","content":"Official authentication guide with configuration examples.","lastUpdatedAt":"2026-01-04T00:00:00Z"}]}""",
                 Encoding.UTF8, "application/json")
         };
     }

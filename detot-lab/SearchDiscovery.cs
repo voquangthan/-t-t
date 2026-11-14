@@ -5,10 +5,10 @@ using System.Text.RegularExpressions;
 
 public sealed record SearchDiscoveryRequest(string? Topic, string[]? Domains, string? DocumentType);
 public sealed record SearchDiscoveryCandidate(string Title, string Url, string Domain, string Description, string DocumentType,
-    string LicenseStatus, bool OfficialSource, string? Version = null);
+    string LicenseStatus, bool OfficialSource, string? Version = null, DateTimeOffset? LastUpdatedUtc = null);
 public sealed record SearchDiscoveryResponse(string Provider, IReadOnlyList<SearchDiscoveryCandidate> Candidates);
 public sealed record ProviderSearchRequest(string Query, int MaxResults, string Language);
-public sealed record ProviderSearchResult(string Title, string Url, string Description);
+public sealed record ProviderSearchResult(string Title, string Url, string Description, DateTimeOffset? LastUpdatedUtc = null);
 
 public interface ISearchDiscoveryProvider
 {
@@ -56,6 +56,7 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
             .DistinctBy(candidate => CanonicalUrl(candidate.Url), StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(candidate => candidate.OfficialSource)
             .ThenBy(candidate => DomainPriority(candidate.Domain))
+            .ThenByDescending(candidate => candidate.LastUpdatedUtc ?? DateTimeOffset.MinValue)
             .ThenBy(candidate => candidate.Title, StringComparer.OrdinalIgnoreCase)
             .Take(10).ToArray();
         return new SearchDiscoveryResponse(provider.Name, candidates);
@@ -78,7 +79,7 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
         if (title.Length is 0 or > 240) title = uri.Host + path;
         var version = Regex.Match(title + " " + description, @"\b(?:v|version\s*)\d+(?:\.\d+){1,3}\b", RegexOptions.IgnoreCase).Value;
         return new SearchDiscoveryCandidate(title, cleanUrl, uri.Host, description, type, "Chưa kiểm tra", IsOfficialDomain(uri.Host),
-            string.IsNullOrWhiteSpace(version) ? null : version);
+            string.IsNullOrWhiteSpace(version) ? null : version, result.LastUpdatedUtc);
     }
 
     private static bool LooksLikeSpam(SearchDiscoveryCandidate candidate) => Regex.IsMatch(candidate.Title + " " + candidate.Description,
@@ -139,12 +140,16 @@ public sealed class MicrosoftWebSearchProvider(HttpClient client, string apiKey)
         if (webResults.ValueKind == JsonValueKind.Object && webResults.TryGetProperty("value", out var values)) webResults = values;
         if (webResults.ValueKind != JsonValueKind.Array) return [];
         return webResults.EnumerateArray().Select(item => new ProviderSearchResult(
-            ReadString(item, "title"), ReadString(item, "url"), ReadString(item, "content")))
+            ReadString(item, "title"), ReadString(item, "url"), ReadString(item, "content"), ReadTimestamp(item, "lastUpdatedAt")))
             .Where(item => !string.IsNullOrWhiteSpace(item.Url)).ToArray();
     }
 
     private static string ReadString(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+
+    private static DateTimeOffset? ReadTimestamp(JsonElement element, string property) =>
+        DateTimeOffset.TryParse(ReadString(element, property), System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal, out var timestamp) ? timestamp : null;
 }
 
 public static class SearchDiscoveryProviderFactory
