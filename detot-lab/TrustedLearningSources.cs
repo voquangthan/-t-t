@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,6 +29,7 @@ public sealed class TrustedLearningSources
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _mirrorGate = new(1, 1);
     private readonly SemaphoreSlim _cloudRefreshGate = new(1, 1);
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sourceSyncGates = new();
     private DateTimeOffset _lastCloudRefresh;
     private State _state;
 
@@ -231,7 +233,8 @@ public sealed class TrustedLearningSources
         try
         {
             var source = RequireSource(id);
-            var updated = source with { Paused = paused, WorkerState = paused ? "paused" : "idle" };
+            var updated = source with { Paused = paused, WorkerState = paused ? "paused" :
+                source.ProcessingFingerprint is not null ? "queued" : "idle" };
             ReplaceSource(updated);
             SaveState();
             return View(updated);
@@ -283,6 +286,14 @@ public sealed class TrustedLearningSources
 
     public async Task<SyncSummary> SyncAsync(Guid id, CancellationToken cancellationToken)
     {
+        var syncGate = _sourceSyncGates.GetOrAdd(id, static _ => new SemaphoreSlim(1, 1));
+        await syncGate.WaitAsync(cancellationToken);
+        try { return await SyncCoreAsync(id, cancellationToken); }
+        finally { syncGate.Release(); }
+    }
+
+    private async Task<SyncSummary> SyncCoreAsync(Guid id, CancellationToken cancellationToken)
+    {
         await RefreshCloudSnapshotAsync(cancellationToken);
         var source = GetSource(id);
         if (source.Status != "approved") throw new InvalidOperationException("Chỉ nguồn đã được phê duyệt mới được đồng bộ.");
@@ -298,14 +309,16 @@ public sealed class TrustedLearningSources
             }
             finally { _gate.Release(); }
             IReadOnlyList<CloudArtifact>? driveArtifacts = null;
+            IReadOnlyList<CloudArtifact>? driveBatchArtifacts = null;
+            var startingArtifactOffset = 0;
             string? manifestFingerprint = null;
             if (source.Type == "drive-folder")
             {
                 var category = source.Scope[("drive://datasets/".Length)..];
                 driveArtifacts = (await _drive.ListAsync("dataset", null, cancellationToken)).Where(item => item.Category == category)
-                    .OrderBy(item => item.Id, StringComparer.Ordinal).Take(50).ToArray();
+                    .OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
                 manifestFingerprint = DriveManifestFingerprint(driveArtifacts);
-                if (manifestFingerprint == source.LastManifestFingerprint)
+                if (manifestFingerprint == source.LastManifestFingerprint && source.ProcessingFingerprint is null)
                 {
                     await _gate.WaitAsync(cancellationToken);
                     try
@@ -319,12 +332,14 @@ public sealed class TrustedLearningSources
                     }
                     finally { _gate.Release(); }
                 }
+                startingArtifactOffset = source.ProcessingFingerprint == manifestFingerprint ? source.ProcessingArtifactOffset : 0;
+                driveBatchArtifacts = driveArtifacts.Skip(startingArtifactOffset).Take(50).ToArray();
             }
             IReadOnlyList<SourceDocument> documents = source.Type switch
             {
                 "website" => [await ReadWebsiteAsync(source, cancellationToken)],
                 "github" => [await ReadGitHubAsync(source, cancellationToken)],
-                "drive-folder" => await ReadDriveFolderAsync(source, driveArtifacts!, cancellationToken),
+                "drive-folder" => await ReadDriveFolderAsync(source, driveBatchArtifacts!, cancellationToken),
                 _ => []
             };
             if (documents.Count > 0 && documents.All(document => document.NotModified))
@@ -344,9 +359,10 @@ public sealed class TrustedLearningSources
                 }
                 finally { _gate.Release(); }
             }
-            var fingerprint = ContentFingerprint(documents);
+            var fingerprint = source.Type == "drive-folder" ? manifestFingerprint! : ContentFingerprint(documents);
+            var startingOffset = source.ProcessingFingerprint == fingerprint ? source.ProcessingOffset : 0;
             var quarantinedDriveDocuments = driveArtifacts?.Count(item => !IsAutoAllowedLicense(item.License)) ?? source.QuarantinedDocuments;
-            if (fingerprint.Equals(source.LastContentFingerprint, StringComparison.Ordinal))
+            if (source.ProcessingFingerprint is null && fingerprint.Equals(source.LastContentFingerprint, StringComparison.Ordinal))
             {
                 await _gate.WaitAsync(cancellationToken);
                 try
@@ -364,25 +380,49 @@ public sealed class TrustedLearningSources
                 }
                 finally { _gate.Release(); }
             }
-            var result = await QualityGateAsync(source, documents, fingerprint, cancellationToken);
+            var finalArtifactBatch = source.Type != "drive-folder" || startingArtifactOffset + driveBatchArtifacts!.Count >= driveArtifacts!.Count;
+            var result = await QualityGateAsync(source, documents, fingerprint, startingOffset, finalArtifactBatch, cancellationToken);
             SyncSummary summary;
             await _gate.WaitAsync(cancellationToken);
             try
             {
                 var current = RequireSource(id);
+                var previousProgress = source.ProcessingFingerprint == fingerprint;
+                var acceptedTotal = (previousProgress ? source.ProcessingAccepted : 0) + result.Accepted;
+                var reviewTotal = (previousProgress ? source.ProcessingReview : 0) + result.Review;
+                var duplicateTotal = (previousProgress ? source.ProcessingDuplicate : 0) + result.Duplicate;
+                var quarantinedTotal = (previousProgress ? source.ProcessingQuarantined : 0) + result.Quarantined;
+                var nextArtifactOffset = result.BatchComplete && source.Type == "drive-folder"
+                    ? startingArtifactOffset + driveBatchArtifacts!.Count : startingArtifactOffset;
                 var updated = current with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                     LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
-                    LastSourceETag = documents.FirstOrDefault(document => document.ETag is not null)?.ETag ?? source.LastSourceETag,
-                    LastSourceModifiedUtc = documents.FirstOrDefault(document => document.LastModifiedUtc.HasValue)?.LastModifiedUtc ?? source.LastSourceModifiedUtc,
-                    LastContentFingerprint = fingerprint, RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "success",
-                    LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
+                    LastSourceETag = result.Complete ? documents.FirstOrDefault(document => document.ETag is not null)?.ETag ?? source.LastSourceETag : current.LastSourceETag,
+                    LastSourceModifiedUtc = result.Complete ? documents.FirstOrDefault(document => document.LastModifiedUtc.HasValue)?.LastModifiedUtc ?? source.LastSourceModifiedUtc : current.LastSourceModifiedUtc,
+                    LastContentFingerprint = result.Complete ? fingerprint : current.LastContentFingerprint,
+                    ProcessingFingerprint = result.Complete ? null : fingerprint,
+                    ProcessingOffset = result.Complete || result.BatchComplete ? 0 : startingOffset + result.Processed,
+                    ProcessingArtifactOffset = result.Complete ? 0 : nextArtifactOffset,
+                    ProcessingAccepted = result.Complete ? 0 : acceptedTotal,
+                    ProcessingReview = result.Complete ? 0 : reviewTotal,
+                    ProcessingDuplicate = result.Complete ? 0 : duplicateTotal,
+                    ProcessingQuarantined = result.Complete ? 0 : quarantinedTotal,
+                    RetryCount = 0, NextAttemptUtc = null, WorkerState = result.Complete ? "idle" : "queued",
+                    LastSyncStatus = result.Complete ? "success" : "processing",
+                    LastManifestFingerprint = result.Complete ? manifestFingerprint ?? source.LastManifestFingerprint : current.LastManifestFingerprint,
                     QuarantinedDocuments = quarantinedDriveDocuments,
-                    LastAccepted = result.Accepted, LastReview = result.Review, LastDuplicate = result.Duplicate,
-                    LastQuarantined = result.Quarantined,
-                    CheckSummary = $"Đồng bộ xong: {result.Accepted} đoạn lập chỉ mục, {result.Review} cần xem lại, {result.Quarantined} cách ly, {result.Duplicate} trùng lặp." };
+                    LastAccepted = result.Complete ? acceptedTotal : current.LastAccepted,
+                    LastReview = result.Complete ? reviewTotal : current.LastReview,
+                    LastDuplicate = result.Complete ? duplicateTotal : current.LastDuplicate,
+                    LastQuarantined = result.Complete ? quarantinedTotal : current.LastQuarantined,
+                    CheckSummary = result.Complete
+                        ? $"Đồng bộ xong: {acceptedTotal} đoạn lập chỉ mục, {reviewTotal} cần xem lại, {quarantinedTotal} cách ly, {duplicateTotal} trùng lặp."
+                        : $"Đã xử lý {startingOffset + result.Processed} đoạn trong lô; checkpoint {nextArtifactOffset} tệp / {(result.BatchComplete ? 0 : startingOffset + result.Processed)} đoạn đã lưu." };
                 ReplaceSource(updated);
                 SaveState();
-                summary = new SyncSummary(updated.Id, updated.Name, result.Accepted, result.Review, result.Duplicate, updated.LastSyncUtc, updated.CheckSummary, result.Quarantined);
+                summary = new SyncSummary(updated.Id, updated.Name, result.Complete ? acceptedTotal : result.Accepted,
+                    result.Complete ? reviewTotal : result.Review, result.Complete ? duplicateTotal : result.Duplicate,
+                    updated.LastSyncUtc, updated.CheckSummary, result.Complete ? quarantinedTotal : result.Quarantined,
+                    Unchanged: false);
             }
             finally { _gate.Release(); }
             var mirrorError = await TryPersistCloudSnapshotAsync(cancellationToken);
@@ -415,6 +455,14 @@ public sealed class TrustedLearningSources
     }
 
     public async Task RemoveAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var syncGate = _sourceSyncGates.GetOrAdd(id, static _ => new SemaphoreSlim(1, 1));
+        await syncGate.WaitAsync(cancellationToken);
+        try { await RemoveCoreAsync(id, cancellationToken); }
+        finally { syncGate.Release(); }
+    }
+
+    private async Task RemoveCoreAsync(Guid id, CancellationToken cancellationToken)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
         await _gate.WaitAsync(cancellationToken);
@@ -456,7 +504,10 @@ public sealed class TrustedLearningSources
             sources.Count(item => item.Paused),
             sources.Sum(item => item.LastAccepted),
             sources.Sum(item => item.LastDuplicate),
-            sources.Sum(item => item.LastQuarantined + item.QuarantinedDocuments) + _state.Knowledge.Count(item => item.State == "quarantined"),
+            sources.Count(item => item.Status == "quarantined") + _state.Knowledge.Count(item => item.State == "quarantined") +
+                sources.Where(item => item.Type == "drive-folder").Sum(source => Math.Max(0, source.QuarantinedDocuments -
+                    _state.Knowledge.Count(item => item.SourceId == source.Id && item.State == "quarantined" &&
+                        item.QuarantineReason?.Contains("license", StringComparison.OrdinalIgnoreCase) == true))),
             sources.Count(item => item.LastError is not null),
             sources.Select(item => item.LastAttemptUtc).Where(item => item.HasValue).Max(),
             sources.Select(item => item.LastSyncUtc).Where(item => item.HasValue).Max(),
@@ -560,7 +611,7 @@ public sealed class TrustedLearningSources
                     snapshot.Sources.Any(item => item.Status is not ("pending" or "checked" or "check-failed" or "quarantined" or "approved") ||
                         (item.Type == "drive-folder" ? item.License != "Per-artifact-metadata" :
                             item.Status != "quarantined" && !IsKnownLicense(item.License))) ||
-                    snapshot.Knowledge.Any(item => item.Hash.Length != 64 || item.State is not ("indexed" or "review" or "quarantined" or "superseded")))
+                    snapshot.Knowledge.Any(item => item.Hash.Length != 64 || item.State is not ("indexed" or "review" or "quarantined" or "superseded" or "staging")))
                     throw new InvalidDataException("Cloud learning snapshot không đạt kiểm tra cấu trúc.");
                 await _gate.WaitAsync(cancellationToken);
                 try
@@ -770,49 +821,103 @@ public sealed class TrustedLearningSources
         foreach (var item in items.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!IsAutoAllowedLicense(item.License)) continue;
+            if (!IsAutoAllowedLicense(item.License))
+            {
+                documents.Add(QuarantineDocument(item, $"Artifact license '{item.License}' chưa được xác minh trong chính sách tự động."));
+                continue;
+            }
+            if (item.Size > UniversalFileReader.MaxFileBytes)
+            {
+                documents.Add(QuarantineDocument(item, "Artifact vượt giới hạn kích thước Reader 2 MiB."));
+                continue;
+            }
+            if (!IsSupportedLearningFile(item.Name))
+            {
+                documents.Add(QuarantineDocument(item, "Định dạng artifact chưa được Universal Reader hỗ trợ."));
+                continue;
+            }
             var download = await _drive.DownloadVerifiedAsync(item.Id, cancellationToken);
             try
             {
-                if (download.Size > UniversalFileReader.MaxFileBytes || !IsSupportedLearningFile(download.Name)) continue;
+                if (download.Size > UniversalFileReader.MaxFileBytes)
+                {
+                    documents.Add(QuarantineDocument(item, "Artifact vượt giới hạn kích thước Reader 2 MiB."));
+                    continue;
+                }
+                if (!IsSupportedLearningFile(download.Name))
+                {
+                    documents.Add(QuarantineDocument(item, "Định dạng artifact chưa được Universal Reader hỗ trợ."));
+                    continue;
+                }
                 await using var input = File.OpenRead(download.Path);
                 var extracted = await _fileReader.ReadAsync(download.Name, download.ContentType, input, cancellationToken);
                 foreach (var excerpt in extracted.Excerpts)
                     documents.Add(new SourceDocument(item.Name, $"drive://{item.Id}#{Uri.EscapeDataString(excerpt.Citation)}", item.License, excerpt.Text,
                         $"drive://{item.Id}", "CloudArtifact license metadata", $"{item.Version}|{item.Sha256}|{item.ModifiedTime:O}"));
             }
-            catch (InvalidDataException error) { _logger.LogWarning("Skipping Drive artifact {ArtifactId}: {Reason}", item.Id, SafeError(error.Message)); }
+            catch (InvalidDataException error)
+            {
+                var reason = "Universal Reader không trích xuất được artifact: " + SafeError(error.Message);
+                documents.Add(QuarantineDocument(item, reason));
+                _logger.LogWarning("Quarantined Drive artifact {ArtifactId}: {Reason}", item.Id, SafeError(error.Message));
+            }
             finally { try { File.Delete(download.Path); } catch (IOException) { } }
         }
         return documents.ToArray();
     }
 
-    private async Task<(int Accepted, int Review, int Duplicate, int Quarantined)> QualityGateAsync(Source source,
-        IReadOnlyList<SourceDocument> documents, string fingerprint, CancellationToken cancellationToken)
+    private static SourceDocument QuarantineDocument(CloudArtifact item, string reason)
+    {
+        var version = $"{item.Version}|{item.Sha256}|{item.ModifiedTime:O}";
+        var hash = Regex.IsMatch(item.Sha256 ?? "", "^[a-fA-F0-9]{64}$") ? item.Sha256! : Sha256($"drive://{item.Id}|{version}");
+        return new SourceDocument(item.Name, $"drive://{item.Id}", item.License, "", $"drive://{item.Id}",
+            "CloudArtifact metadata", version, ContentHash: hash, QuarantineReason: reason);
+    }
+
+    private async Task<QualityGateResult> QualityGateAsync(Source source, IReadOnlyList<SourceDocument> documents,
+        string fingerprint, int startingOffset, bool finalArtifactBatch, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
         try
         {
             var accepted = 0; var review = 0; var duplicate = 0; var quarantined = 0; var additions = new List<KnowledgeItem>();
+            if (startingOffset == 0)
+            {
+                foreach (var document in documents.Where(item => item.QuarantineReason is not null))
+                {
+                    var hash = document.ContentHash ?? Sha256(document.Citation + "|" + fingerprint);
+                    if (_state.Knowledge.Any(item => item.SourceId == source.Id && item.State == "quarantined" &&
+                        item.Hash == hash && item.Citation == document.Citation && item.VersionFingerprint == fingerprint)) continue;
+                    additions.Add(new KnowledgeItem(Guid.NewGuid(), source.Id, source.Name, document.Title, "", document.Citation,
+                        document.License, hash, "quarantined", DateTimeOffset.UtcNow, document.QuarantineReason, fingerprint,
+                        document.LicenseEvidenceUrl, document.LicenseDetectionMethod, document.Version ?? fingerprint));
+                    quarantined++;
+                }
+            }
+            var batch = documents.Take(50).SelectMany(document => Chunks(document.Text).Select(text => new DocumentChunk(document, text)))
+                .Skip(startingOffset).Take(MaxChunksPerRun + 1).ToArray();
+            var batchComplete = batch.Length <= MaxChunksPerRun;
+            var complete = batchComplete && finalArtifactBatch;
+            var processBatch = batch.Take(MaxChunksPerRun).ToArray();
+            var processed = processBatch.Length;
             var approvedIds = _state.Sources.Where(item => item.Status == "approved").Select(item => item.Id).ToHashSet();
             var previousSourceItems = _state.Knowledge.Where(item => item.SourceId == source.Id && item.State is "indexed" or "review").ToArray();
             var previousSourceIds = previousSourceItems.Select(item => item.Id).ToHashSet();
+            var stagedForVersion = _state.Knowledge.Where(item => item.SourceId == source.Id && item.State == "staging" &&
+                item.VersionFingerprint == fingerprint).ToArray();
             var retainedSourceItems = new Dictionary<Guid, KnowledgeItem>();
             var comparable = _state.Knowledge.Where(item => approvedIds.Contains(item.SourceId) && item.SourceId != source.Id && item.State == "indexed")
-                .Concat(previousSourceItems.Where(item => item.State == "indexed")).ToArray();
-            var remainingChunks = MaxChunksPerRun;
-            foreach (var document in documents.Take(50))
+                .Concat(previousSourceItems.Where(item => item.State == "indexed")).Concat(stagedForVersion).ToArray();
+            foreach (var entry in processBatch)
             {
-                if (remainingChunks <= 0) break;
-                var chunks = Chunks(document.Text).Take(remainingChunks).ToArray();
-                remainingChunks -= chunks.Length;
-                foreach (var chunk in chunks)
+                cancellationToken.ThrowIfCancellationRequested();
+                var document = entry.Document;
+                var chunk = entry.Text;
+                var hash = Sha256(chunk);
+                var exactFromThisSource = previousSourceItems.FirstOrDefault(item => item.State == "indexed" && item.Hash == hash);
+                if (exactFromThisSource is not null)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var hash = Sha256(chunk);
-                    var exactFromThisSource = previousSourceItems.FirstOrDefault(item => item.State == "indexed" && item.Hash == hash);
-                    if (exactFromThisSource is not null)
-                    {
+                    if (complete)
                         retainedSourceItems[exactFromThisSource.Id] = exactFromThisSource with
                         {
                             SourceName = source.Name, Title = document.Title, Citation = document.Citation, License = document.License,
@@ -820,47 +925,71 @@ public sealed class TrustedLearningSources
                             LicenseEvidenceUrl = document.LicenseEvidenceUrl, LicenseDetectionMethod = document.LicenseDetectionMethod,
                             SourceVersion = document.Version ?? fingerprint,
                         };
+                    else
+                        additions.Add(new KnowledgeItem(Guid.NewGuid(), source.Id, source.Name, document.Title, chunk,
+                            document.Citation, document.License, hash, "staging", DateTimeOffset.UtcNow, null, fingerprint,
+                            document.LicenseEvidenceUrl, document.LicenseDetectionMethod, document.Version ?? fingerprint));
+                    duplicate++;
+                    continue;
+                }
+                if (stagedForVersion.Any(item => item.Hash == hash) || comparable.Any(item => item.SourceId != source.Id && item.Hash == hash) ||
+                    additions.Any(item => (item.State is "staging" or "indexed") && item.Hash == hash))
+                { duplicate++; continue; }
+                string? reason = null;
+                var gate = complete ? "indexed" : "staging";
+                if (ContainsPromptInjection(chunk))
+                {
+                    gate = "quarantined";
+                    reason = "Đoạn có dấu hiệu chứa chỉ dẫn nhắm vào AI; không đưa vào RAG.";
+                }
+                else
+                {
+                    var similar = comparable.Concat(additions.Where(item => item.State is "staging" or "indexed"))
+                        .Where(item => Similarity(chunk, item.Text) >= .82).ToArray();
+                    if (similar.Length > 0 && similar.Any(item => HasNegation(chunk) != HasNegation(item.Text)))
+                    {
+                        foreach (var prior in similar.Where(item => previousSourceIds.Contains(item.Id)))
+                            retainedSourceItems[prior.Id] = prior;
+                        gate = "quarantined";
+                        reason = "Đoạn gần giống kiến thức hiện có nhưng có dấu hiệu mâu thuẫn; cần xem xét.";
+                    }
+                    else if (similar.Any(item => !previousSourceIds.Contains(item.Id)))
+                    {
                         duplicate++;
                         continue;
                     }
-                    if (comparable.Any(item => item.SourceId != source.Id && item.Hash == hash) || additions.Any(item => item.Hash == hash))
-                    { duplicate++; continue; }
-                    string? reason = null;
-                    var gate = "indexed";
-                    if (ContainsPromptInjection(chunk))
-                    {
-                        gate = "quarantined";
-                        reason = "Đoạn có dấu hiệu chứa chỉ dẫn nhắm vào AI; không đưa vào RAG.";
-                    }
-                    else
-                    {
-                        var similar = comparable.Concat(additions.Where(item => item.State == "indexed"))
-                            .Where(item => Similarity(chunk, item.Text) >= .82).ToArray();
-                        if (similar.Length > 0 && similar.Any(item => HasNegation(chunk) != HasNegation(item.Text)))
-                        {
-                            foreach (var prior in similar.Where(item => previousSourceIds.Contains(item.Id)))
-                                retainedSourceItems[prior.Id] = prior;
-                            gate = "quarantined";
-                            reason = "Đoạn gần giống kiến thức hiện có nhưng có dấu hiệu mâu thuẫn; cần xem xét.";
-                        }
-                        else if (similar.Any(item => !previousSourceIds.Contains(item.Id)))
-                        {
-                            duplicate++;
-                            continue;
-                        }
-                    }
-                    additions.Add(new KnowledgeItem(Guid.NewGuid(), source.Id, source.Name, document.Title, chunk,
-                        document.Citation, document.License, hash, gate, DateTimeOffset.UtcNow, reason, fingerprint,
-                        document.LicenseEvidenceUrl, document.LicenseDetectionMethod, document.Version ?? fingerprint));
-                    if (gate == "quarantined") quarantined++; else if (gate == "review") review++; else accepted++;
+                }
+                additions.Add(new KnowledgeItem(Guid.NewGuid(), source.Id, source.Name, document.Title, chunk,
+                    document.Citation, document.License, hash, gate, DateTimeOffset.UtcNow, reason, fingerprint,
+                    document.LicenseEvidenceUrl, document.LicenseDetectionMethod, document.Version ?? fingerprint));
+                if (gate == "quarantined") quarantined++; else if (gate == "review") review++; else accepted++;
+            }
+            if (complete)
+            {
+                var versionHasConflict = stagedForVersion.Concat(additions).Any(item => item.State == "quarantined" &&
+                    item.QuarantineReason?.Contains("mâu thuẫn", StringComparison.OrdinalIgnoreCase) == true);
+                if (versionHasConflict)
+                    foreach (var prior in previousSourceItems.Where(item => item.State == "indexed"))
+                        retainedSourceItems[prior.Id] = prior;
+                foreach (var prior in previousSourceItems.Where(item => item.State == "indexed" && !retainedSourceItems.ContainsKey(item.Id)))
+                {
+                    if (stagedForVersion.Concat(additions).Any(item => item.State == "quarantined" &&
+                        item.QuarantineReason?.Contains("mâu thuẫn", StringComparison.OrdinalIgnoreCase) == true &&
+                        Similarity(item.Text, prior.Text) >= .82 && HasNegation(item.Text) != HasNegation(prior.Text)))
+                        retainedSourceItems[prior.Id] = prior;
                 }
             }
-            var priorKnowledge = _state.Knowledge.Select(item => item.SourceId == source.Id && (item.State is "indexed" or "review")
-                ? retainedSourceItems.TryGetValue(item.Id, out var retained) ? retained :
-                    item with { State = "superseded", QuarantineReason = "Nguồn đã thay đổi; phiên bản mới được kiểm tra." }
+            var priorKnowledge = _state.Knowledge.Select(item =>
+                item.SourceId == source.Id && item.State == "staging" && item.VersionFingerprint != fingerprint
+                    ? item with { State = "superseded", QuarantineReason = "Phiên bản nguồn thay đổi trước khi lô cũ hoàn tất." }
+                : complete && item.SourceId == source.Id && item.State == "staging" && item.VersionFingerprint == fingerprint
+                    ? item with { State = "indexed", QuarantineReason = null, UpdatedUtc = DateTimeOffset.UtcNow }
+                : complete && item.SourceId == source.Id && (item.State is "indexed" or "review")
+                    ? retainedSourceItems.TryGetValue(item.Id, out var retained) ? retained :
+                        item with { State = "superseded", QuarantineReason = "Nguồn đã thay đổi; phiên bản mới được kiểm tra." }
                 : item).ToArray();
-            _state = _state with { Knowledge = [.. priorKnowledge, .. additions] }; SaveState();
-            return (accepted, review, duplicate, quarantined);
+            _state = _state with { Knowledge = [.. priorKnowledge, .. additions] };
+            return new QualityGateResult(accepted, review, duplicate, quarantined, processed, batchComplete, complete);
         }
         finally { _gate.Release(); }
     }
@@ -1045,7 +1174,7 @@ public sealed class TrustedLearningSources
         source.Status, source.CheckedUtc, source.ApprovedUtc, source.LastSyncUtc, source.FileCount, source.LastAccepted, source.LastReview,
         source.LastDuplicate, source.CheckSummary, source.LastError, source.LicenseEvidenceUrl, source.LicenseDetectionMethod, source.QuarantineReason,
         source.Paused, source.WorkerState, source.RetryCount, source.NextAttemptUtc, source.LastAttemptUtc, source.LastSyncStatus,
-        source.LastQuarantined, source.QuarantinedDocuments, source.LastDurationMilliseconds);
+        source.LastQuarantined, source.QuarantinedDocuments, source.LastDurationMilliseconds, source.ProcessingArtifactOffset, source.ProcessingOffset);
 
     private Source GetSource(Guid id) => _state.Sources.FirstOrDefault(item => item.Id == id) ?? throw new KeyNotFoundException();
     private Source RequireSource(Guid id) => GetSource(id);
@@ -1085,10 +1214,13 @@ public sealed class TrustedLearningSources
         DateTimeOffset? NextAttemptUtc = null, DateTimeOffset? LastAttemptUtc = null, string WorkerState = "idle",
         string LastSyncStatus = "never", string? LastContentFingerprint = null, int LastQuarantined = 0, int QuarantinedDocuments = 0,
         string? LastManifestFingerprint = null, long LastDurationMilliseconds = 0, string? LastSourceETag = null,
-        DateTimeOffset? LastSourceModifiedUtc = null);
+        DateTimeOffset? LastSourceModifiedUtc = null, string? ProcessingFingerprint = null, int ProcessingOffset = 0,
+        int ProcessingAccepted = 0, int ProcessingReview = 0, int ProcessingDuplicate = 0, int ProcessingQuarantined = 0,
+        int ProcessingArtifactOffset = 0);
     private sealed record SourceDocument(string Title, string Citation, string License, string Text,
         string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? Version = null,
-        string? ETag = null, DateTimeOffset? LastModifiedUtc = null, bool NotModified = false);
+        string? ETag = null, DateTimeOffset? LastModifiedUtc = null, bool NotModified = false,
+        string? ContentHash = null, string? QuarantineReason = null);
     private sealed record KnowledgeItem(Guid Id, Guid SourceId, string SourceName, string Title, string Text,
         string Citation, string License, string Hash, string State, DateTimeOffset UpdatedUtc,
         string? QuarantineReason = null, string? VersionFingerprint = null, string? LicenseEvidenceUrl = null,
@@ -1103,7 +1235,7 @@ public sealed class TrustedLearningSources
         int FileCount, int LastAccepted, int LastReview, int LastDuplicate, string? CheckSummary, string? LastError,
         string? LicenseEvidenceUrl, string? LicenseDetectionMethod, string? QuarantineReason, bool Paused, string WorkerState,
         int RetryCount, DateTimeOffset? NextAttemptUtc, DateTimeOffset? LastAttemptUtc, string LastSyncStatus,
-        int LastQuarantined, int QuarantinedDocuments, long LastDurationMilliseconds);
+        int LastQuarantined, int QuarantinedDocuments, long LastDurationMilliseconds, int ProcessingArtifactOffset, int ProcessingOffset);
     public sealed record LearningDashboard(int SourceCount, int ApprovedCount, int PausedCount, int IndexedChunks,
         int DuplicateChunks, int QuarantinedItems, int ErrorCount, DateTimeOffset? LastAttemptUtc, DateTimeOffset? LastSyncUtc,
         bool CloudMirrorPending);
@@ -1113,6 +1245,9 @@ public sealed class TrustedLearningSources
         string? LicenseEvidenceUrl = null, string? LicenseDetectionMethod = null, string? SourceVersion = null);
     public sealed record SyncSummary(Guid Id, string Name, int Accepted, int NeedsReview, int Duplicates,
         DateTimeOffset? SyncedUtc, string? Message, int Quarantined = 0, bool Unchanged = false);
+    private sealed record DocumentChunk(SourceDocument Document, string Text);
+    private sealed record QualityGateResult(int Accepted, int Review, int Duplicate, int Quarantined, int Processed,
+        bool BatchComplete, bool Complete);
 }
 
 public sealed class TrustedLearningWorker(TrustedLearningSources sources, ILogger<TrustedLearningWorker> logger) : BackgroundService
