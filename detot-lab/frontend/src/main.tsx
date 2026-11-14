@@ -22,6 +22,27 @@ type HistoryEntry = { conversation: Conversation; revision: string };
 Object.entries({ javascript, typescript, python, json, csharp }).forEach(([name, language]) => hljs.registerLanguage(name, language));
 const uid = () => crypto.randomUUID();
 const blank = (): Conversation => ({ id: uid(), title: "Cuộc trò chuyện mới", pinned: false, messages: [] });
+type LearningIntent = { topic: string; domains: string[]; exactUrl?: string };
+function parseLearningIntent(text: string): LearningIntent | null {
+  const match = text.trim().match(/^(?:đệ tốt[, ]*)?(?:tìm và học|học|cập nhật kiến thức|tìm tài liệu)\s+(.+)$/i);
+  if (!match) return null;
+  let topic = match[1].trim().replace(/[.!?]+$/, "");
+  const foundUrl = topic.match(/https:\/\/[^\s]+/i)?.[0];
+  const url = foundUrl?.replace(/[),.;!?]+$/, "");
+  if (url) {
+    let domain = "";
+    try { domain = new URL(url).hostname; } catch { return null; }
+    topic = topic.replace(foundUrl!, "").replace(/\b(?:từ|trong|tại)\b/gi, "").trim() || "Tài liệu chính thức";
+    return { topic, domains: [domain], exactUrl: url };
+  }
+  const source = topic.match(/\s+(?:từ|trên)\s+(microsoft learn|python(?:\.org)?|mdn|github|tài liệu chính thức)$/i);
+  if (source) {
+    const domains: Record<string, string> = { "microsoft learn": "learn.microsoft.com", "python": "docs.python.org", "python.org": "docs.python.org", "mdn": "developer.mozilla.org", "github": "github.com" };
+    topic = topic.slice(0, source.index).trim();
+    if (source[1].toLowerCase() !== "tài liệu chính thức") return { topic, domains: [domains[source[1].toLowerCase()]] };
+  }
+  return topic.length >= 2 ? { topic, domains: [] } : null;
+}
 const readHistory = (): Conversation[] => {
   if (remoteWorkspace) return [];
   try {
@@ -59,6 +80,7 @@ function App() {
   const [calendar, setCalendar] = useState(() => new URLSearchParams(location.search).has("calendar"));
   const [cloudStorage, setCloudStorage] = useState(() => new URLSearchParams(location.search).has("drive"));
   const [trustedLearning, setTrustedLearning] = useState(false);
+  const [learningIntent, setLearningIntent] = useState<LearningIntent>();
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string | undefined>(() => {
     if (remoteWorkspace) return undefined;
@@ -162,6 +184,12 @@ function App() {
 
   async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string, startPractice = false, files = attachments) {
     if ((!text.trim() && files.length === 0) || request.current) return;
+    const learning = files.length === 0 && !context && !startPractice ? parseLearningIntent(text) : null;
+    if (learning) {
+      setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setLearningIntent(learning);
+      setPracticeNotes(undefined); setSide(false); setDraft(""); setError("");
+      return;
+    }
     const prompt = [text.trim() || "Đọc và phân tích các tệp đính kèm.",
       files.length ? `Tệp đính kèm: ${files.map(file => file.name).join(", ")}` : ""].filter(Boolean).join("\n").slice(0, 1500);
     const displayText = (files.length ? `${prompt}\n📎 ${files.map(file => file.name).join(", ")}` : prompt).slice(0, 450);
@@ -319,7 +347,7 @@ function App() {
           <button type="button" disabled={busy} onClick={() => setPracticeNotes(undefined)}>Đóng</button>
         </form>
       </section>}
-      {cloudStorage ? <CloudStorage /> : trustedLearning ? <TrustedLearning /> : calendar ? <Calendar /> : <>
+      {cloudStorage ? <CloudStorage /> : trustedLearning ? <TrustedLearning initialRequest={learningIntent} /> : calendar ? <Calendar /> : <>
       <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
         {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
         {conversation?.messages.map((message, index) => <article key={message.id} className={message.role}>

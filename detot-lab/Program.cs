@@ -54,6 +54,8 @@ builder.Services.AddHttpClient("learning-source", client => client.Timeout = Tim
             throw new HttpRequestException("Could not connect to the approved public learning source.", lastError);
         }
     });
+builder.Services.AddHttpClient("learning-search", client => client.Timeout = TimeSpan.FromSeconds(15))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
 builder.Services.AddSingleton<UniversalFileReader>();
 builder.Services.AddSingleton<UniversalUrlReader>();
 builder.WebHost.UseUrls(address);
@@ -96,7 +98,8 @@ var driveStorage = GoogleDriveStorage.Map(app, googleDirectory, publicOrigin ?? 
 var trustedLearning = new TrustedLearningSources(Path.Combine(builder.Environment.ContentRootPath, ".local", "learning"),
     app.Services.GetRequiredService<IDataProtectionProvider>(), app.Services.GetRequiredService<IHttpClientFactory>(),
     driveStorage, app.Services.GetRequiredService<ILogger<TrustedLearningSources>>(),
-    app.Services.GetRequiredService<UniversalFileReader>(), app.Services.GetRequiredService<UniversalUrlReader>());
+    app.Services.GetRequiredService<UniversalFileReader>(), app.Services.GetRequiredService<UniversalUrlReader>(),
+    SearchDiscoveryProviderFactory.Create(builder.Configuration, app.Services.GetRequiredService<IHttpClientFactory>()));
 trustedLearning.Map(app, IsLocalMutation);
 app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
 {
