@@ -11,7 +11,7 @@ const string instructions = "Bạn là Đệ Tốt trong lab. Trả lời ngắn
 var builder = WebApplication.CreateBuilder(args);
 var webPort = builder.Configuration.GetValue("DETOT_WEB_PORT", 5183);
 var gatewayPort = builder.Configuration.GetValue("DETOT_GATEWAY_PORT", 18793);
-var address = $"http://127.0.0.1:{webPort}";
+var address = $"http://localhost:{webPort}";
 var publicUri = RemoteAccess.ParseOrigin(builder.Configuration["DETOT_PUBLIC_ORIGIN"]);
 var publicOrigin = publicUri?.GetLeftPart(UriPartial.Authority);
 if (publicUri is not null) builder.Services.AddMemoryCache();

@@ -1,6 +1,6 @@
 # Đệ Tốt AI Lab
 
-Frontend và ASP.NET Core cùng origin tại `http://127.0.0.1:5183/`. Backend gọi OpenResponses của Gateway tại `127.0.0.1:18793`. Đây là lựa chọn cho lab một người dùng để kiểm tra client-side function tools qua hai lượt. Gateway có bearer token ngẫu nhiên theo lần chạy. Bearer HTTP của OpenClaw có quyền operator đầy đủ, nên token chỉ ở backend và Gateway, với cổng loopback riêng cho lab. Backend tự khai báo và chỉ thực thi `detot_lab_fixture`, trả mã cố định `DETOT-LAB-003`. Frontend hiển thị text, không render HTML từ model.
+Frontend và ASP.NET Core cùng origin tại `http://localhost:5183/`. Backend gọi OpenResponses của Gateway tại `127.0.0.1:18793`. Đây là lựa chọn cho lab một người dùng để kiểm tra client-side function tools qua hai lượt. Gateway có bearer token ngẫu nhiên theo lần chạy. Bearer HTTP của OpenClaw có quyền operator đầy đủ, nên token chỉ ở backend và Gateway, với cổng loopback riêng cho lab. Backend tự khai báo và chỉ thực thi `detot_lab_fixture`, trả mã cố định `DETOT-LAB-003`. Frontend hiển thị text, không render HTML từ model.
 
 Nút **Ca trực giả lập** chạy một chế độ riêng, không gọi Gateway hay tool. Chế độ này mở một tình huống IT hư cấu (Helpdesk/máy in, Windows DNS, SQL connection pool, API token, Docker env hoặc tài khoản dịch vụ), giữ trạng thái theo cuộc trò chuyện và chỉ trả log/kết quả dựng sẵn. Thu thập ít nhất hai dữ kiện rồi nêu nguyên nhân để nhận phản hồi; nói “kết thúc ca” để xem lời giải. Không có lệnh, sửa hệ thống, database hay thao tác Git nào được thực thi. Mã `DETOT-LAB-003` chỉ thuộc bài thử function tool ở chế độ chat thường.
 
@@ -40,7 +40,7 @@ Nhập API key cấp trực tiếp bởi DeepSeek tại prompt ẩn cục bộ. 
 
 Sau khi đổi cấu hình provider, dừng lab bằng Ctrl+C trong terminal cũ rồi chạy lại launcher để Gateway nhận key của phiên mới.
 
-Mở [trang lab](http://127.0.0.1:5183/) và gửi câu đã điền. Đạt khi thấy “Đã gọi công cụ giả lập” và câu trả lời có `DETOT-LAB-003`. Ctrl+C tại terminal chạy script để dừng.
+Mở [trang lab](http://localhost:5183/) và gửi câu đã điền. Đạt khi thấy “Đã gọi công cụ giả lập” và câu trả lời có `DETOT-LAB-003`. Ctrl+C tại terminal chạy script để dừng.
 
 Ghim OpenClaw `2026.11.3` cho mục đích thử nghiệm trên loopback. Cấu hình tắt Control UI, memory search, cron, heartbeat, Tool Search, Code Mode và tool truy cập máy. ASP.NET Core từ chối Origin ngoài địa chỉ lab và không chuyển tiếp URL hoặc tool tùy ý. Bản Windows dùng chung ranh giới tài khoản Windows của người chạy. Khi WSL2 sẵn sàng, có thể chuyển Gateway sang môi trường tách riêng sau khi kiểm tra lại loopback và quyền mount.
 

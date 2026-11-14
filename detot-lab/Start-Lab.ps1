@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
 $PublicOrigin = $PublicOrigin.TrimEnd('/')
-$workspaceOrigin = if ($PublicOrigin) { $PublicOrigin } else { "http://127.0.0.1:$WebPort" }
+$workspaceOrigin = if ($PublicOrigin) { $PublicOrigin } else { "http://localhost:$WebPort" }
 $googleConfig = Join-Path $root '.local/google-client.json'
 if ($ImportGoogleOAuth) {
     $web = (Get-Content -LiteralPath $ImportGoogleOAuth -Raw | ConvertFrom-Json).web
