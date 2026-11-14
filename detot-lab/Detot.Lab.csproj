@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="tests/cloud-storage/**/*.cs" />
+    <Compile Remove="tests/memory-audit/**/*.cs" />
     <Content Remove="tests/**" />
   </ItemGroup>
   <ItemGroup>

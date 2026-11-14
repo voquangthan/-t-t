@@ -139,7 +139,11 @@ foreach ($port in $GatewayPort, $WebPort) {
 
 & $node (Join-Path $root 'tests/runtime-candidate/apply-retention-fix.mjs') $gateway
 if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
-& npm.cmd --prefix (Join-Path $root 'frontend') run build
+if (Get-Command npm.cmd -ErrorAction SilentlyContinue) {
+    & npm.cmd --prefix (Join-Path $root 'frontend') run build
+} else {
+    & pnpm.cmd --dir (Join-Path $root 'frontend') run build
+}
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
 & $dotnet clean (Join-Path $root 'Detot.Lab.csproj') --nologo -v:q
 if ($LASTEXITCODE -ne 0) { throw 'Backend clean failed.' }
@@ -296,6 +300,7 @@ try {
         $probe.Dispose()
     }
     $backendVariables = @{
+        DETOT_MEMORY_DEEPSEEK_KEY = $gatewaySecrets[0]
         DETOT_GATEWAY_TOKEN = $token
         DETOT_LAB_NODE = $node
         DETOT_LAB_RUNTIME = $gateway
@@ -305,6 +310,9 @@ try {
         DETOT_GATEWAY_PORT = [string]$GatewayPort
         DETOT_COPY_AUTHORITY_DIR = $authority
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
+    }
+    if ($isolatedPorts) {
+        $backendVariables['DETOT_PRACTICE_DIRECTORY'] = Join-Path $runtimeDir 'practice'
     }
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_DRIVE_LOGIN_HINT',
         'DETOT_GOOGLE_DRIVE_CLIENT_ID','DETOT_GOOGLE_DRIVE_CLIENT_SECRET',
@@ -316,6 +324,9 @@ try {
     if ($PublicOrigin) {
         $backendVariables['DETOT_PUBLIC_ORIGIN'] = $PublicOrigin
         $backendVariables['DETOT_REMOTE_PASSWORD'] = $env:DETOT_REMOTE_PASSWORD
+        if ($env:DETOT_MEMORY_MEMBER_PASSWORD) {
+            $backendVariables['DETOT_MEMORY_MEMBER_PASSWORD'] = $env:DETOT_MEMORY_MEMBER_PASSWORD
+        }
     }
     foreach ($client in @(
         @{Path = $googleConfig; Prefix = 'DETOT_GOOGLE'},

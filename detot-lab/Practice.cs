@@ -10,6 +10,14 @@ sealed class Practice(IDataProtector protector, string directory)
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private string ProfilePath => Path.Combine(directory, "notes.bin");
     private string LearningPath => Path.Combine(directory, "learning.bin");
+    private string WorkMemoryPath => Path.Combine(directory, "current-work.bin");
+    private string StructuredMemoryPath => Path.Combine(directory, "structured-memory.bin");
+    private readonly object memoryGate = new();
+    private string OwnerMemoryPath(string owner) => Path.Combine(directory, $"memory-{StableSkillKey("owner", owner)}.bin");
+    private string MemoryChoicePath(string owner, Guid id) =>
+        Path.Combine(directory, $"memory-choice-{StableSkillKey("owner", owner)}-{id:N}.bin");
+    public bool HasMemoryChoice(string owner, Guid? source) => source is { } id && id != Guid.Empty &&
+        File.Exists(MemoryChoicePath(owner, id));
     private string ChatLearningPath => Path.Combine(directory, "chat-learning.bin");
     private string CasePath(Guid id) => Path.Combine(directory, $"{id:N}.bin");
 
@@ -23,6 +31,173 @@ sealed class Practice(IDataProtector protector, string directory)
     public string? Case(Guid id) => Read<string>(CasePath(id));
     public void SaveNotes(string notes) => Write(ProfilePath, notes.Trim());
     public void ClearChatLearning()
+    public string ApplyMemory(string owner, string intent, string? value, string? category, Guid? source, Guid? requestId, ILogger logger)
+    {
+        lock (memoryGate)
+        {
+            var entries = ReadOwnerMemories(owner);
+
+            if (intent == "recall")
+            {
+                if (entries.Count == 0) return "Bạn chưa lưu ký ức nào.";
+                var recent = entries.Where(entry => entry.Status != "deleted").TakeLast(10).Reverse();
+                return "Ký ức đã lưu gần đây:\n\n" + string.Join("\n", recent.Select(entry =>
+                    $"- {entry.Text} · {(entry.Status == "done" ? "đã xong" : entry.Status == "open" ? "đang mở" : "đã lưu")} · mã {entry.Id:D}"));
+            }
+
+            if (requestId is not { } retry || retry == Guid.Empty)
+                return "Chưa lưu. Yêu cầu ghi nhớ thiếu mã để chống lưu trùng.";
+            var previous = entries.Find(entry => entry.History.Any(change => change.RequestId == retry));
+            if (previous is not null)
+                return $"Yêu cầu này đã được xử lý · mã {previous.Id:D}.";
+
+            var now = DateTimeOffset.UtcNow;
+            if (intent == "save" && value is not null && category is ("task" or "device" or "person" or "preference" or "event"))
+            {
+                if (entries.Count >= 1000) return "Kho ký ức đã đạt giới hạn 1.000 mục.";
+                var entry = new MemoryEntry(Guid.NewGuid(), category, value, source, now,
+                    category == "task" ? "open" : "recorded", "user-request", 1,
+                    [new MemoryChange("created", now, source, requestId, null,
+                        category == "task" ? "open" : "recorded", owner)], owner);
+                entries.Add(entry);
+                WriteMemories(owner, entries);
+                if (ReadOwnerMemories(owner).Any(saved => saved.Id == entry.Id &&
+                    saved.History.Any(change => change.RequestId == retry)) != true)
+                    throw new IOException("Memory write could not be verified.");
+                logger.LogInformation("Memory persistence verified after create.");
+                return $"Đã lưu ký ức · mã {entry.Id:D}.";
+            }
+            if (intent == "complete")
+            {
+                var pending = HasMemoryChoice(owner, source) ? Read<MemoryChoice>(MemoryChoicePath(owner, source!.Value)) : null;
+                if (pending?.ExpiresAt <= now) pending = null;
+                MemoryCandidate? selected = null;
+                if (Guid.TryParse(value, out var id))
+                {
+                    selected = pending?.Candidates.FirstOrDefault(candidate => candidate.Id == id);
+                    if (pending is not null && selected is null)
+                        return "Mã này không thuộc danh sách đang chọn. Hãy chọn một việc trong danh sách.";
+                }
+                else if (pending is not null && int.TryParse(value, out var ordinal) &&
+                    ordinal >= 1 && ordinal <= pending.Candidates.Length)
+                {
+                    selected = pending.Candidates[ordinal - 1];
+                    id = selected.Id;
+                }
+                else
+                {
+                    var open = entries.Where(entry => entry.Category == "task" && entry.Status == "open").ToArray();
+                    var terms = Normalize(value ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var matches = terms.Length == 0 ? open : open.Where(entry =>
+                        terms.All(term => ContainsAny(Normalize(entry.Text), term))).ToArray();
+                    if (source is not { } chat || chat == Guid.Empty || matches.Length == 0 || matches.Length > 10)
+                        return "Bạn muốn hoàn thành việc nào? Cho mình tên thiết bị, phòng hoặc mã công việc.";
+                    var choice = new MemoryChoice(now.AddMinutes(30),
+                        matches.Select(entry => new MemoryCandidate(entry.Id, entry.History.Length)).ToArray());
+                    Write(MemoryChoicePath(owner, chat), JsonSerializer.Serialize(choice, Json));
+                    return "Chọn đúng công việc bằng số thứ tự hoặc mã:\n\n" +
+                        string.Join("\n", matches.Select((entry, i) => $"{i + 1}. {entry.Text} · mã {entry.Id:D}"));
+                }
+                var index = entries.FindIndex(entry => entry.Id == id && entry.Category == "task");
+                if (index < 0) return "Không tìm thấy công việc với mã này. Hãy hỏi lại danh sách việc đã lưu.";
+                var entry = entries[index];
+                if (entry.Status == "done") return "Việc này đã được đánh dấu hoàn thành.";
+                if (entry.Status != "open" || selected is not null && selected.Version != entry.History.Length)
+                    return "Công việc đã thay đổi. Hãy xem lại trạng thái trước khi chọn.";
+                entries[index] = entry with { Status = "done", History =
+                    [..entry.History, new MemoryChange("completed", now, source, requestId, entry.Status, "done", owner)] };
+                WriteMemories(owner, entries);
+                if (ReadOwnerMemories(owner).Any(saved => saved.Id == id &&
+                    saved.Status == "done" && saved.History.Any(change => change.RequestId == retry)) != true)
+                    throw new IOException("Memory update could not be verified.");
+                logger.LogInformation("Memory persistence verified after completion.");
+                return $"Đã đánh dấu hoàn thành: {entry.Text}";
+            }
+            return "Bạn muốn cập nhật việc nào? Hãy hỏi lại danh sách và cho mình mã của đúng công việc.";
+        }
+    }
+
+    private List<MemoryEntry> ReadOwnerMemories(string owner) =>
+        (Read<List<MemoryEntry>>(OwnerMemoryPath(owner)) ?? []).Where(entry => entry.OwnerId == owner).ToList();
+
+    private void WriteMemories(string owner, List<MemoryEntry> entries) =>
+        Write(OwnerMemoryPath(owner), JsonSerializer.Serialize(entries, Json));
+
+    public IResult QueryMemory(string owner, Guid? id, string? query, bool history = false)
+    {
+        lock (memoryGate)
+        {
+            var entries = ReadOwnerMemories(owner).Where(entry => entry.Status != "deleted");
+            if (id is { } key)
+            {
+                var entry = entries.FirstOrDefault(item => item.Id == key);
+                return entry is null ? Results.NotFound() :
+                    history ? Results.Ok(entry.History) : Results.Ok(entry);
+            }
+            return Results.Ok(entries.Where(entry => string.IsNullOrWhiteSpace(query) ||
+                Normalize(entry.Text).Contains(Normalize(query), StringComparison.Ordinal)).TakeLast(100).ToArray());
+        }
+    }
+
+    public IResult EditMemory(string owner, Guid id, int version, string? value, bool delete, bool complete = false)
+    {
+        lock (memoryGate)
+        {
+            var entries = ReadOwnerMemories(owner);
+            var index = entries.FindIndex(entry => entry.Id == id && entry.Status != "deleted");
+            if (index < 0) return Results.NotFound();
+            var entry = entries[index];
+            if (entry.History.Length != version) return Results.Conflict();
+            if (complete && (entry.Category != "task" || entry.Status != "open")) return Results.Conflict();
+            if (!delete && !complete && value?.Trim() is not { Length: > 0 and <= 500 }) return Results.BadRequest();
+            var status = delete ? "deleted" : complete ? "done" : entry.Status;
+            entries[index] = entry with { Text = delete || complete ? entry.Text : value!.Trim(), Status = status,
+                History = [..entry.History, new MemoryChange(delete ? "deleted" : complete ? "completed" : "edited",
+                    DateTimeOffset.UtcNow, null, null, entry.Status, status, owner)] };
+            WriteMemories(owner, entries);
+            if (!ReadOwnerMemories(owner).Any(saved => saved.Id == id && saved.Status == status &&
+                saved.History.Length == version + 1)) throw new IOException("Memory edit could not be verified.");
+            return Results.NoContent();
+        }
+    }
+
+    public IResult MigrateMemory(string owner)
+    {
+        lock (memoryGate)
+        {
+            if (owner != RemoteAccess.OwnerId) return Results.StatusCode(403);
+            if (File.Exists(OwnerMemoryPath(owner))) return Results.Conflict();
+            var entries = Read<List<MemoryEntry>>(StructuredMemoryPath) ?? [];
+            if (entries.Any(entry => entry.OwnerId is not null)) return Results.Conflict();
+            if (entries.Count == 0 && Read<string>(WorkMemoryPath) is { Length: > 0 } legacy)
+                entries.Add(new MemoryEntry(Guid.NewGuid(), "task", legacy, null, null, "open", "legacy", null, []));
+            if (entries.Count == 0) return Results.NotFound();
+            foreach (var path in new[] { StructuredMemoryPath, WorkMemoryPath }.Where(File.Exists))
+            {
+                var bytes = File.ReadAllBytes(path);
+                var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+                var backup = path + $".{digest}.backup";
+                if (!File.Exists(backup))
+                {
+                    var staging = backup + $".{Guid.NewGuid():N}.tmp";
+                    File.WriteAllBytes(staging, bytes);
+                    File.Move(staging, backup);
+                }
+                if (!File.ReadAllBytes(backup).AsSpan().SequenceEqual(bytes))
+                    return Results.Problem("Bản sao lưu không khớp dữ liệu gốc.", statusCode: 409);
+            }
+            WriteMemories(owner, entries.Select(entry => entry with { OwnerId = owner,
+                History = entry.History.Select(change => change with { OwnerId = owner }).ToArray() }).ToList());
+            return Results.NoContent();
+        }
+    }
+
+    private sealed record MemoryEntry(Guid Id, string Category, string Text, Guid? ConversationId,
+        DateTimeOffset? CreatedAt, string Status, string Source, double? Confidence, MemoryChange[] History, string? OwnerId = null);
+    private sealed record MemoryChange(string Action, DateTimeOffset At, Guid? ConversationId, Guid? RequestId,
+        string? BeforeStatus = null, string? AfterStatus = null, string? OwnerId = null);
+    private sealed record MemoryChoice(DateTimeOffset ExpiresAt, MemoryCandidate[] Candidates);
+    private sealed record MemoryCandidate(Guid Id, int Version);
     {
         lock (chatLearningGate) Write(ChatLearningPath, JsonSerializer.Serialize(ChatLearningProfile.Empty, Json));
     }
@@ -211,9 +386,15 @@ sealed class Practice(IDataProtector protector, string directory)
         catch (JsonException) { return null; }
     }
 
-    private T? Read<T>(string path) => File.Exists(path)
-        ? JsonSerializer.Deserialize<T>(protector.Unprotect(File.ReadAllText(path)), Json)
-        : default;
+    private T? Read<T>(string path)
+    {
+        if (!File.Exists(path)) return default;
+        using var stored = JsonDocument.Parse(protector.Unprotect(File.ReadAllText(path)));
+        // Earlier versions wrote structured profiles as JSON inside a JSON string.
+        if (typeof(T) != typeof(string) && stored.RootElement.ValueKind == JsonValueKind.String)
+            return JsonSerializer.Deserialize<T>(stored.RootElement.GetString()!, Json);
+        return stored.RootElement.Deserialize<T>(Json);
+    }
 
     private void Write(string path, string value)
     {

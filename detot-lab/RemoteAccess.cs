@@ -1,21 +1,33 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Security.Claims;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Caching.Memory;
 
 sealed class RemoteAccess
 {
+    public const string OwnerId = "workspace-owner";
     private const string CookieName = "__Host-detot_session";
     private readonly byte[] passwordHash;
+    private readonly byte[]? memoryMemberHash;
     private readonly IMemoryCache sessions;
     private readonly object loginLock = new();
     private DateTimeOffset nextAttempt;
 
-    public RemoteAccess(string? password, IMemoryCache sessions)
+    private readonly TimeSpan sessionLifetime;
+
+    public RemoteAccess(string? password, IMemoryCache sessions, string? memoryMemberPassword = null, int sessionSeconds = 28800)
     {
         if (string.IsNullOrWhiteSpace(password) || password.Length < 24)
             throw new InvalidOperationException("Remote access requires a random DETOT_REMOTE_PASSWORD of at least 24 characters.");
         passwordHash = Hash(password);
+        sessionLifetime = TimeSpan.FromSeconds(Math.Clamp(sessionSeconds, 5, 28800));
+        if (memoryMemberPassword is not null)
+        {
+            if (memoryMemberPassword.Length < 24 || CryptographicOperations.FixedTimeEquals(passwordHash, Hash(memoryMemberPassword)))
+                throw new InvalidOperationException("Memory member requires a distinct password of at least 24 characters.");
+            memoryMemberHash = Hash(memoryMemberPassword);
+        }
         this.sessions = sessions;
     }
 
@@ -33,7 +45,8 @@ sealed class RemoteAccess
     {
         var request = context.Request;
         var session = request.Cookies[CookieName];
-        var authenticated = session is not null && sessions.TryGetValue("remote:" + session, out _);
+        string? userId = null;
+        var authenticated = session is not null && sessions.TryGetValue("remote:" + session, out userId) && userId is not null;
         var login = request.Path.Equals("/login", StringComparison.OrdinalIgnoreCase);
         var logout = request.Path.Equals("/logout", StringComparison.OrdinalIgnoreCase);
         if (logout || (login && HttpMethods.IsPost(request.Method)))
@@ -67,17 +80,20 @@ sealed class RemoteAccess
                 allowed = now >= nextAttempt;
                 if (allowed) nextAttempt = now.AddSeconds(2);
             }
-            if (!allowed || !CryptographicOperations.FixedTimeEquals(passwordHash, Hash(form["password"].ToString())))
+            var digest = Hash(form["password"].ToString());
+            var loginId = CryptographicOperations.FixedTimeEquals(passwordHash, digest) ? OwnerId :
+                memoryMemberHash is not null && CryptographicOperations.FixedTimeEquals(memoryMemberHash, digest) ? "memory-member" : null;
+            if (!allowed || loginId is null)
             {
                 await LoginPage(context, allowed ? 401 : 429, allowed ? "Mật khẩu không đúng." : "Hãy thử lại sau vài giây.");
                 return;
             }
             if (session is not null) sessions.Remove("remote:" + session);
             session = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
-            sessions.Set("remote:" + session, true, new MemoryCacheEntryOptions
+            sessions.Set("remote:" + session, loginId, new MemoryCacheEntryOptions
             {
                 SlidingExpiration = TimeSpan.FromMinutes(15),
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(8)
+                AbsoluteExpirationRelativeToNow = sessionLifetime
             });
             context.Response.Cookies.Append(CookieName, session, Cookie());
             context.Response.Redirect("/workspace");
@@ -91,6 +107,12 @@ sealed class RemoteAccess
         }
         if (authenticated)
         {
+            context.User = Principal(userId!);
+            if (userId != OwnerId && !request.Path.StartsWithSegments("/api/memory"))
+            {
+                context.Response.StatusCode = 403;
+                return;
+            }
             await next(context);
             return;
         }
@@ -99,6 +121,9 @@ sealed class RemoteAccess
         else
             context.Response.Redirect("/login");
     }
+
+    public static ClaimsPrincipal Principal(string id) =>
+        new(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, id)], "DetotWorkspace"));
 
     private static Task LoginPage(HttpContext context, int status, string message)
     {
