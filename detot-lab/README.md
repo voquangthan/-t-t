@@ -34,7 +34,7 @@ PDF scan, TIFF/BMP và DOC/XLS/PPT cũ hiện trả lỗi adapter chưa được
 
 ## Trusted Learning Sources
 
-Trang **Nguồn học** quản lý các nguồn theo trạng thái `pending → checked → approved` hoặc `quarantined`. Chat nhận câu lệnh như “Học ASP.NET Core từ Microsoft Learn” và mở Search Discovery với chủ đề/domain tương ứng. Kết quả tìm kiếm chỉ là ứng viên; phải kiểm tra giấy phép, sau đó người dùng phê duyệt phạm vi trước khi Worker thu thập. Search Provider thay thế được qua `ISearchDiscoveryProvider`. Provider hiện có là Microsoft Web IQ Web Search; đặt `DETOT_SEARCH_PROVIDER=microsoft-web` và `DETOT_SEARCH_API_KEY` trước khi chạy `Start-Lab.ps1`. Script chỉ chuyển tiếp hai biến này cho Backend; key không được ghi vào log hoặc client. Nếu chưa cấu hình, tìm kiếm báo chưa sẵn sàng; URL cụ thể vẫn có thể thêm để Backend kiểm tra. Microsoft Web IQ API contract được mô tả trong [Web Search REST API reference](https://learn.microsoft.com/en-us/web-iq/reference/web-search).
+Trang **Nguồn học** quản lý các nguồn theo trạng thái `pending → checked → approved` hoặc `quarantined`. Chat nhận câu lệnh như “Học ASP.NET Core từ Microsoft Learn” và mở Search Discovery với chủ đề/domain tương ứng. Khi đặt `DETOT_SEARXNG_BASE_URL`, Search Discovery dùng SearXNG tự host để tìm URL ứng viên. Backend kiểm tra giấy phép và chờ người dùng phê duyệt phạm vi trước khi Worker thu thập qua Universal Reader. URL cụ thể vẫn có thể thêm trực tiếp để kiểm tra.
 
 Quyền truy cập được lưu riêng với giấy phép; connector hiện chỉ đọc. Backend tự nhận diện license từ metadata GitHub, metadata Hugging Face dataset card và metadata/license URL của Website. License do người dùng nhập không được xem là bằng chứng. Chỉ giấy phép trong allowlist tự động (CC0, CC-BY/CC-BY-SA, MIT, Apache-2.0, BSD, PSF/Python và MPL) mới được xử lý tự động; thiếu bằng chứng hoặc license ngoài chính sách sẽ bị cách ly, không có nút xác nhận thủ công. Website giới hạn ở đúng URL đã khai báo, GitHub chỉ đọc README của một repository, Drive chỉ đọc một thư mục dataset con trong `DETOT-AI/datasets` và kiểm tra metadata license từng artifact.
 
@@ -55,22 +55,24 @@ npm.cmd --prefix frontend ci
 npm.cmd --prefix tests/runtime-candidate ci
 ```
 
-Để chạy với Search và DeepSeek thật, nhập các khóa trong terminal cục bộ. Search cần khóa cấp cho Microsoft Web IQ Web Search. Nếu chỉ muốn chạy Chat hoặc kiểm tra Drive, lưu khóa DeepSeek rồi chạy `./Start-Lab.ps1` trực tiếp.
+Để chạy SearXNG trên cùng máy, dùng Docker với Linux containers. Cấu hình mẫu chỉ mở cổng trên loopback và bật JSON. Tạo secret riêng cho instance, sau đó khởi chạy trong PowerShell cùng thư mục `detot-lab`. [Tài liệu SearXNG](https://docs.searxng.org/admin/installation-docker.html)
 
 ```powershell
-./Start-Lab.ps1 -ConfigureDeepSeek
-$env:DETOT_SEARCH_PROVIDER = 'microsoft-web'
-$searchKey = Read-Host 'Microsoft Web IQ API key' -AsSecureString
-try {
-    $env:DETOT_SEARCH_API_KEY = [Net.NetworkCredential]::new('', $searchKey).Password
-    ./Start-Lab.ps1
-} finally {
-    $searchKey.Dispose()
-    Remove-Item Env:DETOT_SEARCH_API_KEY, Env:DETOT_SEARCH_PROVIDER -ErrorAction SilentlyContinue
-}
+$random = [Security.Cryptography.RandomNumberGenerator]::Create()
+$secretBytes = New-Object byte[] 32
+try { $random.GetBytes($secretBytes) } finally { $random.Dispose() }
+$env:SEARXNG_SECRET = [Convert]::ToBase64String($secretBytes)
+docker compose -f searxng/compose.yaml up -d
+$env:DETOT_SEARCH_PROVIDER = 'searxng'
+$env:DETOT_SEARXNG_BASE_URL = 'http://127.0.0.1:8888'
+./Start-Lab.ps1
 ```
 
-DeepSeek được lưu bằng DPAPI cho tài khoản Windows hiện tại. Khi không dùng `-ConfigureDeepSeek`, launcher chấp nhận `DEEPSEEK_API_KEY` của phiên hoặc hỏi bằng prompt ẩn. Gateway dùng `deepseek-flash`. Search key chỉ tồn tại trong môi trường của phiên và Backend con. Script dùng state Gateway trong `.state/`, có thể chứa hội thoại thử.
+Với SearXNG đã tự host trên máy khác, đặt `DETOT_SEARXNG_BASE_URL` thành base URL HTTPS của instance và bật `json` trong `search.formats`. Có thể bỏ qua `DETOT_SEARCH_PROVIDER` khi không có cấu hình provider cũ. Backend gọi `POST /search` qua form với `format=json`. SearXNG chuyển truy vấn cho các công cụ tìm kiếm được bật trên instance. [Search API](https://docs.searxng.org/dev/search_api.html)
+
+Sau khi mở workspace, vào **Nguồn học → Tìm nguồn**. Tìm một chủ đề, kiểm tra và phê duyệt URL phù hợp, sau đó đồng bộ. Hỏi lại chủ đề trong Chat để kiểm tra câu trả lời dẫn đúng URL của nguồn.
+
+Gateway dùng `deepseek-flash`. Nếu cần lưu khóa DeepSeek cục bộ bằng DPAPI, chạy `./Start-Lab.ps1 -ConfigureDeepSeek`. Launcher cũng chấp nhận `DEEPSEEK_API_KEY` của phiên hoặc hỏi bằng prompt ẩn. Script dùng state Gateway trong `.state/`, có thể chứa hội thoại thử.
 
 Sau khi đổi cấu hình provider, dừng lab bằng Ctrl+C trong terminal cũ rồi chạy lại launcher để Gateway nhận key của phiên mới.
 
@@ -88,7 +90,7 @@ Ghim OpenClaw `2026.11.3` cho mục đích thử nghiệm trên loopback. Cấu 
 - Kiểm tra Drive thật qua `/api/drive/status` tại `http://localhost:5183` khi Backend đang chạy. Đạt khi `enabled`, `connected` và `available` đều là `true`. Nếu chưa kết nối, cấp quyền tại Cloud Storage trong trình duyệt.
 - DeepSeek thật còn chờ key nhập ở terminal. WSL2 còn chờ cài đặt bằng quyền quản trị.
 
-### Kết quả nghiệm thu 14/11/2026
+### Kết quả nghiệm thu trước khi chuyển sang SearXNG, 14/11/2026
 
 | Bước | Kết quả | Bằng chứng |
 | --- | --- | --- |

@@ -26,7 +26,7 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
 
     public async Task<SearchDiscoveryResponse> SearchAsync(SearchDiscoveryRequest request, CancellationToken cancellationToken)
     {
-        if (provider is null) throw new InvalidOperationException("Search Provider chưa được cấu hình. Hãy đặt DETOT_SEARCH_PROVIDER=microsoft-web và DETOT_SEARCH_API_KEY trên Backend.");
+        if (provider is null) throw new InvalidOperationException("Chưa cấu hình tìm nguồn. Hãy đặt DETOT_SEARXNG_BASE_URL trỏ tới SearXNG của bạn.");
         var topic = request.Topic?.Trim() ?? "";
         if (topic.Length is < 2 or > 200) throw new ArgumentException("Chủ đề tìm kiếm phải dài từ 2 đến 200 ký tự.");
         var type = string.IsNullOrWhiteSpace(request.DocumentType) ? "all" : request.DocumentType.Trim().ToLowerInvariant();
@@ -152,11 +152,75 @@ public sealed class MicrosoftWebSearchProvider(HttpClient client, string apiKey)
             System.Globalization.DateTimeStyles.AssumeUniversal, out var timestamp) ? timestamp : null;
 }
 
+public sealed class SearXngSearchProvider(HttpClient client, Uri searchEndpoint) : ISearchDiscoveryProvider
+{
+    public string Name => "SearXNG";
+
+    public async Task<IReadOnlyList<ProviderSearchResult>> SearchAsync(ProviderSearchRequest request, CancellationToken cancellationToken)
+    {
+        using var form = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["q"] = request.Query,
+            ["format"] = "json",
+            ["categories"] = "general",
+            ["language"] = request.Language,
+            ["safesearch"] = "2",
+        });
+        try
+        {
+            using var response = await client.PostAsync(searchEndpoint, form, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+                throw new InvalidOperationException("SearXNG từ chối yêu cầu. Kiểm tra quyền truy cập và bật định dạng json trong search.formats.");
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new InvalidOperationException("SearXNG đang giới hạn tần suất. Hãy chờ rồi thử lại.");
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException($"SearXNG trả HTTP {(int)response.StatusCode}.");
+
+            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken),
+                cancellationToken: cancellationToken);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("Phản hồi SearXNG thiếu danh sách kết quả.");
+            return results.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.Object)
+                .Select(item => new ProviderSearchResult(ReadString(item, "title"), ReadString(item, "url"), ReadString(item, "content")))
+                .Where(item => !string.IsNullOrWhiteSpace(item.Url)).Take(request.MaxResults).ToArray();
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException("SearXNG không trả JSON hợp lệ. Kiểm tra địa chỉ instance và cấu hình định dạng json.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("SearXNG không phản hồi kịp. Hãy thử lại.");
+        }
+        catch (HttpRequestException)
+        {
+            throw new InvalidOperationException("Không nhận được phản hồi hợp lệ từ SearXNG. Kiểm tra địa chỉ và trạng thái instance.");
+        }
+    }
+
+    private static string ReadString(JsonElement item, string property) =>
+        item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+}
+
 public static class SearchDiscoveryProviderFactory
 {
     public static ISearchDiscoveryProvider? Create(IConfiguration configuration, IHttpClientFactory clients)
     {
-        if (!string.Equals(configuration["DETOT_SEARCH_PROVIDER"], "microsoft-web", StringComparison.OrdinalIgnoreCase)) return null;
+        var provider = configuration["DETOT_SEARCH_PROVIDER"]?.Trim();
+        if (string.IsNullOrEmpty(provider) || provider.Equals("searxng", StringComparison.OrdinalIgnoreCase))
+        {
+            var baseUrl = configuration["DETOT_SEARXNG_BASE_URL"]?.Trim();
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var instance) ||
+                (instance.Scheme != Uri.UriSchemeHttps && (instance.Scheme != Uri.UriSchemeHttp || !instance.IsLoopback)) ||
+                string.IsNullOrEmpty(instance.Host) || !string.IsNullOrEmpty(instance.UserInfo) ||
+                !string.IsNullOrEmpty(instance.Query) || !string.IsNullOrEmpty(instance.Fragment))
+                return null;
+            var endpoint = new UriBuilder(instance) { Path = instance.AbsolutePath.TrimEnd('/') + "/search" }.Uri;
+            return new SearXngSearchProvider(clients.CreateClient("learning-searxng"), endpoint);
+        }
+        if (!provider.Equals("microsoft-web", StringComparison.OrdinalIgnoreCase)) return null;
         var key = configuration["DETOT_SEARCH_API_KEY"];
         return string.IsNullOrWhiteSpace(key) ? null : new MicrosoftWebSearchProvider(clients.CreateClient("learning-search"), key);
     }

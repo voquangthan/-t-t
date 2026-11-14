@@ -56,6 +56,11 @@ builder.Services.AddHttpClient("learning-source", client => client.Timeout = Tim
     });
 builder.Services.AddHttpClient("learning-search", client => client.Timeout = TimeSpan.FromSeconds(15))
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
+builder.Services.AddHttpClient("learning-searxng", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+    client.MaxResponseContentBufferSize = 1024 * 1024;
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
 builder.Services.AddSingleton<UniversalFileReader>();
 builder.Services.AddSingleton<UniversalUrlReader>();
 builder.WebHost.UseUrls(address);

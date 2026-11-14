@@ -18,6 +18,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("trusted learning rejects unknown licenses and unsafe URL scopes", TrustedLearningRejectsUnsafeSources),
     ("search discovery filters unsafe, duplicate, spam and out-of-scope results", SearchDiscoveryFilters),
     ("Microsoft Web IQ adapter sends the request contract and parses search results", SearchProviderContract),
+    ("self-hosted SearXNG sends form data and filters discovery candidates", SearXngProviderContract),
     ("universal reader extracts text with checksum and line citations", ReaderExtractsText),
     ("universal reader extracts office XML with structural citations", ReaderExtractsDocx),
     ("universal reader extracts PDF text with page citations", ReaderExtractsPdf),
@@ -564,6 +565,30 @@ static async Task SearchProviderContract()
         "Search Provider should preserve publisher update metadata from webResults");
 }
 
+static async Task SearXngProviderContract()
+{
+    using var handler = new SearXngSearchHandler();
+    var clients = new DelegatingHttpClientFactory(handler);
+    var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["DETOT_SEARXNG_BASE_URL"] = "http://127.0.0.1:8888/searxng/",
+    }).Build();
+    var service = new SearchDiscoveryService(SearchDiscoveryProviderFactory.Create(configuration, clients));
+    var results = await service.SearchAsync(new("ASP.NET & xác thực", ["learn.microsoft.com"], "all"), CancellationToken.None);
+    Assert(handler.Uri?.AbsoluteUri == "http://127.0.0.1:8888/searxng/search" &&
+        handler.Method == HttpMethod.Post && handler.Form is not null &&
+        System.Net.WebUtility.UrlDecode(handler.Form).Contains("q=ASP.NET & xác thực (site:learn.microsoft.com)", StringComparison.Ordinal) &&
+        handler.Form.Contains("format=json", StringComparison.Ordinal),
+        "SearXNG should use a form POST against the configured base URL");
+    Assert(results.Provider == "SearXNG" && results.Candidates.Count == 1 &&
+        results.Candidates[0].Domain == "learn.microsoft.com" && results.Candidates[0].LicenseStatus == "Chưa kiểm tra",
+        "SearXNG results should go through the existing domain and license workflow");
+    handler.Status = System.Net.HttpStatusCode.Forbidden;
+    await Throws<InvalidOperationException>(() => service.SearchAsync(new("ASP.NET", [], "all"), CancellationToken.None));
+    configuration["DETOT_SEARXNG_BASE_URL"] = "http://search.example.org";
+    Assert(SearchDiscoveryProviderFactory.Create(configuration, clients) is null, "remote SearXNG should use HTTPS");
+}
+
 static void Assert(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
@@ -676,6 +701,30 @@ sealed class FakeSearchDiscoveryProvider(IReadOnlyList<ProviderSearchResult> res
 {
     public string Name => "Fake Search";
     public Task<IReadOnlyList<ProviderSearchResult>> SearchAsync(ProviderSearchRequest request, CancellationToken cancellationToken) => Task.FromResult(results);
+}
+
+sealed class SearXngSearchHandler : HttpMessageHandler
+{
+    public HttpMethod? Method { get; private set; }
+    public Uri? Uri { get; private set; }
+    public string? Form { get; private set; }
+    public System.Net.HttpStatusCode Status { get; set; } = System.Net.HttpStatusCode.OK;
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Method = request.Method;
+        Uri = request.RequestUri;
+        Form = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+        return new HttpResponseMessage(Status)
+        {
+            Content = new StringContent("""
+                {"results":[
+                  {"title":"ASP.NET Core Authentication","url":"https://learn.microsoft.com/en-us/aspnet/core/security/authentication/","content":"Official authentication guide with configuration examples."},
+                  {"title":"An unrelated site","url":"https://example.org/article","content":"Example content outside the allowed domain."}
+                ]}
+                """, Encoding.UTF8, "application/json")
+        };
+    }
 }
 
 sealed class WebIqSearchHandler : HttpMessageHandler
