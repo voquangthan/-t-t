@@ -7,7 +7,7 @@ public sealed record SearchDiscoveryRequest(string? Topic, string[]? Domains, st
 public sealed record SearchDiscoveryCandidate(string Title, string Url, string Domain, string Description, string DocumentType,
     string LicenseStatus, bool OfficialSource, string? Version = null, DateTimeOffset? LastUpdatedUtc = null);
 public sealed record SearchDiscoveryResponse(string Provider, IReadOnlyList<SearchDiscoveryCandidate> Candidates);
-public sealed record ProviderSearchRequest(string Query, int MaxResults, string Language);
+public sealed record ProviderSearchRequest(string Query, int MaxResults, string Language, string? Topic = null);
 public sealed record ProviderSearchResult(string Title, string Url, string Description, DateTimeOffset? LastUpdatedUtc = null);
 
 public interface ISearchDiscoveryProvider
@@ -26,7 +26,7 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
 
     public async Task<SearchDiscoveryResponse> SearchAsync(SearchDiscoveryRequest request, CancellationToken cancellationToken)
     {
-        if (provider is null) throw new InvalidOperationException("Chưa cấu hình tìm nguồn. Hãy đặt DETOT_SEARXNG_BASE_URL trỏ tới SearXNG của bạn.");
+        if (provider is null) throw new InvalidOperationException("Chưa cấu hình tìm nguồn. Chọn Microsoft Learn hoặc cấu hình SearXNG.");
         var topic = request.Topic?.Trim() ?? "";
         if (topic.Length is < 2 or > 200) throw new ArgumentException("Chủ đề tìm kiếm phải dài từ 2 đến 200 ký tự.");
         var type = string.IsNullOrWhiteSpace(request.DocumentType) ? "all" : request.DocumentType.Trim().ToLowerInvariant();
@@ -40,7 +40,7 @@ public sealed class SearchDiscoveryService(ISearchDiscoveryProvider? provider)
         if (type == "markdown") query += " (filetype:md OR filetype:markdown)";
         if (type == "github") query += " site:github.com";
 
-        var results = await provider.SearchAsync(new ProviderSearchRequest(query, 12, "vi"), cancellationToken);
+        var results = await provider.SearchAsync(new ProviderSearchRequest(query, 12, "vi", topic), cancellationToken);
         var candidates = results.Select(result => ToCandidate(result))
             .Where(candidate => candidate is not null)
             .Select(candidate => candidate!)
@@ -204,11 +204,37 @@ public sealed class SearXngSearchProvider(HttpClient client, Uri searchEndpoint)
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
 }
 
+public sealed class MicrosoftLearnSearchProvider(HttpClient client) : ISearchDiscoveryProvider
+{
+    public string Name => "Microsoft Learn";
+
+    public async Task<IReadOnlyList<ProviderSearchResult>> SearchAsync(ProviderSearchRequest request, CancellationToken cancellationToken)
+    {
+        var topic = Uri.EscapeDataString(request.Topic ?? request.Query);
+        var url = $"https://learn.microsoft.com/api/search?search={topic}&locale=en-us&%24top={request.MaxResults}";
+        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken),
+            cancellationToken: cancellationToken);
+        return document.RootElement.GetProperty("results").EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.Object)
+            .Select(item => new ProviderSearchResult(Read(item, "title"), Read(item, "url"), Read(item, "description")))
+            .Where(item => Uri.TryCreate(item.Url, UriKind.Absolute, out var uri) &&
+                uri.Host.Equals("learn.microsoft.com", StringComparison.OrdinalIgnoreCase))
+            .Take(request.MaxResults).ToArray();
+
+        static string Read(JsonElement item, string key) =>
+            item.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+    }
+}
+
 public static class SearchDiscoveryProviderFactory
 {
     public static ISearchDiscoveryProvider? Create(IConfiguration configuration, IHttpClientFactory clients)
     {
         var provider = configuration["DETOT_SEARCH_PROVIDER"]?.Trim();
+        if (string.Equals(provider, "microsoft-learn", StringComparison.OrdinalIgnoreCase))
+            return new MicrosoftLearnSearchProvider(clients.CreateClient("learning-search"));
         if (string.IsNullOrEmpty(provider) || provider.Equals("searxng", StringComparison.OrdinalIgnoreCase))
         {
             var baseUrl = configuration["DETOT_SEARXNG_BASE_URL"]?.Trim();
