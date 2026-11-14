@@ -2,7 +2,8 @@
     [string]$ImportGoogleOAuth, [string]$ImportDriveOAuth, [string]$RestoredState, [switch]$EnableGoogle,
     [string]$PublicOrigin = $env:DETOT_PUBLIC_ORIGIN,
     [ValidateRange(1024,65535)][int]$WebPort = 5183,
-    [ValidateRange(1024,65535)][int]$GatewayPort = 18793)
+    [ValidateRange(1024,65535)][int]$GatewayPort = 18793,
+    [string]$BuildDirectory)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
@@ -74,7 +75,19 @@ if (!(Test-Path -LiteralPath $dotnet -PathType Leaf)) { $dotnet = (Get-Command d
 $isolatedPorts = $WebPort -ne 5183 -or $GatewayPort -ne 18793
 if ($WebPort -eq $GatewayPort) { throw 'Backend and Gateway ports must differ.' }
 $runtimeDir = Join-Path $root ".local/runtime-$WebPort-$GatewayPort"
-$buildDir = Join-Path $runtimeDir 'build'
+$buildDir = if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+    Join-Path $runtimeDir 'build'
+} elseif ([IO.Path]::IsPathRooted($BuildDirectory)) {
+    [IO.Path]::GetFullPath($BuildDirectory)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $root $BuildDirectory))
+}
+if ($BuildDirectory) {
+    $localRoot = [IO.Path]::GetFullPath((Join-Path $root '.local')) + [IO.Path]::DirectorySeparatorChar
+    if (!$buildDir.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'BuildDirectory must be inside the lab .local directory.'
+    }
+}
 $runtimeManifest = Join-Path $runtimeDir 'processes.json'
 $app = Join-Path $buildDir 'Detot.Lab.dll'
 foreach ($path in $node, $dotnet, $gateway) {

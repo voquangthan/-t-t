@@ -6,16 +6,105 @@ using Microsoft.AspNetCore.DataProtection;
 
 sealed class Practice(IDataProtector protector, string directory)
 {
+    private readonly object chatLearningGate = new();
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private string ProfilePath => Path.Combine(directory, "notes.bin");
     private string LearningPath => Path.Combine(directory, "learning.bin");
+    private string ChatLearningPath => Path.Combine(directory, "chat-learning.bin");
     private string CasePath(Guid id) => Path.Combine(directory, $"{id:N}.bin");
 
     public string Notes => Read<string>(ProfilePath) ?? "";
     public string LearningSummary => SummarizeLearning(Read<LearningProfile>(LearningPath) ?? LearningProfile.Empty);
     public LearningSnapshot LearningMap => BuildLearningMap(Read<LearningProfile>(LearningPath) ?? LearningProfile.Empty);
+    public ChatLearningSnapshot ChatLearningMap
+    {
+        get { lock (chatLearningGate) return BuildChatLearningMap(Read<ChatLearningProfile>(ChatLearningPath) ?? ChatLearningProfile.Empty); }
+    }
     public string? Case(Guid id) => Read<string>(CasePath(id));
     public void SaveNotes(string notes) => Write(ProfilePath, notes.Trim());
+    public void ClearChatLearning()
+    {
+        lock (chatLearningGate) Write(ChatLearningPath, JsonSerializer.Serialize(ChatLearningProfile.Empty, Json));
+    }
+
+    public void RecordChatLearning(Guid observationId, string topic, string skill, string signal, double confidence)
+    {
+        if (observationId == Guid.Empty || !double.IsFinite(confidence) || confidence < 0.7 || confidence > 1 ||
+            signal is not ("progress" or "practice")) return;
+        topic = CleanLabel(topic, 48);
+        skill = CleanLabel(skill, 64);
+        if (topic.Length < 2 || skill.Length < 2) return;
+
+        lock (chatLearningGate)
+        {
+            var profile = Read<ChatLearningProfile>(ChatLearningPath) ?? ChatLearningProfile.Empty;
+            if (profile.ProcessedRequests.Contains(observationId)) return;
+            var key = StableSkillKey(topic, skill);
+            var skills = new Dictionary<string, ChatSkillProgress>(profile.Skills, StringComparer.Ordinal);
+            var current = skills.GetValueOrDefault(key) ?? ChatSkillProgress.Empty(topic, skill);
+            var now = DateTimeOffset.UtcNow;
+            var updated = current with
+            {
+                ProgressSignals = current.ProgressSignals + (signal == "progress" ? 1 : 0),
+                PracticeSignals = current.PracticeSignals + (signal == "practice" ? 1 : 0),
+                Observations = current.Observations + 1,
+                LastSeen = now,
+                Recent = current.Recent.Append(new ChatSkillSignal(signal, now)).TakeLast(8).ToArray()
+            };
+            skills[key] = updated;
+            if (skills.Count > 40)
+            {
+                var oldest = skills.OrderBy(pair => pair.Value.LastSeen).First().Key;
+                skills.Remove(oldest);
+            }
+            Write(ChatLearningPath, JsonSerializer.Serialize(new ChatLearningProfile(skills,
+                profile.ProcessedRequests.Append(observationId).TakeLast(256).ToArray()), Json));
+        }
+    }
+
+    private static ChatLearningSnapshot BuildChatLearningMap(ChatLearningProfile profile)
+    {
+        var skills = profile.Skills.Values.OrderByDescending(item => item.LastSeen).Select(item =>
+        {
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-90);
+            var recent = item.Recent.Where(signal => signal.At >= cutoff).TakeLast(5).ToArray();
+            var recentPractice = recent.Count(signal => signal.Signal == "practice");
+            var recentProgress = recent.Count(signal => signal.Signal == "progress");
+            var confidence = item.LastSeen < cutoff ? "Cần lượt mới để cập nhật" :
+                item.Observations < 3 ? "Đang quan sát thêm" :
+                recent.Length < 3 ? "Ít tín hiệu gần đây" :
+                item.Observations < 6 ? "Tín hiệu vừa phải" : "Có nhiều lần quan sát";
+            var pattern = item.Observations < 3
+                ? "Chưa đủ lượt để đề xuất điểm cần ôn."
+                : item.LastSeen < cutoff
+                    ? "Dữ liệu đã cũ; cần vài lượt mới để xem kỹ năng này hiện ra sao."
+                    : recent.Length < 3
+                        ? "Chưa có đủ tín hiệu gần đây để đề xuất điểm cần ôn."
+                : recentPractice >= 3
+                    ? "Gần đây chủ đề này thường cần thêm gợi ý; thử một bài tập ngắn để kiểm tra lại."
+                    : recentProgress >= 3 && recentProgress > recentPractice
+                        ? "Bạn thường tự giải thích hoặc áp dụng được ý này; thử bài toán có thêm một bước mới."
+                        : "Có cả lúc tự áp dụng và lúc cần gợi ý; luyện thêm một tình huống mới để xác định bước tiếp theo.";
+            return new ChatLearningTopic(item.Topic, item.Skill, item.Observations,
+                item.ProgressSignals, item.PracticeSignals, confidence, pattern, item.LastSeen);
+        }).ToArray();
+        return new ChatLearningSnapshot(skills, skills.Length == 0
+            ? "Khi bạn trao đổi về kiến thức hoặc code, Đệ Tốt sẽ âm thầm ghi nhận tín hiệu lặp lại để cá nhân hóa gợi ý."
+            : $"Đã ghi nhận tín hiệu học ở {skills.Length} kỹ năng. Chỉ mẫu hình lặp lại mới được dùng để gợi ý ôn tập.");
+    }
+
+    private static string CleanLabel(string value, int maximum)
+    {
+        var cleaned = Regex.Replace(value.Trim(), @"[\r\n\t\p{Cc}]", " ");
+        var compact = string.Join(' ', cleaned.Split(' ', StringSplitOptions.RemoveEmptyEntries)).Trim();
+        return compact[..Math.Min(compact.Length, maximum)];
+    }
+
+    private static string StableSkillKey(string topic, string skill)
+    {
+        var normalized = $"{topic.Trim().ToLowerInvariant()}|{skill.Trim().ToLowerInvariant()}";
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))[..24];
+    }
     public void SaveCase(Guid id, string? state)
     {
         if (state is null) File.Delete(CasePath(id));
@@ -290,6 +379,19 @@ sealed class Practice(IDataProtector protector, string directory)
     public sealed record LearningSnapshot(int Completed, string Summary, string NextStep, LearningTopic[] Topics);
     public sealed record LearningTopic(string Id, string Title, int Completed, int CorrectDiagnoses,
         int WrongDiagnoses, int GoodHandoffs, int EarlyEnds, int Mastery, string Confidence, string Signal);
+    public sealed record ChatLearningSnapshot(ChatLearningTopic[] Skills, string Summary);
+    public sealed record ChatLearningTopic(string Topic, string Skill, int Observations, int ProgressSignals,
+        int PracticeSignals, string Confidence, string Pattern, DateTimeOffset LastSeen);
+    private sealed record ChatSkillSignal(string Signal, DateTimeOffset At);
+    private sealed record ChatSkillProgress(string Topic, string Skill, int Observations, int ProgressSignals,
+        int PracticeSignals, DateTimeOffset LastSeen, ChatSkillSignal[] Recent)
+    {
+        public static ChatSkillProgress Empty(string topic, string skill) => new(topic, skill, 0, 0, 0, DateTimeOffset.UtcNow, []);
+    }
+    private sealed record ChatLearningProfile(Dictionary<string, ChatSkillProgress> Skills, Guid[] ProcessedRequests)
+    {
+        public static ChatLearningProfile Empty => new(new Dictionary<string, ChatSkillProgress>(StringComparer.Ordinal), []);
+    }
 
     private static readonly Scenario[] Scenarios =
     [

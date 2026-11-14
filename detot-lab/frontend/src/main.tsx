@@ -103,6 +103,10 @@ function App() {
     id: string; title: string; completed: number; correctDiagnoses: number; wrongDiagnoses: number;
     goodHandoffs: number; earlyEnds: number; mastery: number; confidence: string; signal: string;
   }> }>({ completed: 0, nextStep: "", topics: [] });
+  const [chatLearning, setChatLearning] = useState<{ summary: string; skills: Array<{
+    topic: string; skill: string; observations: number; progressSignals: number; practiceSignals: number;
+    confidence: string; pattern: string; lastSeen: string;
+  }> }>({ summary: "", skills: [] });
   const revisions = useRef(new Map<string, string>());
   const request = useRef<AbortController | null>(null);
   const retry = useRef<(() => void) | null>(null);
@@ -315,10 +319,11 @@ function App() {
           try {
             const response = await fetch("/api/practice/notes");
             if (!response.ok) throw new Error("Không tải được ghi chú học tập.");
-            const data: { notes: string; learning?: string; map?: typeof learningMap } = await response.json();
+            const data: { notes: string; learning?: string; map?: typeof learningMap; chatLearning?: typeof chatLearning } = await response.json();
             setPracticeNotes(data.notes);
             setPracticeLearning(data.learning ?? "");
             setLearningMap(data.map ?? { completed: 0, nextStep: "", topics: [] });
+            setChatLearning(data.chatLearning ?? { summary: "", skills: [] });
             setCalendar(false);
             setCloudStorage(false);
             setTrustedLearning(false);
@@ -350,6 +355,26 @@ function App() {
           </article>)}
         </div>}
         <p className="muted">Điểm tiến bộ được làm mượt khi còn ít lượt. Đệ Tốt chỉ lưu số liệu tổng hợp, không lưu log, mã nguồn hay nội dung trò chuyện trong bản đồ này.</p>
+        <section className="chat-learning" aria-label="Tín hiệu từ các buổi ôn code">
+          <div className="chat-learning-heading"><div><h3>Hiểu cách bạn học qua trò chuyện</h3><p>{chatLearning.summary || "Chưa có tín hiệu học tập."}</p></div>
+            {chatLearning.skills.length > 0 && <button type="button" disabled={busy} onClick={async () => {
+              if (!window.confirm("Xóa toàn bộ tín hiệu cá nhân hóa rút ra từ các buổi ôn code?")) return;
+              setBusy(true); setError("");
+              try {
+                const response = await fetch("/api/practice/chat-learning", { method: "DELETE" });
+                if (!response.ok) throw new Error("Không xóa được tín hiệu học tập.");
+                setChatLearning({ summary: "Khi bạn trao đổi về kiến thức hoặc code, Đệ Tốt sẽ âm thầm ghi nhận tín hiệu lặp lại để cá nhân hóa gợi ý.", skills: [] });
+              } catch (cause) { setError((cause as Error).message); }
+              finally { setBusy(false); }
+            }}>Xóa tín hiệu</button>}
+          </div>
+          {chatLearning.skills.length > 0 && <div className="learning-map">{chatLearning.skills.slice(0, 8).map(item => <article className="learning-topic" key={`${item.topic}-${item.skill}`}>
+            <div className="learning-topic-heading"><strong>{item.topic} · {item.skill}</strong><span>{item.confidence}</span></div>
+            <p>{item.pattern}</p>
+            <p>{item.observations} lượt được ghi nhận · tự áp dụng {item.progressSignals} · cần gợi ý {item.practiceSignals}</p>
+          </article>)}</div>}
+          <p className="muted">Sau mỗi lượt chat thường, model đang cấu hình sẽ phân loại tín hiệu học trong nền. Chỉ nhãn kỹ năng và số liệu tổng hợp được lưu mã hóa; không lưu đoạn chat. Có thể xóa tại đây.</p>
+        </section>
         <form onSubmit={async event => {
           event.preventDefault();
           setBusy(true);
