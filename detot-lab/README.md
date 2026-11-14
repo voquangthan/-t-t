@@ -48,13 +48,29 @@ Git 2.56.1 đã có trên máy. Node.js 24.22.3, .NET SDK 10.0.404 và OpenClaw 
 
 ## Chạy thử
 
-Trong Windows PowerShell 5.1 hoặc PowerShell 7, mở thư mục này và chạy bản lab đã build:
+Trong Windows PowerShell 5.1 hoặc PowerShell 7, mở thư mục `detot-lab`. Cài frontend và bản Gateway đã khóa trước lần chạy đầu tiên:
 
 ```powershell
-./Start-Lab.ps1
+npm.cmd --prefix frontend ci
+npm.cmd --prefix tests/runtime-candidate ci
 ```
 
-Nhập API key cấp trực tiếp bởi DeepSeek tại prompt ẩn cục bộ. Gateway dùng `deepseek-flash` và nhận key qua biến môi trường của tiến trình. Script dùng state riêng trong `.state/`, có thể chứa hội thoại thử. Chỉ dùng dữ liệu giả.
+Để chạy với Search và DeepSeek thật, nhập các khóa trong terminal cục bộ. Search cần khóa cấp cho Microsoft Web IQ Web Search. Nếu chỉ muốn chạy Chat hoặc kiểm tra Drive, lưu khóa DeepSeek rồi chạy `./Start-Lab.ps1` trực tiếp.
+
+```powershell
+./Start-Lab.ps1 -ConfigureDeepSeek
+$env:DETOT_SEARCH_PROVIDER = 'microsoft-web'
+$searchKey = Read-Host 'Microsoft Web IQ API key' -AsSecureString
+try {
+    $env:DETOT_SEARCH_API_KEY = [Net.NetworkCredential]::new('', $searchKey).Password
+    ./Start-Lab.ps1
+} finally {
+    $searchKey.Dispose()
+    Remove-Item Env:DETOT_SEARCH_API_KEY, Env:DETOT_SEARCH_PROVIDER -ErrorAction SilentlyContinue
+}
+```
+
+DeepSeek được lưu bằng DPAPI cho tài khoản Windows hiện tại. Khi không dùng `-ConfigureDeepSeek`, launcher chấp nhận `DEEPSEEK_API_KEY` của phiên hoặc hỏi bằng prompt ẩn. Gateway dùng `deepseek-flash`. Search key chỉ tồn tại trong môi trường của phiên và Backend con. Script dùng state Gateway trong `.state/`, có thể chứa hội thoại thử.
 
 Sau khi đổi cấu hình provider, dừng lab bằng Ctrl+C trong terminal cũ rồi chạy lại launcher để Gateway nhận key của phiên mới.
 
@@ -69,5 +85,17 @@ Ghim OpenClaw `2026.11.3` cho mục đích thử nghiệm trên loopback. Cấu 
 - Chạy `npm test` và `npm run build` trong `frontend/`.
 - Edge headless gửi câu mẫu qua ASP.NET Core, Gateway OpenClaw thật và provider giả lập trên loopback. Provider chỉ nhận `detot_lab_fixture`. Frontend hiển thị `DETOT-LAB-003`.
 - Backend từ chối origin khác và tên tool ngoài allowlist.
-- Kết nối Drive thật cần OAuth client và sự chấp thuận trực tiếp ở trình duyệt; thao tác cấp quyền chưa được thực hiện trong quá trình phát triển này.
+- Kiểm tra Drive thật qua `/api/drive/status` tại `http://localhost:5183` khi Backend đang chạy. Đạt khi `enabled`, `connected` và `available` đều là `true`. Nếu chưa kết nối, cấp quyền tại Cloud Storage trong trình duyệt.
 - DeepSeek thật còn chờ key nhập ở terminal. WSL2 còn chờ cài đặt bằng quyền quản trị.
+
+### Kết quả nghiệm thu 14/11/2026
+
+| Bước | Kết quả | Bằng chứng |
+| --- | --- | --- |
+| Backend và bản build frontend | PASS | Backend `/health` trả `ready`, build thành công, kiểm thử frontend 2/2. |
+| Gateway OpenClaw | PASS với provider giả lập | `/readyz` HTTP 200, từ chối bearer sai, gọi tool và tiếp tục lượt qua HTTP 200. |
+| Google Drive thật | PASS kết nối và liệt kê | `enabled`, `connected`, `available` đều `true`. API liệt kê 1 artifact `trusted-learning` đã có. |
+| Search thật | BLOCKED | Backend báo `configured=false`. Cần `DETOT_SEARCH_PROVIDER=microsoft-web` và `DETOT_SEARCH_API_KEY`. |
+| DeepSeek thật | BLOCKED | Thiếu `.local/deepseek-key.dpapi` và `DEEPSEEK_API_KEY` trong phiên kiểm tra. |
+| Reader, Quality Gate, RAG và đồng bộ | PASS kiểm thử cục bộ | 20/20 từ thư mục `detot-lab`. Có kiểm tra citation và bằng chứng giấy phép, trùng lặp, mâu thuẫn, prompt injection, retry khi mất Drive, checkpoint qua restart, bỏ qua manifest không đổi và thu hồi nguồn. |
+| E2E Search → Reader → Quality Gate → Drive → RAG → DeepSeek | BLOCKED | Chưa xác nhận ghi snapshot mới lên Drive hoặc citation trong câu trả lời DeepSeek với API thật. |

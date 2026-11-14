@@ -7,7 +7,7 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $root = $PSScriptRoot
-$PublicOrigin = $PublicOrigin.TrimEnd('/')
+$PublicOrigin = ([string]$PublicOrigin).TrimEnd('/')
 $workspaceOrigin = if ($PublicOrigin) { $PublicOrigin } else { "http://localhost:$WebPort" }
 $googleConfig = Join-Path $root '.local/google-client.json'
 if ($ImportGoogleOAuth) {
@@ -60,9 +60,10 @@ if ($ConfigureDeepSeek) {
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $node = Join-Path $root ".local/node-v24.22.3-win-$arch/node.exe"
 $dotnet = Join-Path $root '.local/dotnet/dotnet.exe'
-$gateway = Join-Path $root '.local/openclaw-registry/node_modules/openclaw/openclaw.mjs'
-$candidate = Join-Path $root 'tests/runtime-candidate/node_modules/openclaw/openclaw.mjs'
-if (Test-Path -LiteralPath $candidate -PathType Leaf) { $gateway = $candidate }
+$gateway = Join-Path $root 'tests/runtime-candidate/node_modules/openclaw/openclaw.mjs'
+if (!(Test-Path -LiteralPath $gateway -PathType Leaf)) {
+    throw 'Missing locked OpenClaw Gateway. From detot-lab, run npm.cmd --prefix tests/runtime-candidate ci.'
+}
 if (!(Test-Path -LiteralPath $node -PathType Leaf)) { $node = (Get-Command node.exe -ErrorAction Stop).Source }
 if (!(Test-Path -LiteralPath $dotnet -PathType Leaf)) { $dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source }
 $isolatedPorts = $WebPort -ne 5183 -or $GatewayPort -ne 18793
@@ -91,10 +92,8 @@ foreach ($port in $GatewayPort, $WebPort) {
     }
 }
 
-if ($gateway -eq $candidate) {
-    & $node (Join-Path $root 'tests/runtime-candidate/apply-retention-fix.mjs') $gateway
-    if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
-}
+& $node (Join-Path $root 'tests/runtime-candidate/apply-retention-fix.mjs') $gateway
+if ($LASTEXITCODE -ne 0) { throw 'Candidate retention patch failed.' }
 & npm.cmd --prefix (Join-Path $root 'frontend') run build
 if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Run npm ci in detot-lab/frontend and retry.' }
 & $dotnet build (Join-Path $root 'Detot.Lab.csproj') -o $buildDir
@@ -129,7 +128,6 @@ $authority = Join-Path $root '.local/copy-authority'
 if ($RestoredState -and !(Test-Path -LiteralPath $authority -PathType Container)) {
     throw 'Restore requires the existing external revocation authority.'
 }
-if ($gateway -ne $candidate) { throw 'Install the locked Gateway candidate before launching this lab.' }
 if (!$RestoredState) { New-Item -ItemType Directory -Path $authority -Force | Out-Null }
 if ($RestoredState) {
     & $node (Join-Path $root 'tests/runtime-candidate/check-restored-state.mjs') $state $authority
