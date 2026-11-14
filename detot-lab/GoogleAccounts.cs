@@ -24,10 +24,11 @@ static class GoogleAccounts
             Path = callbackPath
         };
         var group = app.MapGroup("/api/google");
-        var clientId = app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
-        var secret = app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"];
+        var clientId = app.Configuration["DETOT_GOOGLE_DRIVE_CLIENT_ID"] ?? app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
+        var secret = app.Configuration["DETOT_GOOGLE_DRIVE_CLIENT_SECRET"] ?? app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"];
         var configured = (!string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret))
-            || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-client.json"));
+            || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-client.json"))
+            || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-drive-client.json"));
         var enabled = OperatingSystem.IsWindows()
             && !string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret);
         var mutex = new SemaphoreSlim(1);
