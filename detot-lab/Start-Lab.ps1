@@ -1,5 +1,5 @@
 ﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
-    [string]$ImportGoogleOAuth, [string]$RestoredState, [switch]$EnableGoogle,
+    [string]$ImportGoogleOAuth, [string]$ImportDriveOAuth, [string]$RestoredState, [switch]$EnableGoogle,
     [string]$PublicOrigin = $env:DETOT_PUBLIC_ORIGIN,
     [ValidateRange(1024,65535)][int]$WebPort = 5183,
     [ValidateRange(1024,65535)][int]$GatewayPort = 18793)
@@ -10,19 +10,24 @@ $root = $PSScriptRoot
 $PublicOrigin = ([string]$PublicOrigin).TrimEnd('/')
 $workspaceOrigin = if ($PublicOrigin) { $PublicOrigin } else { "http://localhost:$WebPort" }
 $googleConfig = Join-Path $root '.local/google-client.json'
-if ($ImportGoogleOAuth) {
-    $web = (Get-Content -LiteralPath $ImportGoogleOAuth -Raw | ConvertFrom-Json).web
-    if (!$web.client_id -or !$web.client_secret -or
-        $web.redirect_uris -cnotcontains "$workspaceOrigin/api/google/callback" -or
-        $web.redirect_uris -cnotcontains "$workspaceOrigin/api/drive/callback") {
-        throw 'Import a Google OAuth Web client JSON with the exact Gmail/Calendar and Drive callback URIs.'
+$driveConfig = Join-Path $root '.local/google-drive-client.json'
+if ($ImportGoogleOAuth -and $ImportDriveOAuth) { throw 'Import one OAuth client at a time.' }
+if ($ImportGoogleOAuth -or $ImportDriveOAuth) {
+    $file = if ($ImportDriveOAuth) { $ImportDriveOAuth } else { $ImportGoogleOAuth }
+    $configPath = if ($ImportDriveOAuth) { $driveConfig } else { $googleConfig }
+    $web = (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).web
+    if (!$web.client_id -or !$web.client_secret -or $web.redirect_uris -cnotcontains "$workspaceOrigin/api/drive/callback") {
+        throw "Import a Google OAuth Web client JSON with the exact callback: $workspaceOrigin/api/drive/callback"
+    }
+    if ($ImportGoogleOAuth -and $web.redirect_uris -cnotcontains "$workspaceOrigin/api/google/callback") {
+        throw "Import a Google OAuth Web client JSON with the exact callback: $workspaceOrigin/api/google/callback"
     }
     $googleSecret = ConvertTo-SecureString -String $web.client_secret -AsPlainText -Force
     try {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $googleConfig) -Force | Out-Null
+        New-Item -ItemType Directory -Path (Split-Path -Parent $configPath) -Force | Out-Null
         @{ clientId = $web.client_id; protectedSecret = ($googleSecret | ConvertFrom-SecureString) } |
-            ConvertTo-Json | Set-Content -LiteralPath $googleConfig -Encoding UTF8
-        Write-Host 'Google OAuth configuration saved. Gmail release setting is unchanged.'
+            ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
+        Write-Host 'Google OAuth configuration saved.'
     } finally {
         $googleSecret.Dispose()
     }
@@ -228,6 +233,7 @@ try {
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_DRIVE_LOGIN_HINT',
+        'DETOT_GOOGLE_DRIVE_CLIENT_ID','DETOT_GOOGLE_DRIVE_CLIENT_SECRET',
         'DETOT_MEMORY_CORE_PATH','DETOT_DREAMING_PATH','DETOT_MEMORY_RELATED_PATH',
         'DETOT_SEARCH_PROVIDER','DETOT_SEARXNG_BASE_URL','DETOT_SEARCH_API_KEY')) {
         $value = [Environment]::GetEnvironmentVariable($name)
@@ -237,14 +243,19 @@ try {
         $backendVariables['DETOT_PUBLIC_ORIGIN'] = $PublicOrigin
         $backendVariables['DETOT_REMOTE_PASSWORD'] = $env:DETOT_REMOTE_PASSWORD
     }
-    if (!$RestoredState -and
-        !$backendVariables['DETOT_GOOGLE_CLIENT_ID'] -and !$backendVariables['DETOT_GOOGLE_CLIENT_SECRET'] -and
-        (Test-Path -LiteralPath $googleConfig -PathType Leaf)) {
-        $saved = Get-Content -LiteralPath $googleConfig -Raw | ConvertFrom-Json
+    foreach ($client in @(
+        @{Path = $googleConfig; Prefix = 'DETOT_GOOGLE'},
+        @{Path = $driveConfig; Prefix = 'DETOT_GOOGLE_DRIVE'}
+    )) {
+        $idName = $client.Prefix + '_CLIENT_ID'
+        $secretName = $client.Prefix + '_CLIENT_SECRET'
+        if ($RestoredState -or $backendVariables[$idName] -or $backendVariables[$secretName] -or
+            !(Test-Path -LiteralPath $client.Path -PathType Leaf)) { continue }
+        $saved = Get-Content -LiteralPath $client.Path -Raw | ConvertFrom-Json
         $googleSecret = ConvertTo-SecureString -String $saved.protectedSecret
         try {
-            $backendVariables['DETOT_GOOGLE_CLIENT_ID'] = $saved.clientId
-            $backendVariables['DETOT_GOOGLE_CLIENT_SECRET'] = [Net.NetworkCredential]::new('', $googleSecret).Password
+            $backendVariables[$idName] = $saved.clientId
+            $backendVariables[$secretName] = [Net.NetworkCredential]::new('', $googleSecret).Password
         } finally {
             $googleSecret.Dispose()
         }

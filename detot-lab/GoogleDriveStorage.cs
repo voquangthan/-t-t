@@ -64,8 +64,11 @@ public sealed class GoogleDriveStorage : IStorageProvider
         _sessionsDirectory = Path.Combine(_directory, "uploads");
         _stagingDirectory = Path.Combine(_directory, "upload-staging");
         _historyPath = Path.Combine(_directory, "history.bin");
-        _clientId = app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
-        _clientSecret = app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"];
+        var driveClientId = app.Configuration["DETOT_GOOGLE_DRIVE_CLIENT_ID"];
+        var driveClientSecret = app.Configuration["DETOT_GOOGLE_DRIVE_CLIENT_SECRET"];
+        var dedicatedClient = !string.IsNullOrWhiteSpace(driveClientId) || !string.IsNullOrWhiteSpace(driveClientSecret);
+        _clientId = dedicatedClient ? driveClientId : app.Configuration["DETOT_GOOGLE_CLIENT_ID"];
+        _clientSecret = dedicatedClient ? driveClientSecret : app.Configuration["DETOT_GOOGLE_CLIENT_SECRET"];
         _loginHint = loginHint.Trim();
         _secure = secure;
         _enabled = OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(_clientId) && !string.IsNullOrWhiteSpace(_clientSecret);
