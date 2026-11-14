@@ -230,7 +230,8 @@ try {
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
     }
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_DRIVE_LOGIN_HINT',
-        'DETOT_MEMORY_CORE_PATH','DETOT_DREAMING_PATH','DETOT_MEMORY_RELATED_PATH')) {
+        'DETOT_MEMORY_CORE_PATH','DETOT_DREAMING_PATH','DETOT_MEMORY_RELATED_PATH',
+        'DETOT_SEARCH_PROVIDER','DETOT_SEARCH_API_KEY')) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value -and !$RestoredState) { $backendVariables[$name] = $value }
     }

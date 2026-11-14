@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -84,13 +85,13 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/sources", async (SourceDraft draft, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
-            try { return Results.Ok(await AddAsync(draft, context.RequestAborted)); }
+            try { var added = await AddAsync(draft, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(added); }
             catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/check", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
-            try { return Results.Ok(await CheckAsync(id, context.RequestAborted)); }
+            try { var checkedSource = await CheckAsync(id, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(checkedSource); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
             catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException)
@@ -99,19 +100,19 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/sources/{id:guid}/pause", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
-            try { return Results.Ok(await SetPausedAsync(id, true, context.RequestAborted)); }
+            try { var source = await SetPausedAsync(id, true, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(source); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/resume", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
-            try { return Results.Ok(await SetPausedAsync(id, false, context.RequestAborted)); }
+            try { var source = await SetPausedAsync(id, false, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(source); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/retry", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
-            try { return Results.Ok(await RetryAsync(id, context.RequestAborted)); }
+            try { var source = await RetryAsync(id, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(source); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/approve", async (Guid id, HttpContext context) =>
@@ -286,6 +287,7 @@ public sealed class TrustedLearningSources
         var source = GetSource(id);
         if (source.Status != "approved") throw new InvalidOperationException("Chỉ nguồn đã được phê duyệt mới được đồng bộ.");
         if (source.Paused) throw new InvalidOperationException("Nguồn đang tạm dừng.");
+        var syncTimer = Stopwatch.StartNew();
         try
         {
             await _gate.WaitAsync(cancellationToken);
@@ -310,6 +312,7 @@ public sealed class TrustedLearningSources
                     {
                         var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                             RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
+                            LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
                             CheckSummary = "Manifest Drive không đổi; bỏ qua tải tệp, trích xuất, quality processing và cập nhật RAG." };
                         ReplaceSource(current); SaveState();
                         return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
@@ -333,6 +336,7 @@ public sealed class TrustedLearningSources
                 {
                     var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                         RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
+                        LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
                         LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
                         QuarantinedDocuments = quarantinedDriveDocuments,
                         CheckSummary = "Nguồn không thay đổi; bỏ qua quality processing và cập nhật RAG." };
@@ -348,6 +352,7 @@ public sealed class TrustedLearningSources
             {
                 var current = RequireSource(id);
                 var updated = current with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
+                    LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
                     LastContentFingerprint = fingerprint, RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "success",
                     LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
                     QuarantinedDocuments = quarantinedDriveDocuments,
@@ -378,6 +383,7 @@ public sealed class TrustedLearningSources
                 var retryCount = Math.Min(currentSource.RetryCount + 1, 12);
                 var delayMinutes = Math.Min(360, Math.Pow(2, Math.Min(retryCount, 8)) * 2);
                 var current = currentSource with { LastAttemptUtc = DateTimeOffset.UtcNow, LastError = SafeError(error.Message),
+                    LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
                     RetryCount = retryCount, NextAttemptUtc = DateTimeOffset.UtcNow.AddMinutes(delayMinutes), WorkerState = "retry-wait", LastSyncStatus = "failed" };
                 ReplaceSource(current); SaveState();
             }
@@ -432,7 +438,8 @@ public sealed class TrustedLearningSources
             sources.Sum(item => item.LastQuarantined + item.QuarantinedDocuments) + _state.Knowledge.Count(item => item.State == "quarantined"),
             sources.Count(item => item.LastError is not null),
             sources.Select(item => item.LastAttemptUtc).Where(item => item.HasValue).Max(),
-            sources.Select(item => item.LastSyncUtc).Where(item => item.HasValue).Max());
+            sources.Select(item => item.LastSyncUtc).Where(item => item.HasValue).Max(),
+            _state.CloudMirrorDirty);
     }
 
     public IReadOnlyList<QuarantineView> Quarantine()
@@ -478,6 +485,7 @@ public sealed class TrustedLearningSources
     public async Task RunDueAsync(CancellationToken cancellationToken)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
+        if (_state.CloudMirrorDirty) await TryPersistCloudSnapshotAsync(cancellationToken);
         foreach (var source in _state.Sources.Where(item => item.Status == "approved" && !item.Paused &&
             (item.WorkerState is "queued" or "running" || item.NextAttemptUtc is not null ?
                 item.WorkerState is "queued" or "running" || item.NextAttemptUtc <= DateTimeOffset.UtcNow :
@@ -486,6 +494,7 @@ public sealed class TrustedLearningSources
             cancellationToken.ThrowIfCancellationRequested();
             await SyncAsync(source.Id, cancellationToken);
         }
+        if (_state.CloudMirrorDirty) await TryPersistCloudSnapshotAsync(cancellationToken);
     }
 
     public async Task RunWorkerAsync(CancellationToken cancellationToken)
@@ -582,6 +591,16 @@ public sealed class TrustedLearningSources
             var snapshots = await _drive.ListAsync("document", "trusted-learning", cancellationToken);
             foreach (var old in snapshots.Where(item => IsCloudSnapshot(item) && item.Id != progress.Artifact.Id))
                 await _drive.DeleteAsync(old.Id, cancellationToken);
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                if (_state.UpdatedUtc == snapshot.UpdatedUtc)
+                {
+                    _state = _state with { CloudMirrorDirty = false };
+                    SaveState(updateTimestamp: false);
+                }
+            }
+            finally { _gate.Release(); }
             return null;
         }
         catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or InvalidOperationException or ArgumentException)
@@ -962,7 +981,7 @@ public sealed class TrustedLearningSources
         source.Status, source.CheckedUtc, source.ApprovedUtc, source.LastSyncUtc, source.FileCount, source.LastAccepted, source.LastReview,
         source.LastDuplicate, source.CheckSummary, source.LastError, source.LicenseEvidenceUrl, source.LicenseDetectionMethod, source.QuarantineReason,
         source.Paused, source.WorkerState, source.RetryCount, source.NextAttemptUtc, source.LastAttemptUtc, source.LastSyncStatus,
-        source.LastQuarantined, source.QuarantinedDocuments);
+        source.LastQuarantined, source.QuarantinedDocuments, source.LastDurationMilliseconds);
 
     private Source GetSource(Guid id) => _state.Sources.FirstOrDefault(item => item.Id == id) ?? throw new KeyNotFoundException();
     private Source RequireSource(Guid id) => GetSource(id);
@@ -984,14 +1003,15 @@ public sealed class TrustedLearningSources
     private void SaveState(bool updateTimestamp = true)
     {
         if (_state.Corrupt) throw new InvalidOperationException("Kho học bị lỗi; dữ liệu hiện tại được giữ nguyên để tránh ghi đè.");
-        if (updateTimestamp) _state = _state with { UpdatedUtc = DateTimeOffset.UtcNow };
+        if (updateTimestamp) _state = _state with { UpdatedUtc = DateTimeOffset.UtcNow, CloudMirrorDirty = true };
         Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
         var temp = _path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try { File.WriteAllText(temp, _protector.Protect(JsonSerializer.Serialize(_state, Json))); File.Move(temp, _path, true); }
         finally { try { File.Delete(temp); } catch (IOException) { } }
     }
 
-    private sealed record State(Source[] Sources, KnowledgeItem[] Knowledge, DateTimeOffset UpdatedUtc = default, bool Corrupt = false);
+    private sealed record State(Source[] Sources, KnowledgeItem[] Knowledge, DateTimeOffset UpdatedUtc = default, bool Corrupt = false,
+        bool CloudMirrorDirty = false);
     private sealed record CloudSnapshot(int Version, Source[] Sources, KnowledgeItem[] Knowledge, DateTimeOffset UpdatedUtc);
     private sealed record Source(Guid Id, string Type, string Name, string Scope, string? AccessPermission, string License, string LicenseUrl,
         string Status, bool Enabled, DateTimeOffset CreatedUtc, DateTimeOffset? CheckedUtc, DateTimeOffset? ApprovedUtc,
@@ -1000,7 +1020,7 @@ public sealed class TrustedLearningSources
         string? LicenseDetectionMethod = null, string? QuarantineReason = null, bool Paused = false, int RetryCount = 0,
         DateTimeOffset? NextAttemptUtc = null, DateTimeOffset? LastAttemptUtc = null, string WorkerState = "idle",
         string LastSyncStatus = "never", string? LastContentFingerprint = null, int LastQuarantined = 0, int QuarantinedDocuments = 0,
-        string? LastManifestFingerprint = null);
+        string? LastManifestFingerprint = null, long LastDurationMilliseconds = 0);
     private sealed record SourceDocument(string Title, string Citation, string License, string Text);
     private sealed record KnowledgeItem(Guid Id, Guid SourceId, string SourceName, string Title, string Text,
         string Citation, string License, string Hash, string State, DateTimeOffset UpdatedUtc,
@@ -1015,9 +1035,10 @@ public sealed class TrustedLearningSources
         int FileCount, int LastAccepted, int LastReview, int LastDuplicate, string? CheckSummary, string? LastError,
         string? LicenseEvidenceUrl, string? LicenseDetectionMethod, string? QuarantineReason, bool Paused, string WorkerState,
         int RetryCount, DateTimeOffset? NextAttemptUtc, DateTimeOffset? LastAttemptUtc, string LastSyncStatus,
-        int LastQuarantined, int QuarantinedDocuments);
+        int LastQuarantined, int QuarantinedDocuments, long LastDurationMilliseconds);
     public sealed record LearningDashboard(int SourceCount, int ApprovedCount, int PausedCount, int IndexedChunks,
-        int DuplicateChunks, int QuarantinedItems, int ErrorCount, DateTimeOffset? LastAttemptUtc, DateTimeOffset? LastSyncUtc);
+        int DuplicateChunks, int QuarantinedItems, int ErrorCount, DateTimeOffset? LastAttemptUtc, DateTimeOffset? LastSyncUtc,
+        bool CloudMirrorPending);
     public sealed record QuarantineView(string Type, Guid SourceId, string Source, string Reason, string Citation,
         string? Hash, DateTimeOffset? UpdatedUtc);
     public sealed record KnowledgeView(string Text, string Source, string Citation, string License, string Sha256, int Relevance);

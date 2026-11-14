@@ -7,6 +7,7 @@ type Source = {
   checkSummary?: string | null; lastError?: string | null; licenseEvidenceUrl?: string | null; licenseDetectionMethod?: string | null;
   quarantineReason?: string | null; paused: boolean; workerState: string; retryCount: number; nextAttemptUtc?: string | null;
   lastAttemptUtc?: string | null; lastSyncStatus: string; lastQuarantined: number; quarantinedDocuments: number;
+  lastDurationMilliseconds: number;
 };
 type DriveScope = { id: string; name: string; files: number };
 type DiscoveryStatus = { configured: boolean; provider: string };
@@ -14,7 +15,7 @@ type SearchCandidate = { title: string; url: string; domain: string; description
 type DiscoveryResponse = { provider: string; candidates: SearchCandidate[] };
 type Knowledge = { text: string; source: string; citation: string; license: string; sha256: string; relevance: number };
 type ReviewItem = { hash: string; sourceName: string; title: string; text: string; citation: string; license: string };
-type Dashboard = { sourceCount: number; approvedCount: number; pausedCount: number; indexedChunks: number; duplicateChunks: number; quarantinedItems: number; errorCount: number; lastAttemptUtc?: string | null; lastSyncUtc?: string | null };
+type Dashboard = { sourceCount: number; approvedCount: number; pausedCount: number; indexedChunks: number; duplicateChunks: number; quarantinedItems: number; errorCount: number; lastAttemptUtc?: string | null; lastSyncUtc?: string | null; cloudMirrorPending: boolean };
 type Quarantine = { type: string; sourceId: string; source: string; reason: string; citation: string; hash?: string | null; updatedUtc?: string | null };
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -145,7 +146,7 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
 
   return <section className="transcript trusted-learning">
     <div className="cloud-heading"><div><h1>Nguồn học</h1><p>Backend tự phát hiện giấy phép từ metadata có bằng chứng. Nguồn chưa rõ license hoặc chưa được phép sẽ bị cách ly.</p></div><button disabled={busy} onClick={() => void reload()}>Làm mới</button></div>
-    {dashboard && <div className="cloud-footnote"><strong>Kho kiến thức:</strong> {dashboard.sourceCount} nguồn · {dashboard.approvedCount} đang học · {dashboard.pausedCount} tạm dừng · {dashboard.indexedChunks} đoạn đã lập chỉ mục · {dashboard.duplicateChunks} trùng · {dashboard.quarantinedItems} cách ly · {dashboard.errorCount} lỗi. Lần chạy: {date(dashboard.lastAttemptUtc)} · lần đồng bộ: {date(dashboard.lastSyncUtc)}.</div>}
+    {dashboard && <div className="cloud-footnote"><strong>Kho kiến thức:</strong> {dashboard.sourceCount} nguồn · {dashboard.approvedCount} đang học · {dashboard.pausedCount} tạm dừng · {dashboard.indexedChunks} đoạn đã lập chỉ mục · {dashboard.duplicateChunks} trùng · {dashboard.quarantinedItems} cách ly · {dashboard.errorCount} lỗi · Drive mirror {dashboard.cloudMirrorPending ? "đang chờ đồng bộ" : "đã cập nhật"}. Lần chạy: {date(dashboard.lastAttemptUtc)} · lần đồng bộ: {date(dashboard.lastSyncUtc)}.</div>}
     {message && <p role="status" className="cloud-notice">{message}</p>}{error && <p role="alert" className="cloud-error">{error}</p>}
     <div className="cloud-footnote"><strong>Giới hạn hiện tại:</strong> Connector nguồn chỉ đọc: website đúng một URL, GitHub README của một repository, hoặc dataset trong thư mục DETOT-AI đã chọn. Universal Reader quyết định định dạng nào trích xuất được; nguồn lớn, thiếu license hoặc ngoài phạm vi bị bỏ qua/cách ly. Manifest Drive không đổi sẽ không tải lại artifact. Bản chỉ mục có citation được đồng bộ vào Drive; worker kiểm tra mỗi 15 phút, đồng bộ thay đổi và làm mới tối đa sau 6 giờ.</div>
     <form className="cloud-upload" onSubmit={event => void discover(event)}>
@@ -183,7 +184,7 @@ export function TrustedLearning({ initialRequest }: { initialRequest?: { topic: 
       {source.licenseEvidenceUrl && <p>Giấy phép {source.license} · bằng chứng: <a href={source.licenseEvidenceUrl} target="_blank" rel="noreferrer">{source.licenseDetectionMethod || source.licenseEvidenceUrl}</a></p>}
       {source.quarantineReason && <p role="alert">Lý do cách ly: {source.quarantineReason}</p>}
       <p>Kiểm tra: {date(source.checkedUtc)} · Duyệt: {date(source.approvedUtc)} · Đồng bộ: {date(source.lastSyncUtc)}</p>
-      <p>{source.lastAccepted} đoạn được lập chỉ mục · {source.lastReview} cần xem lại · {source.lastDuplicate} trùng · {source.lastQuarantined + source.quarantinedDocuments} cách ly · {source.lastSyncStatus} · worker {source.workerState} · retry {source.retryCount}{source.nextAttemptUtc ? ` (tiếp theo ${date(source.nextAttemptUtc)})` : ""}</p>
+      <p>{source.lastAccepted} đoạn được lập chỉ mục · {source.lastReview} cần xem lại · {source.lastDuplicate} trùng · {source.lastQuarantined + source.quarantinedDocuments} cách ly · {source.lastSyncStatus} · worker {source.workerState} · retry {source.retryCount} · lần chạy gần nhất {source.lastDurationMilliseconds} ms{source.nextAttemptUtc ? ` (tiếp theo ${date(source.nextAttemptUtc)})` : ""}</p>
       <div className="cloud-actions">{source.status !== "approved" && <button disabled={busy} onClick={() => void mutate(source.id, "check")}>Kiểm tra lại</button>}{source.status === "checked" && <button disabled={busy} onClick={() => void mutate(source.id, "approve")}>Phê duyệt</button>}{source.status === "approved" && <><button disabled={busy} onClick={() => void mutate(source.id, "sync")}>Đồng bộ ngay</button><button disabled={busy} onClick={() => void mutate(source.id, source.paused ? "resume" : "pause")}>{source.paused ? "Tiếp tục" : "Tạm dừng"}</button></>}{source.lastError && <button disabled={busy} onClick={() => void mutate(source.id, "retry")}>Thử lại</button>}<button disabled={busy} onClick={() => void mutate(source.id, "delete")}>Thu hồi và xóa chỉ mục</button></div>
     </article>)}</div>
     <div className="cloud-list"><h2>Ứng viên cần xem lại · {review.length}</h2>{review.length === 0 ? <p>Chưa có trích đoạn bị đánh dấu mâu thuẫn tiềm năng.</p> : review.map(item => <article className="cloud-item" key={item.hash}><strong>{item.sourceName} · {item.license}</strong><p>{item.text}</p><a href={item.citation.startsWith("https://") ? item.citation : undefined} target="_blank" rel="noreferrer">Mở nguồn gốc</a><button disabled={busy} onClick={() => void acceptReview(item.hash)}>Duyệt trích đoạn</button></article>)}</div>
