@@ -73,10 +73,30 @@ if (!(Test-Path -LiteralPath $node -PathType Leaf)) { $node = (Get-Command node.
 if (!(Test-Path -LiteralPath $dotnet -PathType Leaf)) { $dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source }
 $isolatedPorts = $WebPort -ne 5183 -or $GatewayPort -ne 18793
 if ($WebPort -eq $GatewayPort) { throw 'Backend and Gateway ports must differ.' }
-$buildDir = if ($isolatedPorts) { Join-Path $root ".local/build-$WebPort-$GatewayPort" } else { Join-Path $root 'bin/Debug/net10.0' }
+$runtimeDir = Join-Path $root ".local/runtime-$WebPort-$GatewayPort"
+$buildDir = Join-Path $runtimeDir 'build'
+$runtimeManifest = Join-Path $runtimeDir 'processes.json'
 $app = Join-Path $buildDir 'Detot.Lab.dll'
 foreach ($path in $node, $dotnet, $gateway) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing lab dependency: $path" }
+}
+
+if (Test-Path -LiteralPath $runtimeManifest -PathType Leaf) {
+    $tracked = Get-Content -LiteralPath $runtimeManifest -Raw | ConvertFrom-Json
+    foreach ($entry in @($tracked.processes)) {
+        try {
+            $process = Get-Process -Id ([int]$entry.id) -ErrorAction Stop
+            $sameProcess = $process.ProcessName -eq $entry.name -and
+                [Math]::Abs(($process.StartTime.ToUniversalTime().Ticks - [long]$entry.startTicks)) -lt [TimeSpan]::TicksPerSecond
+            if ($sameProcess) {
+                $process.Kill($true)
+                $process.WaitForExit(10000) | Out-Null
+            }
+        } catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
+            # The tracked process has already exited.
+        }
+    }
+    Remove-Item -LiteralPath $runtimeManifest -Force
 }
 
 foreach ($port in $GatewayPort, $WebPort) {
@@ -167,6 +187,15 @@ function Start-LabChild($Executable, $Arguments, $Variables) {
     [Diagnostics.Process]::Start($info)
 }
 
+function Save-LabProcesses {
+    $children = @($appProcess, $gatewayProcess) | Where-Object { $_ }
+    $records = foreach ($child in $children) {
+        [pscustomobject]@{ id = $child.Id; name = $child.ProcessName; startTicks = $child.StartTime.ToUniversalTime().Ticks }
+    }
+    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+    [IO.File]::WriteAllText($runtimeManifest, (@{ processes = @($records) } | ConvertTo-Json -Depth 4))
+}
+
 function Stop-LabChild($Child) {
     try {
         if (!$Child.HasExited) {
@@ -197,6 +226,7 @@ try {
         DETOT_COPY_AUTHORITY_DIR = $authority
         DETOT_RESTORE_AUTHORITY = if ($RestoredState) { $authority } else { '' }
     }
+    Save-LabProcesses
     $provider = $null
     $key.Dispose()
     $key = $null
@@ -261,6 +291,7 @@ try {
         }
     }
     $appProcess = Start-LabChild $dotnet @($app) $backendVariables
+    Save-LabProcesses
     $backendVariables.Clear()
     $token = $null
     Write-Host "Open $workspaceOrigin/workspace. Press Ctrl+C here to stop."
@@ -274,4 +305,5 @@ try {
     foreach ($child in $appProcess, $gatewayProcess) {
         if ($child) { Stop-LabChild $child }
     }
+    if (Test-Path -LiteralPath $runtimeManifest -PathType Leaf) { Remove-Item -LiteralPath $runtimeManifest -Force }
 }
