@@ -5,6 +5,7 @@ import { GoogleProfiles } from "./GoogleProfiles";
 import { CloudStorage } from "./CloudStorage";
 import { TrustedLearning } from "./TrustedLearning";
 import { MemoryReview } from "./MemoryReview";
+import { AgenticTasks } from "./AgenticTasks";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
@@ -85,6 +86,7 @@ function App() {
   const [cloudStorage, setCloudStorage] = useState(() => new URLSearchParams(location.search).has("drive"));
   const [trustedLearning, setTrustedLearning] = useState(false);
   const [memoryReview, setMemoryReview] = useState(false);
+  const [agenticTasks, setAgenticTasks] = useState(false);
   const [learningIntent, setLearningIntent] = useState<LearningIntent>();
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string | undefined>(() => {
@@ -185,7 +187,7 @@ function App() {
       setBusy(false);
     }
   }
-  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(false); setActive(id); setDraft(""); setAttachments([]); setSide(false); setError(""); retry.current = null; };
+  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(false); setAgenticTasks(false); setActive(id); setDraft(""); setAttachments([]); setSide(false); setError(""); retry.current = null; };
 
   const addAttachments = (incoming: File[]) => {
     const combined = [...attachments, ...incoming];
@@ -327,9 +329,10 @@ function App() {
         </div>)}
       </nav>
       <div className="sidebar-footer">
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(true); setTrustedLearning(false); setMemoryReview(false); setPracticeNotes(undefined); setSide(false); }}>Cloud Storage</button>{" "}
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setMemoryReview(false); setPracticeNotes(undefined); setSide(false); }}>Nguồn học</button>{" "}
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(true); setPracticeNotes(undefined); setSide(false); }}>Dreaming · rà soát ký ức</button>{" "}
+        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(true); setTrustedLearning(false); setMemoryReview(false); setAgenticTasks(false); setPracticeNotes(undefined); setSide(false); }}>Cloud Storage</button>{" "}
+        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setMemoryReview(false); setAgenticTasks(false); setPracticeNotes(undefined); setSide(false); }}>Nguồn học</button>{" "}
+        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(true); setAgenticTasks(false); setPracticeNotes(undefined); setSide(false); }}>Dreaming · rà soát ký ức</button>{" "}
+        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(false); setAgenticTasks(true); setPracticeNotes(undefined); setSide(false); }}>Việc & nhắc lịch</button>{" "}
         <button disabled={busy} onClick={() => { select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true); }}>Ca trực giả lập</button>{" "}
         <button disabled={busy} onClick={async () => {
           setBusy(true);
@@ -414,7 +417,7 @@ function App() {
           <button type="button" disabled={busy} onClick={() => setPracticeNotes(undefined)}>Đóng</button>
         </form>
       </section>}
-      {memoryReview ? <MemoryReview /> : cloudStorage ? <CloudStorage /> : trustedLearning ? <TrustedLearning initialRequest={learningIntent} /> : calendar ? <Calendar /> : <>
+      {agenticTasks ? <AgenticTasks /> : memoryReview ? <MemoryReview /> : cloudStorage ? <CloudStorage /> : trustedLearning ? <TrustedLearning initialRequest={learningIntent} /> : calendar ? <Calendar /> : <>
       <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
         {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
         {conversation?.messages.map((message, index) => <article key={message.id} className={message.role}>

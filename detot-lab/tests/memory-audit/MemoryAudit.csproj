@@ -3,10 +3,14 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../MemoryIntentParser.cs" Link="MemoryIntentParser.cs" />
     <Compile Include="../../MemoryRanking.cs" Link="MemoryRanking.cs" />
+    <Compile Include="../../MemoryEmbeddings.cs" Link="MemoryEmbeddings.cs" />
+    <Compile Include="../../Practice.cs" Link="Practice.cs" />
+    <Compile Include="../../RemoteAccess.cs" Link="RemoteAccess.cs" />
   </ItemGroup>
 </Project>

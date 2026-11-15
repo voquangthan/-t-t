@@ -27,6 +27,7 @@ internal static class MemoryIntentParser
                     ordinal is >= 1 and <= 10 => ("complete", ordinal.ToString(CultureInfo.InvariantCulture), null),
                 "recall" when (value.ValueKind == JsonValueKind.Null || work is not null) &&
                     kind is (null or "task" or "device" or "person" or "preference" or "event") => ("recall", work, kind),
+                "schedule" when work is not null && kind == "task" => ("schedule", work, "task"),
                 "none" when value.ValueKind == JsonValueKind.Null && kind is null => ("none", null, null),
                 _ => ("failed", null, null)
             };

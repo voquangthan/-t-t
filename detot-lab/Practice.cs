@@ -150,6 +150,16 @@ sealed class Practice(IDataProtector protector, string directory)
         lock (memoryGate) return (Read<List<string>>(MemoryOwnersPath) ?? []).Distinct(StringComparer.Ordinal).ToArray();
     }
 
+    public void RegisterMemoryOwner(string owner)
+    {
+        lock (memoryGate)
+        {
+            var owners = Read<List<string>>(MemoryOwnersPath) ?? [];
+            if (!owners.Contains(owner, StringComparer.Ordinal))
+                Write(MemoryOwnersPath, JsonSerializer.Serialize(owners.Append(owner).Order(StringComparer.Ordinal).ToList(), Json));
+        }
+    }
+
     public sealed record ReflectionBatch(long Generation, int Cursor, int NextCursor, int TotalCount, ReflectionMemory[] Items);
 
     private static long Generation(List<MemoryEntry> entries) => entries.Sum(entry => (long)entry.History.Length);
@@ -471,6 +481,7 @@ sealed class Practice(IDataProtector protector, string directory)
             var index = entries.FindIndex(entry => entry.Id == id && entry.Status != "deleted");
             if (index < 0) return Results.NotFound();
             var entry = entries[index];
+            if (entry.CalendarRequestId is not null && entry.CalendarEventId is null) return Results.Conflict();
             if (entry.History.Length != version) return Results.Conflict();
             if (complete && (entry.Category != "task" || entry.Status != "open")) return Results.Conflict();
             if (!delete && !complete && value?.Trim() is not { Length: > 0 and <= 500 }) return Results.BadRequest();
@@ -482,6 +493,88 @@ sealed class Practice(IDataProtector protector, string directory)
             if (!ReadOwnerMemories(owner).Any(saved => saved.Id == id && saved.Status == status &&
                 saved.History.Length == version + 1)) throw new IOException("Memory edit could not be verified.");
             return Results.NoContent();
+        }
+    }
+
+    public object[] ListAgenticTasks(string owner)
+    {
+        lock (memoryGate)
+            return ReadOwnerMemories(owner).Where(entry => entry.Category == "task" && entry.Status != "deleted")
+                .OrderBy(entry => entry.Status == "open" ? 0 : 1).ThenByDescending(entry => entry.CreatedAt)
+                .Take(100).Select(entry => (object)new
+                {
+                    entry.Id, entry.Text, entry.Status, version = entry.History.Length,
+                    entry.CalendarEventId, entry.CalendarReminderAt, entry.CalendarRequestId,
+                    history = entry.History.TakeLast(5).ToArray()
+                }).ToArray();
+    }
+
+    public AgenticTask? GetAgenticTask(string owner, Guid id)
+    {
+        lock (memoryGate)
+        {
+            var entry = ReadOwnerMemories(owner).FirstOrDefault(item => item.Id == id && item.Category == "task");
+            return entry is null ? null : new AgenticTask(entry.Id, entry.Text, entry.Status, entry.History.Length,
+                entry.CalendarEventId, entry.CalendarReminderAt, entry.CalendarRequestId);
+        }
+    }
+
+    public sealed record AgenticTask(Guid Id, string Text, string Status, int Version,
+        string? CalendarEventId, DateTimeOffset? CalendarReminderAt, Guid? CalendarRequestId);
+
+    public (int Status, int Version) ReserveTaskCalendarReminder(string owner, Guid id, int version, Guid requestId)
+    {
+        lock (memoryGate)
+        {
+            var entries = ReadOwnerMemories(owner);
+            var index = entries.FindIndex(entry => entry.Id == id && entry.Category == "task");
+            if (index < 0) return (404, 0);
+            var entry = entries[index];
+            if (entry.Status != "open" || entry.CalendarEventId is not null) return (409, entry.History.Length);
+            if (entry.CalendarRequestId == requestId) return (200, entry.History.Length);
+            if (requestId == Guid.Empty || entry.CalendarRequestId is not null || entry.History.Length != version)
+                return (409, entry.History.Length);
+            entries[index] = entry with
+            {
+                CalendarRequestId = requestId,
+                History = [..entry.History, new MemoryChange("calendar-reminder-reserved", DateTimeOffset.UtcNow,
+                    null, requestId, entry.Status, entry.Status, owner)]
+            };
+            WriteMemories(owner, entries);
+            var saved = ReadOwnerMemories(owner).FirstOrDefault(item => item.Id == id);
+            return saved?.CalendarRequestId == requestId && saved.History.Length == version + 1
+                ? (200, saved.History.Length) : (500, 0);
+        }
+    }
+
+    public IResult LinkTaskToCalendar(string owner, Guid id, int version, Guid requestId,
+        string calendarEventId, DateTimeOffset reminderAt)
+    {
+        lock (memoryGate)
+        {
+            if (requestId == Guid.Empty || !calendarEventId.StartsWith("detot", StringComparison.Ordinal) ||
+                calendarEventId.Length != 37) return Results.BadRequest();
+            var entries = ReadOwnerMemories(owner);
+            var index = entries.FindIndex(entry => entry.Id == id && entry.Category == "task" && entry.Status == "open");
+            if (index < 0) return Results.NotFound();
+            var entry = entries[index];
+            if (entry.CalendarRequestId == requestId && entry.CalendarEventId == calendarEventId)
+                return Results.Ok(new { id = entry.Id, linked = true, version = entry.History.Length });
+            if (entry.History.Length != version || entry.Status != "open" || entry.CalendarRequestId != requestId ||
+                entry.CalendarEventId is not null) return Results.Conflict();
+            entries[index] = entry with
+            {
+                CalendarEventId = calendarEventId,
+                CalendarReminderAt = reminderAt,
+                CalendarRequestId = requestId,
+                History = [..entry.History, new MemoryChange("calendar-reminder-linked", DateTimeOffset.UtcNow,
+                    null, requestId, entry.Status, entry.Status, owner)]
+            };
+            WriteMemories(owner, entries);
+            var saved = ReadOwnerMemories(owner).FirstOrDefault(item => item.Id == id);
+            if (saved?.CalendarEventId != calendarEventId || saved.CalendarRequestId != requestId ||
+                saved.History.Length != version + 1) return Results.Problem("Không xác nhận được liên kết nhắc lịch.", statusCode: 500);
+            return Results.Ok(new { id, linked = true, version = saved.History.Length });
         }
     }
 
@@ -517,7 +610,9 @@ sealed class Practice(IDataProtector protector, string directory)
     }
 
     private sealed record MemoryEntry(Guid Id, string Category, string Text, Guid? ConversationId,
-        DateTimeOffset? CreatedAt, string Status, string Source, double? Confidence, MemoryChange[] History, string? OwnerId = null);
+        DateTimeOffset? CreatedAt, string Status, string Source, double? Confidence, MemoryChange[] History,
+        string? OwnerId = null, string? CalendarEventId = null, DateTimeOffset? CalendarReminderAt = null,
+        Guid? CalendarRequestId = null);
     private sealed record MemoryChange(string Action, DateTimeOffset At, Guid? ConversationId, Guid? RequestId,
         string? BeforeStatus = null, string? AfterStatus = null, string? OwnerId = null);
     private sealed record MemoryChoice(DateTimeOffset ExpiresAt, MemoryCandidate[] Candidates);

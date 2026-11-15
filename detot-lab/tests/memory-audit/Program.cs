@@ -1,6 +1,52 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+
+if (args is ["agentic"])
+{
+    var agenticRoot = Path.Combine(Path.GetTempPath(), "detot-agentic-memory-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(agenticRoot);
+    try
+    {
+        var protection = new EphemeralDataProtectionProvider();
+        var practice = new Practice(protection.CreateProtector("Detot.Practice.v1"), agenticRoot);
+        var owner = "owner-a";
+        var otherOwner = "owner-b";
+        var saveRequest = Guid.NewGuid();
+        var saveReply = practice.ApplyMemory(owner, "save", "agentic reminder test", "task", null,
+            saveRequest, NullLogger.Instance);
+        var idText = saveReply.Split(' ').Last().TrimEnd('.');
+        Require(Guid.TryParse(idText, out var taskId));
+        var task = practice.GetAgenticTask(owner, taskId)!;
+        Require(task.Status == "open" && task.Version == 1 && task.CalendarEventId is null);
+        Require(practice.GetAgenticTask(otherOwner, taskId) is null);
+
+        var requestId = Guid.NewGuid();
+        var firstReservation = practice.ReserveTaskCalendarReminder(owner, taskId, task.Version, requestId);
+        Require(firstReservation.Status == 200 && firstReservation.Version == 2);
+        var retry = practice.ReserveTaskCalendarReminder(owner, taskId, task.Version, requestId);
+        Require(retry == firstReservation);
+        Require(practice.ReserveTaskCalendarReminder(owner, taskId, firstReservation.Version, Guid.NewGuid()).Status == 409);
+        Require(((IStatusCodeHttpResult)practice.EditMemory(owner, taskId, firstReservation.Version, null, false, complete: true)).StatusCode == 409);
+
+        var eventId = "detot" + requestId.ToString("N");
+        Require(((IStatusCodeHttpResult)practice.LinkTaskToCalendar(owner, taskId, firstReservation.Version,
+            requestId, eventId, DateTimeOffset.UtcNow.AddDays(1))).StatusCode == 200);
+        Require(((IStatusCodeHttpResult)practice.LinkTaskToCalendar(owner, taskId, firstReservation.Version,
+            requestId, eventId, DateTimeOffset.UtcNow.AddDays(1))).StatusCode == 200);
+        var restarted = new Practice(protection.CreateProtector("Detot.Practice.v1"), agenticRoot);
+        var linked = restarted.GetAgenticTask(owner, taskId)!;
+        Require(linked.CalendarEventId == eventId && linked.CalendarRequestId == requestId && linked.Version == 3);
+        Require(((IStatusCodeHttpResult)restarted.EditMemory(owner, taskId, linked.Version, null, false, complete: true)).StatusCode == 204);
+        Require(restarted.GetAgenticTask(owner, taskId) is { Status: "done", CalendarEventId: not null });
+        Require(!Directory.GetFiles(agenticRoot, "*.bin").Any(path => File.ReadAllText(path).Contains("agentic reminder test", StringComparison.Ordinal)));
+        Console.WriteLine("PASS: encrypted task reminder reservation, retry, concurrency, owner isolation, link idempotency, restart and completion.");
+    }
+    finally { try { Directory.Delete(agenticRoot, recursive: true); } catch { } }
+    return;
+}
 
 if (args is ["ranking"])
 {
@@ -22,7 +68,11 @@ if (args is ["parser"])
         Require(MemoryIntentParser.Parse(output, "Nhớ việc máy in", false).Intent == "failed");
     Require(MemoryIntentParser.Parse("""{"intent":"save","work":"máy in","category":"task"}""",
         "Nhớ việc máy in", false).Intent == "save");
-    Console.WriteLine("PASS: production parser rejected false confirmation, malformed JSON and invalid schema.");
+    Require(MemoryIntentParser.Parse("""{"intent":"schedule","work":"kiểm tra máy in","category":"task"}""",
+        "Nhắc mình kiểm tra máy in ngày mai", false).Intent == "schedule");
+    Require(MemoryIntentParser.Parse("""{"intent":"schedule","work":"máy in","category":"device"}""",
+        "Nhắc mình máy in ngày mai", false).Intent == "failed");
+    Console.WriteLine("PASS: production parser rejected false confirmation, malformed schema and unsafe reminder classification.");
     return;
 }
 
