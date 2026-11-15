@@ -34,6 +34,7 @@ body{overflow:hidden}
 .app.nav-collapsed{grid-template-columns:76px minmax(0,1fr)}
 .app.nav-collapsed.with-chat-history{grid-template-columns:76px 258px minmax(0,1fr)}
 .app-sidebar,.chat-history{min-width:0;min-height:0;height:100%;position:relative;display:flex;flex-direction:column;overflow:visible;background:var(--card);border-right:1px solid var(--line);z-index:5}
+.app-sidebar:has(.account-menu[open]){z-index:15}
 .app-sidebar{padding:16px 12px 12px;gap:14px}
 .brand{display:flex;align-items:center;gap:11px;padding:2px 9px 10px;min-height:48px;font-weight:700;font-size:17px}
 .brand .mark{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:color-mix(in srgb,var(--accent) 13%,var(--card));color:var(--accent);font-size:20px}
