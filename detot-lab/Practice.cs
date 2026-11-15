@@ -120,6 +120,41 @@ sealed class Practice(IDataProtector protector, string directory)
         }
     }
 
+    public string UpdateMemory(string owner, Guid id, string value, Guid? source, Guid? requestId, ILogger logger)
+    {
+        if (id == Guid.Empty || requestId is not { } request || request == Guid.Empty ||
+            value.Trim() is not { Length: > 0 and <= 500 } updated)
+            return "Chưa cập nhật. Thiếu mã, nội dung hợp lệ hoặc mã yêu cầu.";
+
+        lock (memoryGate)
+        {
+            var entries = ReadOwnerMemories(owner);
+            var index = entries.FindIndex(entry => entry.Id == id && entry.Status != "deleted");
+            if (index < 0) return "Không tìm thấy ký ức có mã này trong tài khoản hiện tại.";
+            var entry = entries[index];
+            if (entry.CalendarRequestId is not null && entry.CalendarEventId is null)
+                return "Ký ức đang được liên kết với thao tác lịch; chưa cập nhật để tránh xung đột.";
+            if (entry.History.Any(change => change.RequestId == request))
+                return entry.Text == updated
+                    ? $"Đã cập nhật ký ức · mã {id:D}."
+                    : "Yêu cầu cập nhật này đã được dùng cho nội dung khác. Chưa thay đổi ký ức.";
+
+            entries[index] = entry with
+            {
+                Text = updated,
+                History = [..entry.History, new MemoryChange("edited", DateTimeOffset.UtcNow, source, request,
+                    entry.Status, entry.Status, owner)]
+            };
+            WriteMemories(owner, entries);
+            var saved = ReadOwnerMemories(owner).FirstOrDefault(item => item.Id == id);
+            if (saved?.Text != updated || saved.History.Length != entry.History.Length + 1 ||
+                saved.History[^1].RequestId != request || saved.History[^1].Action != "edited")
+                throw new IOException("Memory edit could not be verified.");
+            logger.LogInformation("Memory persistence verified after edit.");
+            return $"Đã cập nhật ký ức · mã {id:D}.";
+        }
+    }
+
     private List<MemoryEntry> ReadOwnerMemories(string owner) =>
         (Read<List<MemoryEntry>>(OwnerMemoryPath(owner)) ?? []).Where(entry => entry.OwnerId == owner).ToList();
 

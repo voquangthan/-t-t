@@ -23,10 +23,24 @@ if (args is ["agentic"])
         Require(task.Status == "open" && task.Version == 1 && task.CalendarEventId is null);
         Require(practice.GetAgenticTask(otherOwner, taskId) is null);
 
+        var editedText = "Kiểm tra lại in thử sau khi cập nhật driver.";
+        var editRequest = Guid.NewGuid();
+        Require(practice.UpdateMemory(owner, taskId, editedText, null, editRequest, NullLogger.Instance)
+            .Contains("Đã cập nhật", StringComparison.Ordinal));
+        var edited = practice.GetAgenticTask(owner, taskId)!;
+        Require(edited.Text == editedText && edited.Version == 2);
+        Require(practice.GetAgenticTask(otherOwner, taskId) is null);
+        Require(practice.UpdateMemory(owner, taskId, editedText, null, editRequest, NullLogger.Instance)
+            .Contains("Đã cập nhật", StringComparison.Ordinal));
+        Require(practice.GetAgenticTask(owner, taskId)!.Version == 2);
+        Require(practice.UpdateMemory(owner, taskId, "different content", null, editRequest, NullLogger.Instance)
+            .Contains("Chưa thay đổi", StringComparison.Ordinal));
+        Require(practice.GetAgenticTask(owner, taskId)!.Text == editedText);
+
         var requestId = Guid.NewGuid();
-        var firstReservation = practice.ReserveTaskCalendarReminder(owner, taskId, task.Version, requestId);
-        Require(firstReservation.Status == 200 && firstReservation.Version == 2);
-        var retry = practice.ReserveTaskCalendarReminder(owner, taskId, task.Version, requestId);
+        var firstReservation = practice.ReserveTaskCalendarReminder(owner, taskId, edited.Version, requestId);
+        Require(firstReservation.Status == 200 && firstReservation.Version == 3);
+        var retry = practice.ReserveTaskCalendarReminder(owner, taskId, edited.Version, requestId);
         Require(retry == firstReservation);
         Require(practice.ReserveTaskCalendarReminder(owner, taskId, firstReservation.Version, Guid.NewGuid()).Status == 409);
         Require(((IStatusCodeHttpResult)practice.EditMemory(owner, taskId, firstReservation.Version, null, false, complete: true)).StatusCode == 409);
@@ -38,11 +52,11 @@ if (args is ["agentic"])
             requestId, eventId, DateTimeOffset.UtcNow.AddDays(1))).StatusCode == 200);
         var restarted = new Practice(protection.CreateProtector("Detot.Practice.v1"), agenticRoot);
         var linked = restarted.GetAgenticTask(owner, taskId)!;
-        Require(linked.CalendarEventId == eventId && linked.CalendarRequestId == requestId && linked.Version == 3);
+        Require(linked.CalendarEventId == eventId && linked.CalendarRequestId == requestId && linked.Version == 4);
         Require(((IStatusCodeHttpResult)restarted.EditMemory(owner, taskId, linked.Version, null, false, complete: true)).StatusCode == 204);
         Require(restarted.GetAgenticTask(owner, taskId) is { Status: "done", CalendarEventId: not null });
         Require(!Directory.GetFiles(agenticRoot, "*.bin").Any(path => File.ReadAllText(path).Contains("agentic reminder test", StringComparison.Ordinal)));
-        Console.WriteLine("PASS: encrypted task reminder reservation, retry, concurrency, owner isolation, link idempotency, restart and completion.");
+        Console.WriteLine("PASS: encrypted task edit, idempotency, owner isolation, reminder reservation, link, restart and completion.");
     }
     finally { try { Directory.Delete(agenticRoot, recursive: true); } catch { } }
     return;
@@ -72,6 +86,15 @@ if (args is ["parser"])
         "Nhắc mình kiểm tra máy in ngày mai", false).Intent == "schedule");
     Require(MemoryIntentParser.Parse("""{"intent":"schedule","work":"máy in","category":"device"}""",
         "Nhắc mình máy in ngày mai", false).Intent == "failed");
+    var updateId = Guid.NewGuid();
+    var updateMessage = $"Cập nhật Memory ID {updateId:D} thành nội dung mới đã xác minh.";
+    var parsedUpdate = MemoryIntentParser.Parse(
+        $$"""{"intent":"update","work":"nội dung mới đã xác minh","category":null,"memoryId":"{{updateId:D}}"}""",
+        updateMessage, false);
+    Require(parsedUpdate.Intent == "update" && parsedUpdate.MemoryId == updateId && parsedUpdate.Work == "nội dung mới đã xác minh");
+    Require(MemoryIntentParser.Parse(
+        $$"""{"intent":"update","work":"nội dung mới","category":null,"memoryId":"{{updateId:D}}"}""",
+        "Cập nhật ký ức thành nội dung mới", false).Intent == "failed");
     Console.WriteLine("PASS: production parser rejected false confirmation, malformed schema and unsafe reminder classification.");
     return;
 }
