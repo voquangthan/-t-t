@@ -293,7 +293,7 @@ static class GoogleAccounts
             {
                 ["timeMin"] = edit.Start.ToString("O"), ["timeMax"] = edit.End.ToString("O"),
                 ["singleEvents"] = "true", ["maxResults"] = "250",
-                ["fields"] = "nextPageToken,items(id,status,transparency,summary,start/dateTime,end/dateTime)"
+                ["fields"] = "nextPageToken,items(id,status,transparency,summary,start/dateTime,end/dateTime,htmlLink)"
             };
             using var response = await CalendarCall(id, HttpMethod.Get, QueryHelpers.AddQueryString(EventsUrl, query), null, ctx, factory);
             if (!response.IsSuccessStatusCode) return CalendarError(response);
@@ -302,25 +302,42 @@ static class GoogleAccounts
             bool Is(JsonElement item, string field, string value) =>
                 item.TryGetProperty(field, out var property) && property.GetString() == value;
             var active = items.Where(item => !Is(item, "status", "cancelled")).ToArray();
-            if (active.Any(item => Is(item, "id", eventId) && Is(item, "summary", edit.Title!) &&
+            var existing = active.FirstOrDefault(item => Is(item, "id", eventId) && Is(item, "summary", edit.Title!) &&
                 item.GetProperty("start").GetProperty("dateTime").GetDateTimeOffset() == edit.Start &&
-                item.GetProperty("end").GetProperty("dateTime").GetDateTimeOffset() == edit.End))
-                return CreatedReply(alreadyExists: true);
+                item.GetProperty("end").GetProperty("dateTime").GetDateTimeOffset() == edit.End);
+            if (existing.ValueKind == JsonValueKind.Object)
+                return CreatedReply(eventId, existing.TryGetProperty("htmlLink", out var existingLink) ? existingLink.GetString() : null,
+                    alreadyExists: true);
             if (active.Any(item => !Is(item, "transparency", "transparent")))
                 return Results.Ok(new CalendarConflict("Khung giờ này đã có lịch bận trên Google Calendar. Bạn muốn chuyển sang giờ nào?"));
             if (data.RootElement.TryGetProperty("nextPageToken", out _))
                 return Results.Problem("Chưa kiểm tra được toàn bộ khung giờ trên Google Calendar. Hãy chọn khung giờ ngắn hơn.", statusCode: 409);
 
             var result = await WriteEvent(id, null, edit, ctx, factory);
-            return result is IStatusCodeHttpResult { StatusCode: 204 } ? CreatedReply() : result;
+            if (result is not IStatusCodeHttpResult { StatusCode: 204 }) return result;
+            using var verified = await CalendarCall(id, HttpMethod.Get, EventsUrl + "/" + eventId, null, ctx, factory);
+            if (!verified.IsSuccessStatusCode) return CalendarError(verified);
+            using var verifiedEvent = await JsonDocument.ParseAsync(await verified.Content.ReadAsStreamAsync(ctx.RequestAborted),
+                cancellationToken: ctx.RequestAborted);
+            var created = verifiedEvent.RootElement;
+            if (!created.TryGetProperty("id", out var verifiedId) || verifiedId.GetString() != eventId ||
+                !created.TryGetProperty("summary", out var verifiedSummary) || verifiedSummary.GetString() != edit.Title!.Trim() ||
+                !created.TryGetProperty("start", out var verifiedStart) ||
+                verifiedStart.GetProperty("dateTime").GetDateTimeOffset() != edit.Start ||
+                !created.TryGetProperty("end", out var verifiedEnd) ||
+                verifiedEnd.GetProperty("dateTime").GetDateTimeOffset() != edit.End)
+                return Results.Problem("Google Calendar chưa xác nhận sự kiện đã lưu đúng nội dung.", statusCode: 502);
+            return CreatedReply(eventId, created.TryGetProperty("htmlLink", out var link) ? link.GetString() : null);
 
-            IResult CreatedReply(bool alreadyExists = false) => Results.Ok(new
+            IResult CreatedReply(string createdEventId, string? eventUrl, bool alreadyExists = false) => Results.Ok(new
             {
                 reply = $"Đã tạo «{edit.Title}» trên Google Calendar từ {edit.Start:dd/MM/yyyy HH:mm zzz} đến {edit.End:dd/MM/yyyy HH:mm zzz}." +
                     (alreadyExists ? " Sự kiện đã có trong lịch." :
                     edit.ReminderMinutes is { Length: > 0 } minutes ? $" Google Calendar sẽ nhắc trước {string.Join(", ", minutes.Order())} phút." :
                     edit.ReminderMinutes is [] ? " Đã tắt nhắc nhở cho sự kiện này." : ""),
-                googleCalendarCreated = true
+                googleCalendarCreated = true,
+                eventId = createdEventId,
+                eventUrl
             });
         });
 

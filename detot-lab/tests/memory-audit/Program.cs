@@ -4,6 +4,27 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 
+if (args is ["calendar"])
+{
+    Require(CalendarIntentParser.Parse("{\"intent\":\"none\",\"status\":\"none\",\"title\":null,\"start\":null,\"durationMinutes\":null,\"question\":null}")
+        .Intent == "none");
+    var clarification = CalendarIntentParser.RequiredClarification("Nhắc t 1h đi Nha Trang");
+    Require(clarification is not null && clarification.Contains("01:00 sáng", StringComparison.Ordinal) &&
+        clarification.Contains("13:00 chiều", StringComparison.Ordinal));
+    Require(CalendarIntentParser.RequiredClarification("Lên lịch họp ngày mai lúc 15h") is null);
+    Require(CalendarIntentParser.RequiredClarification("Lên lịch họp ngày 2026-11-16 lúc 15h") is null);
+    Require(CalendarIntentParser.RequiredClarification("Lên lịch họp ngày mai") == "Bạn muốn tạo sự kiện lúc mấy giờ?");
+    Require(CalendarIntentParser.RequiredClarification("Nhắc t 1h đi Nha Trang\nThông tin bổ sung từ người dùng: 1 giờ chiều ngày mai") is null);
+    var ready = CalendarIntentParser.Parse("{\"intent\":\"create\",\"status\":\"ready\",\"title\":\"Họp\",\"start\":\"2026-11-16T15:00:00+07:00\",\"durationMinutes\":60,\"question\":null}");
+    Require(ready is { Intent: "create", Status: "ready", DurationMinutes: 60 });
+    var rejected = false;
+    try { CalendarIntentParser.Parse("{\"intent\":\"create\",\"status\":\"ready\",\"title\":\"Họp\"}"); }
+    catch (JsonException) { rejected = true; }
+    Require(rejected);
+    Console.WriteLine("PASS: calendar intent schema, ambiguity, missing date/time and clarification continuation guards.");
+    return;
+}
+
 if (args is ["agentic"])
 {
     var agenticRoot = Path.Combine(Path.GetTempPath(), "detot-agentic-memory-" + Guid.NewGuid().ToString("N"));
@@ -71,10 +92,11 @@ if (args is ["ranking"])
     Require(MemoryRanking.Keyword("pin", "may in") == 0);
     Require(MemoryRanking.Combine(semantic, 0) > MemoryRanking.Combine(0, 0.5));
     // Scores measured with the local BGE-M3 model on a held-out audit memory: some useful
-    // cross-language paraphrases scored 0.545-0.554 while nearby non-matches stayed below 0.534.
+    // Live BGE-M3 placed a relevant English paraphrase at 0.5335; nearby non-matches stayed below 0.53.
     Require(MemoryRanking.Combine(0.592, 0) > 0);
     Require(MemoryRanking.Combine(0.553, 0) > 0);
-    Require(MemoryRanking.Combine(0.534, 0) == 0);
+    Require(MemoryRanking.Combine(0.5335, 0) > 0);
+    Require(MemoryRanking.Combine(0.529, 0) == 0);
     Require(MemoryRanking.Combine(0.425, 0) == 0);
     Require(MemoryRanking.Combine(0.258, 0) == 0);
     Require(MemoryRanking.Combine(0.1, 0.6) > 0);

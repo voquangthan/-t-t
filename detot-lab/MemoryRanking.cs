@@ -50,6 +50,6 @@ internal static class MemoryRanking
     }
 
     internal static double Combine(double semantic, double keyword) =>
-        semantic >= 0.54 ? 0.75 * semantic + 0.25 * keyword :
+        semantic >= 0.53 ? 0.75 * semantic + 0.25 * keyword :
         keyword >= 0.6 ? 0.6 * keyword + 0.4 * semantic : 0;
 }

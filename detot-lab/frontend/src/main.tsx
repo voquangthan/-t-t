@@ -207,7 +207,9 @@ function App() {
   async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string,
     startPractice = false, files = attachments, startMiniPractice = false) {
     if ((!text.trim() && files.length === 0) || request.current) return;
-    const learning = files.length === 0 && !context && !startPractice && !base.practice ? parseLearningIntent(text) : null;
+    const previousMessage = prefix.at(-1);
+    const pendingCalendarContext = context ?? (previousMessage?.role === "assistant" ? previousMessage.calendarContext : undefined);
+    const learning = files.length === 0 && !pendingCalendarContext && !startPractice && !base.practice ? parseLearningIntent(text) : null;
     if (learning) {
       setView("learning"); setLearningIntent(learning);
       setPracticeNotes(undefined); setSide(false); setDraft(""); setError("");
@@ -229,7 +231,7 @@ function App() {
     setBusy(true);
     const controller = new AbortController();
     request.current = controller;
-    retry.current = () => void send(text, base, prefix, requestId, context, startPractice, files, startMiniPractice);
+    retry.current = () => void send(text, base, prefix, requestId, pendingCalendarContext, startPractice, files, startMiniPractice);
     try {
       let documentContext: string | undefined;
       let visionImages: string[] = [];
@@ -245,7 +247,7 @@ function App() {
         visionImages = Array.isArray(parsed.images) ? parsed.images.filter((item: unknown): item is string => typeof item === "string") : [];
       }
       await sync(target);
-      const suggestion = context || target.practice || target.miniPractice ? undefined : await suggestFromChat(user.text, controller.signal);
+      const suggestion = pendingCalendarContext || target.practice || target.miniPractice ? undefined : await suggestFromChat(user.text, controller.signal);
       if (suggestion !== undefined) {
         const assistant: Message = { id: uid(), role: "assistant", text: suggestion };
         const completed = { ...target, messages: [...target.messages, assistant] };
@@ -259,7 +261,7 @@ function App() {
         method: "POST", headers: revision
           ? { "Content-Type": "application/json", "X-Detot-History-Revision": revision }
           : { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: prompt, requestId, calendarContext: context, conversationId: target.id, startPractice,
+        body: JSON.stringify({ message: prompt, requestId, calendarContext: pendingCalendarContext, conversationId: target.id, startPractice,
           miniPractice: target.miniPractice, startMiniPractice, documentContext, visionImages,
           history: prefix.slice(-8).map(message => ({ role: message.role, text: message.text.slice(0, 450) })) }),
         signal: controller.signal,
@@ -273,7 +275,17 @@ function App() {
             : `API chat không trả về phản hồi hợp lệ (HTTP ${response.status}).`;
         throw new Error(data.detail || data.error || fallback);
       }
-      const assistant: Message = { id: uid(), role: "assistant", text: data.reply,
+      let eventUrl: string | undefined;
+      if (typeof data.eventUrl === "string") {
+        try {
+          const candidate = new URL(data.eventUrl);
+          if (candidate.protocol === "https:" &&
+            (candidate.hostname === "calendar.google.com" && candidate.pathname.startsWith("/calendar/event") ||
+              candidate.hostname === "www.google.com" && candidate.pathname === "/calendar/event" && candidate.searchParams.has("eid")))
+            eventUrl = candidate.toString();
+        } catch { /* Ignore malformed URLs returned by the provider. */ }
+      }
+      const assistant: Message = { id: uid(), role: "assistant", text: data.reply + (eventUrl ? `\n\n[Mở sự kiện trong Google Calendar](${eventUrl})` : ""),
         tool: data.googleCalendarCreated ? "Google Calendar" : data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
         calendarContext: data.calendarContext };
       const completed = { ...target, messages: [...target.messages, assistant] };
