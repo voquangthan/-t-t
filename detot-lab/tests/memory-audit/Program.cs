@@ -2,6 +2,18 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.DataProtection;
 
+if (args is ["ranking"])
+{
+    var semantic = MemoryRanking.Cosine([1, 0], [0.98f, 0.1f]);
+    var irrelevant = MemoryRanking.Cosine([1, 0], [0, 1]);
+    Require(semantic > 0.95 && irrelevant == 0);
+    Require(MemoryRanking.Keyword("may in", "may in phong ke toan") == 1);
+    Require(MemoryRanking.Keyword("pin", "may in") == 0);
+    Require(MemoryRanking.Combine(semantic, 0) > MemoryRanking.Combine(0, 0.5));
+    Console.WriteLine("PASS: hybrid ranking arithmetic with synthetic vectors.");
+    return;
+}
+
 if (args is ["parser"])
 {
     foreach (var output in new[] { "Đã ghi nhớ cho bạn.", "{", "[]",

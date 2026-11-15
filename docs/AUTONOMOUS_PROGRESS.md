@@ -1,6 +1,28 @@
 # Đệ Tốt Pro — checkpoint
 
+## Memory Core V2 — M2 Semantic Memory
+
+- Finalcheck build sạch. BGE-M3 thật: A/B PASS qua tìm kiếm, tra ID, lịch sử và CRUD; hai tệp vector riêng. Restart với revision mới tạo index mã hóa thứ hai và giữ checksum tệp cũ. Sửa/xóa/đổi trạng thái PASS. Chat mơ hồ hỏi lại, không liên quan trả rỗng, model không tồn tại fallback từ khóa. DeepSeek thật chọn trích đoạn nguyên văn phù hợp, Backend xác thực ID/đoạn trích và tự gắn nguồn.
+- Regression cuối trên tiến trình M2 cổng 5193: M1 prepare/resume PASS, Gmail search, Calendar read và Drive refresh đều 200. BGE-M3 mặc định khi Start-Lab phát hiện model có digest trên Ollama cục bộ. Không đổi cấu hình model nếu người vận hành đã chọn rõ.
+
+- Benchmark thật 36 câu mới (26 có đáp án, 10 ngoài phạm vi) trên cùng 4 ký ức. Nomic cũ Recall@2 70,5%, Precision@2 48,1%, FPR 70%, p50/p95 77/162 ms. Nomic với ngưỡng cuối 40,4%, 32,7%, 10%, 78/188 ms; câu canh chua vẫn sai. BGE-M3 cùng ngưỡng đạt 80,8%, 55,8%, 0%, 163/265 ms; câu canh chua trả 0 kết quả. BGE-M3 đã tải cục bộ, chưa đổi model mặc định. Bộ câu hỏi mới dùng cùng corpus nhỏ, cần kiểm tra thêm corpus độc lập.
+- Backend holdout build sạch. E2E xuyên chat Nomic + DeepSeek thật PASS: DeepSeek phân loại, Backend trả đúng ID và nguồn. Chưa có lượt DeepSeek tổng hợp nội dung từ bằng chứng. A/B run dừng vì test đọc ownerId ở DTO kết quả tìm kiếm; đã chuyển assertion sang API chi tiết, cần chạy lại. Chưa chạy rebuild và hồi quy Google trên bản cuối. Chưa commit M2 hoặc chuyển M3.
+
+- Benchmark Ollama thật cùng 8 câu hỏi, 6 có đáp án. Chuẩn hóa cụm Việt/Anh, bỏ từ đệm và chỉnh điểm lai đưa Recall@2 từ 91,7% lên 100% và Precision@2 từ 58,3% lên 66,7% trên câu có đáp án. Latency HTTP trước 221–1.290 ms, sau 81–788 ms trong lượt seed. Sửa/xóa và lọc trạng thái với vector thật PASS.
+- Một câu về nấu ăn vẫn trả một mục sai. Đã nâng ngưỡng cosine khi không có giao từ khóa và sửa chuẩn hóa quầy lễ tân; chưa build/đo lại sau hai thay đổi cuối. Cần dùng bộ holdout tránh tối ưu theo đúng 8 câu rồi kiểm thử xuyên chat, A/B và hồi quy Google/M1. M2 chưa commit, M3 chưa bắt đầu.
+
+- Đã chạy Ollama Windows standalone và tải `nomic-embed-text:latest` dưới `detot-lab/.local/ollama-m2`. Dùng digest model làm revision. Backend build sạch.
+- Embedding thật qua API Backend cổng 5192: bộ thử bốn ký ức, năm câu hỏi. Recall@2 trên bốn câu có đáp án lần lượt 1, 1, 1, 0,5 (trung bình 87,5%). Precision@2 trên bốn câu lần lượt 1, 0,5, 0,5, 0,5 (62,5%). Câu không liên quan trả 0 mục. Cold 1.119 ms, các lượt còn lại 49–147 ms. Index có dạng Data Protection và giữ nguyên checksum qua restart, truy vấn sau restart trả cùng điểm.
+- Chưa nghiệm thu: câu tiếng Việt chưa lấy đủ hai ký ức, còn false positives. Cần cải thiện lựa chọn model/xếp hạng, mở rộng bộ nhãn và chạy E2E xuyên chat, edit/delete/rebuild, A/B và Google regression trên bản M2. M2 chưa commit, M3 chưa bắt đầu.
+
+- Đã nối adapter Ollama loopback, cấu hình bằng `DETOT_MEMORY_EMBED_MODEL` và `DETOT_MEMORY_EMBED_REVISION`; không dùng DeepSeek Chat để sinh vector. Chưa thấy sqlite-vec có sẵn trong hồ sơ lab kiểm tra được. Index dẫn xuất mã hóa theo owner, dùng model/revision và hash văn bản để bỏ vector cũ, cập nhật dần tối đa 32 mục mỗi lần truy xuất. Kho Memory M1 giữ là nguồn dữ liệu chính.
+- API tìm kiếm và truy xuất chat dùng điểm từ khóa + cosine, lọc owner trước khi tạo embedding; API thêm lọc loại, trạng thái và thời gian. Kết quả mang ID, nguồn, hội thoại, thời điểm và confidence; ca nhiều kết quả hỏi lại.
+- Backend build đạt trước chỉnh sửa dọn index cuối. Probe thật Ollama trên 127.0.0.1:11434 bị từ chối kết nối, không có cấu hình model trong shell. M2 chưa nghiệm thu. Tiếp theo: build lại, chạy kiểm thử tích hợp hybrid với fixture, đo precision/recall/latency bằng model thật khi có provider, kiểm tra rebuild/restart và chạy regression M1/Google. Chưa commit M2 hoặc chuyển M3.
+
 ## Memory Core V2 — kết quả nghiệm thu M1
+
+- Commit local M1: `f71c423`. Các hunk Ca trực và Calendar ngoài phạm vi còn ở working tree.
+- Đã bắt đầu M2: tìm từ khóa có xếp hạng, lọc category/status sau ràng buộc owner, và hàm cosine/lai. Cần nối embedding provider thực, lưu index theo owner, thêm nguồn truy xuất xuyên chat và kiểm thử chất lượng/độ trễ. M2 chưa nghiệm thu.
 
 - Backend build sạch. DeepSeek thật qua hai việc máy in, retry, chọn đúng mục, kiểm kê độc lập và restart. Mã hóa được kiểm tra trên tệp phân vùng mới.
 - API migration thật: khôi phục từ ranh giới giả lập đã sao lưu nhưng chưa ghi đích, bỏ qua tệp tạm dở dang. Bản nguồn và bản sao cùng SHA-256, giữ nguyên ID, trạng thái, lịch sử qua kiểm kê giải mã. Ba lần chạy lại trả 409 và không tạo trùng. Tài khoản phụ không migrate, tìm, đọc hoặc xem lịch sử ký ức đã chuyển.

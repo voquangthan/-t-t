@@ -123,7 +123,85 @@ sealed class Practice(IDataProtector protector, string directory)
     private void WriteMemories(string owner, List<MemoryEntry> entries) =>
         Write(OwnerMemoryPath(owner), JsonSerializer.Serialize(entries, Json));
 
-    public IResult QueryMemory(string owner, Guid? id, string? query, bool history = false)
+    private string MemoryIndexPath(string owner, string version) =>
+        OwnerMemoryPath(owner) + "." + MemoryDigest(version) + ".vectors";
+    private sealed record MemoryVector(string Digest, float[] Values);
+    private sealed record MemoryIndex(string Version, Dictionary<Guid, MemoryVector> Vectors);
+    public sealed record MemoryHit(Guid Id, string Text, string Category, string Status, string Source,
+        Guid? ConversationId, DateTimeOffset? CreatedAt, double? Confidence, double Score);
+
+    private static string MemoryDigest(string text) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+
+    public async Task<MemoryHit[]> SearchMemoryAsync(string owner, string query, string? category, string? status,
+        DateTimeOffset? after, DateTimeOffset? before, MemoryEmbeddings embeddings, CancellationToken cancellationToken)
+    {
+        MemoryEntry[] Candidates() => ReadOwnerMemories(owner)
+            .Where(entry => entry.Status != "deleted" && (category is null || category == entry.Category) &&
+                (status is null || status == entry.Status) && (after is null || entry.CreatedAt >= after) &&
+                (before is null || entry.CreatedAt <= before))
+            .OrderByDescending(entry => entry.CreatedAt).ToArray();
+
+        var version = embeddings.Version;
+        MemoryEntry[] candidates;
+        Dictionary<Guid, MemoryVector> vectors = [];
+        lock (memoryGate)
+        {
+            candidates = Candidates();
+            if (version is not null && Read<MemoryIndex>(MemoryIndexPath(owner, version)) is { } cached && cached.Version == version)
+                vectors = cached.Vectors;
+        }
+        var normalized = Normalize(query);
+        float[]? queryVector = null;
+        if (version is not null && normalized.Length != 0 && candidates.Length > 0)
+        {
+            var missing = candidates.Where(entry => !vectors.TryGetValue(entry.Id, out var vector) ||
+                vector.Digest != MemoryDigest(entry.Text)).Take(32).ToArray();
+            var output = await embeddings.EmbedAsync([query, ..missing.Select(entry => entry.Text)], cancellationToken);
+            if (output is not null)
+            {
+                queryVector = output[0];
+                lock (memoryGate)
+                {
+                    var current = ReadOwnerMemories(owner).Where(entry => entry.Status != "deleted")
+                        .ToDictionary(entry => entry.Id, entry => MemoryDigest(entry.Text));
+                    vectors = Read<MemoryIndex>(MemoryIndexPath(owner, version)) is { } latest && latest.Version == version
+                        ? latest.Vectors : [];
+                    var pruned = false;
+                    foreach (var (id, vector) in vectors.ToArray())
+                        if (current.GetValueOrDefault(id) != vector.Digest || vector.Values.Length != queryVector.Length)
+                            pruned |= vectors.Remove(id);
+                    for (var i = 0; i < missing.Length; i++)
+                    {
+                        var digest = MemoryDigest(missing[i].Text);
+                        if (current.GetValueOrDefault(missing[i].Id) == digest)
+                            vectors[missing[i].Id] = new MemoryVector(digest, output[i + 1]);
+                    }
+                    if (missing.Length > 0 || pruned)
+                        Write(MemoryIndexPath(owner, version), JsonSerializer.Serialize(new MemoryIndex(version, vectors), Json));
+                }
+            }
+        }
+
+        lock (memoryGate)
+        {
+            return Candidates().Select(entry =>
+                {
+                    var keyword = MemoryRanking.Keyword(normalized, Normalize(entry.Text));
+                    var semantic = queryVector is not null && vectors.TryGetValue(entry.Id, out var vector) &&
+                        vector.Digest == MemoryDigest(entry.Text) ? MemoryRanking.Cosine(queryVector, vector.Values) : 0;
+                    var score = MemoryRanking.Combine(semantic, keyword);
+                    return new MemoryHit(entry.Id, entry.Text, entry.Category, entry.Status, entry.Source,
+                        entry.ConversationId, entry.CreatedAt, entry.Confidence, score);
+                })
+                .Where(hit => normalized.Length == 0 || hit.Score > 0)
+                .OrderByDescending(hit => hit.Score).ThenByDescending(hit => hit.CreatedAt)
+                .Take(100).ToArray();
+        }
+    }
+
+    public IResult QueryMemory(string owner, Guid? id, string? query, bool history = false,
+        string? category = null, string? status = null)
     {
         lock (memoryGate)
         {
@@ -134,8 +212,15 @@ sealed class Practice(IDataProtector protector, string directory)
                 return entry is null ? Results.NotFound() :
                     history ? Results.Ok(entry.History) : Results.Ok(entry);
             }
-            return Results.Ok(entries.Where(entry => string.IsNullOrWhiteSpace(query) ||
-                Normalize(entry.Text).Contains(Normalize(query), StringComparison.Ordinal)).TakeLast(100).ToArray());
+            entries = entries.Where(entry => (category is null || entry.Category == category) &&
+                (status is null || entry.Status == status));
+            if (string.IsNullOrWhiteSpace(query)) return Results.Ok(entries.TakeLast(100).ToArray());
+            var normalized = Normalize(query);
+            return Results.Ok(entries.Select(entry => (Entry: entry, Score: MemoryRanking.Keyword(normalized, Normalize(entry.Text))))
+                .Where(result => result.Score > 0)
+                .OrderByDescending(result => result.Score)
+                .ThenByDescending(result => result.Entry.CreatedAt)
+                .Take(100).Select(result => result.Entry).ToArray());
         }
     }
 

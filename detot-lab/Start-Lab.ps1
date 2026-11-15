@@ -317,9 +317,25 @@ try {
     foreach ($name in @('DETOT_GOOGLE_CLIENT_ID','DETOT_GOOGLE_CLIENT_SECRET','DETOT_GOOGLE_DRIVE_LOGIN_HINT',
         'DETOT_GOOGLE_DRIVE_CLIENT_ID','DETOT_GOOGLE_DRIVE_CLIENT_SECRET',
         'DETOT_MEMORY_CORE_PATH','DETOT_DREAMING_PATH','DETOT_MEMORY_RELATED_PATH',
+        'DETOT_MEMORY_EMBED_MODEL','DETOT_MEMORY_EMBED_REVISION',
         'DETOT_SEARCH_PROVIDER','DETOT_SEARXNG_BASE_URL','DETOT_SEARCH_API_KEY')) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value -and !$RestoredState) { $backendVariables[$name] = $value }
+    }
+    if (!$RestoredState -and !$backendVariables['DETOT_MEMORY_EMBED_MODEL'] -and
+        !$backendVariables['DETOT_MEMORY_EMBED_REVISION']) {
+        try {
+            $tags = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2
+            $embedding = $tags.models | Where-Object {
+                $_.name -eq 'bge-m3:latest' -and $_.digest -cmatch '^[a-f0-9]{64}$'
+            } | Select-Object -First 1
+            if ($embedding) {
+                $backendVariables['DETOT_MEMORY_EMBED_MODEL'] = $embedding.name
+                $backendVariables['DETOT_MEMORY_EMBED_REVISION'] = $embedding.digest
+            }
+        } catch {
+            # Keyword search remains usable when Ollama is stopped.
+        }
     }
     if ($PublicOrigin) {
         $backendVariables['DETOT_PUBLIC_ORIGIN'] = $PublicOrigin

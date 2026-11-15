@@ -71,9 +71,15 @@ if (phase === "migration") {
   const memberList = await call("GET", "/api/memory?q=member", member);
   const [entry] = JSON.parse(memberList.content);
   assert.equal(entry.text, memberText);
-  assert.equal(entry.ownerId, "memory-member");
+  assert.equal(JSON.parse((await call("GET", "/api/memory/" + entry.id, member)).content).ownerId, "memory-member");
   assert.doesNotMatch((await call("GET", "/api/memory", owner)).content, /member QA record/);
-  assert.deepEqual(JSON.parse((await call("GET", "/api/memory?q=member", owner)).content), []);
+  assert.ok(JSON.parse((await call("GET", "/api/memory?q=member", owner)).content).every(hit => hit.id !== entry.id));
+  if (process.env.DETOT_MEMORY_EMBED_MODEL) {
+    const hits = JSON.parse((await call("GET", "/api/memory?q=member%20QA%20record", owner)).content);
+    assert.ok(hits.every(hit => hit.id !== entry.id && hit.text !== memberText));
+    assert.ok(JSON.parse((await call("GET", "/api/memory?q=member%20QA%20record", member)).content)
+      .some(hit => hit.id === entry.id));
+  }
   for (const [method, suffix] of [["GET", ""], ["GET", "/history"], ["PATCH", ""], ["DELETE", "?version=1"], ["POST", "/complete"]]) {
     assert.equal((await call(method, "/api/memory/" + entry.id + suffix, owner, { text: "wrong", version: 1 })).code, 404);
   }

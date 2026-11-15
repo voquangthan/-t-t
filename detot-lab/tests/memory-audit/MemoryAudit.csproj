@@ -7,5 +7,6 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../MemoryIntentParser.cs" Link="MemoryIntentParser.cs" />
+    <Compile Include="../../MemoryRanking.cs" Link="MemoryRanking.cs" />
   </ItemGroup>
 </Project>

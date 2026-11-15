@@ -25,7 +25,8 @@ internal static class MemoryIntentParser
                 "complete" when kind is null or "task" => ("complete", work, null),
                 "select" when pendingChoice && kind is null && int.TryParse(value.GetString(), out var ordinal) &&
                     ordinal is >= 1 and <= 10 => ("complete", ordinal.ToString(CultureInfo.InvariantCulture), null),
-                "recall" when value.ValueKind == JsonValueKind.Null && kind is null => ("recall", null, null),
+                "recall" when (value.ValueKind == JsonValueKind.Null || work is not null) &&
+                    kind is (null or "task" or "device" or "person" or "preference" or "event") => ("recall", work, kind),
                 "none" when value.ValueKind == JsonValueKind.Null && kind is null => ("none", null, null),
                 _ => ("failed", null, null)
             };
