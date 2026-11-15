@@ -17,10 +17,12 @@ var publicUri = RemoteAccess.ParseOrigin(builder.Configuration["DETOT_PUBLIC_ORI
 var publicOrigin = publicUri?.GetLeftPart(UriPartial.Authority);
 if (publicUri is not null) builder.Services.AddMemoryCache();
 builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
-var googleDirectory = Path.Combine(builder.Environment.ContentRootPath, ".local", "google");
+var defaultGoogleDirectory = Path.Combine(builder.Environment.ContentRootPath, ".local", "google");
+var googleDirectory = builder.Configuration["DETOT_GOOGLE_DIRECTORY"] ?? defaultGoogleDirectory;
+var googleKeyDirectory = builder.Configuration["DETOT_GOOGLE_KEY_DIRECTORY"] ?? Path.Combine(defaultGoogleDirectory, "keys");
 if (OperatingSystem.IsWindows())
     builder.Services.AddDataProtection()
-        .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(googleDirectory, "keys")))
+        .PersistKeysToFileSystem(new DirectoryInfo(googleKeyDirectory))
         .ProtectKeysWithDpapi();
 builder.Services.AddHttpClient("google", client => client.Timeout = TimeSpan.FromSeconds(12))
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
@@ -95,6 +97,9 @@ var practice = OperatingSystem.IsWindows()
         builder.Configuration["DETOT_PRACTICE_DIRECTORY"] ??
             Path.Combine(builder.Environment.ContentRootPath, ".local", "practice"))
     : null;
+var dreamingWorker = practice is null ? null : new MemoryDreamingWorker(practice, memoryEmbeddings,
+    app.Services.GetRequiredService<IHttpClientFactory>(), builder.Configuration["DETOT_MEMORY_DEEPSEEK_KEY"],
+    app.Services.GetRequiredService<ILogger<MemoryDreamingWorker>>());
 var chatLearningGate = new SemaphoreSlim(1, 1);
 var chatHistory = publicUri is not null && OperatingSystem.IsWindows()
     ? new ChatHistory(app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("Detot.ChatHistory.v1"),
@@ -119,6 +124,11 @@ app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
     await trustedLearning.InitializeCloudSnapshotAsync(app.Lifetime.ApplicationStopping);
     await trustedLearning.RunWorkerAsync(app.Lifetime.ApplicationStopping);
 }));
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    if (dreamingWorker is not null)
+        _ = Task.Run(() => dreamingWorker.RunAsync(app.Lifetime.ApplicationStopping));
+});
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
 var deletedCalendarRequests = new HashSet<Guid>();
@@ -171,6 +181,15 @@ memory.MapGet("/{id:guid}", (HttpContext context, Guid id) =>
     practice?.QueryMemory(MemoryOwner(context), id, null) ?? Results.StatusCode(503));
 memory.MapGet("/{id:guid}/history", (HttpContext context, Guid id) =>
     practice?.QueryMemory(MemoryOwner(context), id, null, history: true) ?? Results.StatusCode(503));
+memory.MapGet("/review", (HttpContext context) =>
+    practice?.ListReflectionSuggestions(MemoryOwner(context)) ?? Results.StatusCode(503));
+memory.MapGet("/dreaming", (HttpContext context) =>
+    practice is null ? Results.StatusCode(503) : Results.Ok(practice.GetReflectionStatus(MemoryOwner(context))));
+memory.MapPost("/review/{id:guid}", (HttpContext context, Guid id, MemoryReview review) =>
+    !IsLocalMutation(context) ? Results.StatusCode(403) :
+    review.Action is not ("approve" or "edit" or "reject") || review.Text is { Length: > 500 }
+        ? Results.BadRequest() : practice?.ReviewReflectionSuggestion(MemoryOwner(context), id, review.Action, review.Text)
+            ?? Results.StatusCode(503));
 memory.MapPost("/", (HttpContext context, MemoryEdit edit) =>
     !IsLocalMutation(context) ? Results.StatusCode(403) :
     practice is null ? Results.StatusCode(503) :
@@ -839,3 +858,4 @@ record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, Ch
 record TrialEvent(string Message, string Title, DateTimeOffset Start, DateTimeOffset End);
 record CalendarEdit(string? Title, DateTimeOffset Start, DateTimeOffset End);
 record MemoryEdit(string? Text, string? Category, Guid RequestId, int Version);
+record MemoryReview(string Action, string? Text);

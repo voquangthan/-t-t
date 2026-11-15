@@ -2,6 +2,8 @@
 
 ## Memory Core V2 — M2 Semantic Memory
 
+- M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.
+
 - Finalcheck build sạch. BGE-M3 thật: A/B PASS qua tìm kiếm, tra ID, lịch sử và CRUD; hai tệp vector riêng. Restart với revision mới tạo index mã hóa thứ hai và giữ checksum tệp cũ. Sửa/xóa/đổi trạng thái PASS. Chat mơ hồ hỏi lại, không liên quan trả rỗng, model không tồn tại fallback từ khóa. DeepSeek thật chọn trích đoạn nguyên văn phù hợp, Backend xác thực ID/đoạn trích và tự gắn nguồn.
 - Regression cuối trên tiến trình M2 cổng 5193: M1 prepare/resume PASS, Gmail search, Calendar read và Drive refresh đều 200. BGE-M3 mặc định khi Start-Lab phát hiện model có digest trên Ollama cục bộ. Không đổi cấu hình model nếu người vận hành đã chọn rõ.
 
@@ -92,3 +94,12 @@
 - DeepSeek phân loại lưu, truy xuất, hoàn thành. Backend kiểm tra đoạn trích và loại bản ghi. Hoàn thành yêu cầu ID nằm trong lời người dùng để tránh sửa nhầm. Kho cũ một mục được nhập khi dùng lần đầu, giữ nguyên tệp cũ.
 - Đường Memory Core/Dreaming trong repo hiện có cho backup. Chưa có bằng chứng truy xuất runtime. M2–M4 chưa bắt đầu.
 - Tiếp theo: chạy Backend mới với Gateway thật, kiểm thử hai mục máy in, cập nhật đúng ID và restart; bổ sung kiểm thử cho trường hợp mơ hồ. Chưa nghiệm thu và chưa commit. Giữ nguyên thay đổi Ca trực và Calendar ngoài phạm vi.
+
+## M3 — Reflective Memory & Dreaming (ngày 15/11/2026)
+
+- M3 đã triển khai nền worker owner-scoped, BGE-M3 candidate retrieval, DeepSeek JSON assessment với nhãn `unverified-inference`, encrypted queue/checkpoint/retry, chống đề xuất trùng, stale-version protection và review approve/edit/reject có lịch sử. UI có bằng chứng, confidence, trạng thái tiến độ và thao tác duyệt.
+- Nghiệm thu trên Backend cô lập: `dotnet build` 0 warning/0 error; frontend production build và 2/2 test; cloud storage/Google regression 24/24; MemoryAudit ranking/parser PASS.
+- E2E thật: Ollama BGE-M3 và DeepSeek thật sinh đề xuất duplicate/conflict/stale; state và queue sống sót restart; checkpoint tiếp tục batch sau restart; loại trừ chuyển trạng thái hợp lệ `open→done`; duyệt cạnh tranh chỉ cập nhật một lần; sửa memory làm đề xuất cũ stale/409; lịch sử được ghi; dữ liệu encrypted; A không truy cập được Memory/queue/vector của B. Kiểm tra Gmail readonly, Calendar read, Drive token refresh + readonly listing trên token clone cô lập PASS. Không gửi email, không sửa dữ liệu cloud; token refresh chỉ trong bản sao thử nghiệm.
+- M3 nghiệm thu PASS trên môi trường cô lập. Commit local đang chờ tách biệt các sửa đổi có sẵn ngoài M3; không push.
+- **Bước tiếp theo: M4 Agentic Memory** — rà API Memory task và Google Calendar; liên kết việc với sự kiện/nhắc lịch có idempotency, owner checks, xác nhận rõ khi thiếu thời gian/đối tượng, cập nhật completion và ghi audit. Không tự tạo/xóa sự kiện thật; chỉ mock/local test cho mutation nếu không có consent cụ thể.
+- Không sửa DB/state thật, không đổi cấu hình công ty, không đưa secrets vào Git/log.

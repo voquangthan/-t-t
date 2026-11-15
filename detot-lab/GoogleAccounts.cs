@@ -59,6 +59,8 @@ static class GoogleAccounts
             catch (Exception error) when (error is HttpRequestException or JsonException or IOException or CryptographicException
                 or KeyNotFoundException or InvalidOperationException or OperationCanceledException)
             {
+                ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("GoogleAccounts")
+                    .LogWarning("Google API request failed ({ErrorType}).", error.GetType().Name);
                 return Results.Problem("Không hoàn tất được yêu cầu Google. Kiểm tra kết nối hoặc cấp lại quyền.", statusCode: 502);
             }
             finally { mutex.Release(); }

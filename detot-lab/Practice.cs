@@ -13,6 +13,9 @@ sealed class Practice(IDataProtector protector, string directory)
     private string WorkMemoryPath => Path.Combine(directory, "current-work.bin");
     private string StructuredMemoryPath => Path.Combine(directory, "structured-memory.bin");
     private readonly object memoryGate = new();
+    private string MemoryOwnersPath => Path.Combine(directory, "memory-owners.bin");
+    private string DreamingStatePath => Path.Combine(directory, "memory-dreaming-state.bin");
+    private string OwnerProposalsPath(string owner) => Path.Combine(directory, $"memory-proposals-{StableSkillKey("owner", owner)}.bin");
     private string OwnerMemoryPath(string owner) => Path.Combine(directory, $"memory-{StableSkillKey("owner", owner)}.bin");
     private string MemoryChoicePath(string owner, Guid id) =>
         Path.Combine(directory, $"memory-choice-{StableSkillKey("owner", owner)}-{id:N}.bin");
@@ -40,7 +43,7 @@ sealed class Practice(IDataProtector protector, string directory)
             if (intent == "recall")
             {
                 if (entries.Count == 0) return "Bạn chưa lưu ký ức nào.";
-                var recent = entries.Where(entry => entry.Status != "deleted").TakeLast(10).Reverse();
+                var recent = entries.Where(entry => entry.Status is not ("deleted" or "archived")).TakeLast(10).Reverse();
                 return "Ký ức đã lưu gần đây:\n\n" + string.Join("\n", recent.Select(entry =>
                     $"- {entry.Text} · {(entry.Status == "done" ? "đã xong" : entry.Status == "open" ? "đang mở" : "đã lưu")} · mã {entry.Id:D}"));
             }
@@ -120,8 +123,243 @@ sealed class Practice(IDataProtector protector, string directory)
     private List<MemoryEntry> ReadOwnerMemories(string owner) =>
         (Read<List<MemoryEntry>>(OwnerMemoryPath(owner)) ?? []).Where(entry => entry.OwnerId == owner).ToList();
 
-    private void WriteMemories(string owner, List<MemoryEntry> entries) =>
+    private void WriteMemories(string owner, List<MemoryEntry> entries)
+    {
         Write(OwnerMemoryPath(owner), JsonSerializer.Serialize(entries, Json));
+        var owners = Read<List<string>>(MemoryOwnersPath) ?? [];
+        if (!owners.Contains(owner, StringComparer.Ordinal))
+            Write(MemoryOwnersPath, JsonSerializer.Serialize(owners.Append(owner).Order(StringComparer.Ordinal).ToList(), Json));
+    }
+
+    public sealed record ReflectionMemory(Guid Id, string Category, string Text, string Status,
+        string Source, Guid? ConversationId, DateTimeOffset? CreatedAt, int Version, string[] History);
+    public sealed record ReflectionDraft(string Kind, Guid[] MemoryIds, string Reason, string? ProposedText,
+        double Confidence, string Evidence);
+    public sealed record ReflectionEvidence(Guid Id, string Text, string Category, string Status,
+        string Source, Guid? ConversationId, DateTimeOffset? CreatedAt, int Version, string[] History);
+    public sealed record ReflectionSuggestion(Guid Id, string Kind, ReflectionEvidence[] Evidence,
+        string Reason, string? ProposedText, double Confidence, string State, DateTimeOffset CreatedAt,
+        string Fingerprint, string Assessment = "unverified-inference");
+    private sealed record OwnerReflectionProgress(long CompletedGeneration, long TargetGeneration, int Cursor);
+    private sealed record DreamingState(Dictionary<string, OwnerReflectionProgress> Owners, Dictionary<string, RetryState> Retries);
+    private sealed record RetryState(int Failures, DateTimeOffset NextAttempt);
+    public sealed record ReflectionStatus(int Scanned, int Total, bool Pending, int RetryCount, DateTimeOffset? RetryAt);
+
+    public string[] KnownMemoryOwners()
+    {
+        lock (memoryGate) return (Read<List<string>>(MemoryOwnersPath) ?? []).Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    public sealed record ReflectionBatch(long Generation, int Cursor, int NextCursor, int TotalCount, ReflectionMemory[] Items);
+
+    private static long Generation(List<MemoryEntry> entries) => entries.Sum(entry => (long)entry.History.Length);
+
+    public ReflectionBatch GetReflectionBatch(string owner, int batchSize = 40)
+    {
+        lock (memoryGate)
+        {
+            var entries = ReadOwnerMemories(owner);
+            var generation = Generation(entries);
+            var active = entries.Where(entry => entry.Status is not ("deleted" or "archived"))
+                .OrderBy(entry => entry.CreatedAt).ThenBy(entry => entry.Id).ToArray();
+            var state = Read<DreamingState>(DreamingStatePath) ?? new([], []);
+            var progress = state.Owners.GetValueOrDefault(owner) ?? new OwnerReflectionProgress(0, 0, 0);
+            if (progress.TargetGeneration != generation)
+            {
+                progress = progress with { TargetGeneration = generation, Cursor = 0 };
+                var owners = new Dictionary<string, OwnerReflectionProgress>(state.Owners, StringComparer.Ordinal) { [owner] = progress };
+                Write(DreamingStatePath, JsonSerializer.Serialize(new DreamingState(owners, state.Retries), Json));
+            }
+            var cursor = Math.Clamp(progress.Cursor, 0, active.Length);
+            var start = cursor == 0 ? 0 : cursor - 1; // one-item overlap checks duplicates at batch boundaries
+            var take = Math.Min(active.Length - start, batchSize + (cursor == 0 ? 0 : 1));
+            var items = active.Skip(start).Take(take).Select(entry => new ReflectionMemory(entry.Id,
+                entry.Category, entry.Text, entry.Status, entry.Source, entry.ConversationId, entry.CreatedAt,
+                entry.History.Length, entry.History.Select(change =>
+                    $"{change.Action}:{change.BeforeStatus ?? "-"}->{change.AfterStatus ?? "-"}@{change.At:O}").ToArray())).ToArray();
+            return new ReflectionBatch(generation, cursor, Math.Min(active.Length, cursor + batchSize), active.Length, items);
+        }
+    }
+
+    public bool ReflectionIsDue(string owner, DateTimeOffset now)
+    {
+        lock (memoryGate)
+        {
+            var state = Read<DreamingState>(DreamingStatePath) ?? new([], []);
+            var entries = ReadOwnerMemories(owner);
+            var generation = Generation(entries);
+            var activeCount = entries.Count(entry => entry.Status is not ("deleted" or "archived"));
+            var progress = state.Owners.GetValueOrDefault(owner) ?? new OwnerReflectionProgress(0, 0, 0);
+            var retry = state.Retries.GetValueOrDefault(owner);
+            return (generation > progress.CompletedGeneration || progress.Cursor < activeCount) &&
+                (retry is null || retry.NextAttempt <= now);
+        }
+    }
+
+    public ReflectionStatus GetReflectionStatus(string owner)
+    {
+        lock (memoryGate)
+        {
+            var state = Read<DreamingState>(DreamingStatePath) ?? new([], []);
+            var progress = state.Owners.GetValueOrDefault(owner) ?? new OwnerReflectionProgress(0, 0, 0);
+            var entries = ReadOwnerMemories(owner);
+            var generation = Generation(entries);
+            var total = entries.Count(entry => entry.Status is not ("deleted" or "archived"));
+            var scanned = generation == progress.TargetGeneration ? progress.Cursor : 0;
+            var retry = state.Retries.GetValueOrDefault(owner);
+            return new ReflectionStatus(Math.Clamp(scanned, 0, total), total,
+                generation > progress.CompletedGeneration || scanned < total,
+                retry?.Failures ?? 0, retry?.NextAttempt);
+        }
+    }
+
+    public void CompleteReflectionRun(string owner, long generation, int nextCursor, int totalCount, bool success)
+    {
+        lock (memoryGate)
+        {
+            var current = Generation(ReadOwnerMemories(owner));
+            var state = Read<DreamingState>(DreamingStatePath) ?? new([], []);
+            var owners = new Dictionary<string, OwnerReflectionProgress>(state.Owners, StringComparer.Ordinal);
+            var retries = new Dictionary<string, RetryState>(state.Retries, StringComparer.Ordinal);
+            if (success)
+            {
+                var old = owners.GetValueOrDefault(owner) ?? new OwnerReflectionProgress(0, generation, 0);
+                if (current == generation)
+                    owners[owner] = nextCursor >= totalCount
+                        ? new OwnerReflectionProgress(generation, generation, totalCount)
+                        : old with { TargetGeneration = generation, Cursor = Math.Max(old.Cursor, nextCursor) };
+                else owners[owner] = old with { TargetGeneration = 0, Cursor = 0 };
+                retries.Remove(owner);
+            }
+            else
+            {
+                var failures = Math.Min(10, retries.GetValueOrDefault(owner)?.Failures + 1 ?? 1);
+                retries[owner] = new RetryState(failures, DateTimeOffset.UtcNow.AddSeconds(Math.Min(1800, 10 * Math.Pow(2, failures - 1))));
+            }
+            Write(DreamingStatePath, JsonSerializer.Serialize(new DreamingState(owners, retries), Json));
+        }
+    }
+
+    public bool SaveReflectionDrafts(string owner, long expectedGeneration, ReflectionDraft[] drafts)
+    {
+        lock (memoryGate)
+        {
+            var ownerEntries = ReadOwnerMemories(owner);
+            if (Generation(ownerEntries) != expectedGeneration) return false;
+            var entries = ownerEntries.Where(entry => entry.Status is not ("deleted" or "archived"))
+                .ToDictionary(entry => entry.Id);
+            var existing = Read<List<ReflectionSuggestion>>(OwnerProposalsPath(owner)) ?? [];
+            var added = false;
+            foreach (var draft in drafts.Take(12))
+            {
+                var ids = draft.MemoryIds.Distinct().Take(2).ToArray();
+                if (ids.Length is < 1 or > 2 || draft.Kind is not ("merge" or "update" or "supersede" or "archive") ||
+                    !double.IsFinite(draft.Confidence) || draft.Confidence is < 0.7 or > 1 ||
+                    draft.Reason.Length is < 3 or > 500 || draft.Evidence.Length is < 1 or > 500) continue;
+                if ((draft.Kind is "merge" or "supersede") && ids.Length != 2) continue;
+                if (draft.Kind == "archive" && ids.Length != 1) continue;
+                if (draft.Kind == "update" && ids.Length is < 1 or > 2) continue;
+                if (ids.Any(id => !entries.ContainsKey(id))) continue;
+                if ((draft.Kind is "merge" or "supersede") && entries[ids[0]].Category != entries[ids[1]].Category) continue;
+                if (draft.ProposedText is { Length: > 500 }) continue;
+                var evidence = ids.Select(id => entries[id]).Select(entry => new ReflectionEvidence(entry.Id,
+                    entry.Text, entry.Category, entry.Status, entry.Source, entry.ConversationId, entry.CreatedAt,
+                    entry.History.Length, entry.History.Select(change => $"{change.Action}:{change.BeforeStatus ?? "-"}->{change.AfterStatus ?? "-"}@{change.At:O}").ToArray())).ToArray();
+                var fingerprintInput = string.Join("|", new[] { draft.Kind }.Concat(evidence.Select(item =>
+                    $"{item.Id:N}:{item.Version}").Order(StringComparer.Ordinal)));
+                var fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(fingerprintInput)));
+                if (existing.Any(item => item.Fingerprint == fingerprint)) continue;
+                existing.Add(new ReflectionSuggestion(Guid.NewGuid(), draft.Kind, evidence,
+                    draft.Reason.Trim(), draft.ProposedText?.Trim(), draft.Confidence, "pending", DateTimeOffset.UtcNow, fingerprint));
+                added = true;
+            }
+            if (added) Write(OwnerProposalsPath(owner), JsonSerializer.Serialize(existing.TakeLast(300).ToList(), Json));
+            return true;
+        }
+    }
+
+    public IResult ListReflectionSuggestions(string owner)
+    {
+        lock (memoryGate)
+        {
+            var suggestions = Read<List<ReflectionSuggestion>>(OwnerProposalsPath(owner)) ?? [];
+            return Results.Ok(suggestions.Where(item => item.State == "pending").OrderByDescending(item => item.CreatedAt).Take(100));
+        }
+    }
+
+    public IResult ReviewReflectionSuggestion(string owner, Guid id, string action, string? editedText)
+    {
+        lock (memoryGate)
+        {
+            var suggestions = Read<List<ReflectionSuggestion>>(OwnerProposalsPath(owner)) ?? [];
+            var proposalIndex = suggestions.FindIndex(item => item.Id == id && item.State == "pending");
+            if (proposalIndex < 0) return Results.NotFound();
+            var proposal = suggestions[proposalIndex];
+            if (action is not ("approve" or "edit" or "reject")) return Results.BadRequest();
+            var entries = ReadOwnerMemories(owner);
+            if (proposal.Evidence.Any(reference => !entries.Any(entry => entry.Id == reference.Id &&
+                entry.History.Length == reference.Version && entry.Text == reference.Text && entry.Status == reference.Status)))
+            {
+                suggestions[proposalIndex] = proposal with { State = "stale" };
+                Write(OwnerProposalsPath(owner), JsonSerializer.Serialize(suggestions, Json));
+                return Results.Conflict(new { error = "Ký ức đã thay đổi; đề xuất cũ được đánh dấu hết hạn." });
+            }
+            if (action == "reject")
+            {
+                suggestions[proposalIndex] = proposal with { State = "rejected" };
+                Write(OwnerProposalsPath(owner), JsonSerializer.Serialize(suggestions, Json));
+                return Results.NoContent();
+            }
+            var replacement = action == "edit" ? editedText?.Trim() : proposal.ProposedText?.Trim();
+            if ((proposal.Kind is "merge" or "update") && replacement is not { Length: > 0 and <= 500 }) return Results.BadRequest();
+            var now = DateTimeOffset.UtcNow;
+            foreach (var evidence in proposal.Evidence)
+            {
+                var index = entries.FindIndex(entry => entry.Id == evidence.Id);
+                var entry = entries[index];
+                if ((proposal.Kind is "merge" or "update") && evidence.Id == proposal.Evidence[0].Id)
+                    entries[index] = entry with { Text = replacement!, History = [..entry.History,
+                        new MemoryChange(proposal.Kind == "merge" ? "dreaming-merge-approved" : "dreaming-update-approved",
+                            now, null, id, entry.Status, entry.Status, owner)] };
+                else if (proposal.Kind == "archive" || proposal.Kind == "merge" ||
+                    proposal.Kind == "supersede" && evidence.Id == proposal.Evidence[0].Id ||
+                    proposal.Kind == "update" && proposal.Evidence.Length == 2 && evidence.Id != proposal.Evidence[0].Id)
+                    entries[index] = entry with { Status = "archived", History = [..entry.History,
+                        new MemoryChange(proposal.Kind == "supersede" ? "dreaming-supersede-approved" :
+                            proposal.Kind == "update" ? "dreaming-update-archived" : "dreaming-archive-approved",
+                            now, null, id, entry.Status, "archived", owner)] };
+            }
+            WriteMemories(owner, entries);
+            if (!ReadOwnerMemories(owner).Where(entry => proposal.Evidence.Any(item => item.Id == entry.Id))
+                .All(entry => entry.History.Any(change => change.RequestId == id))) return Results.Problem("Không xác nhận được lịch sử sau duyệt.", statusCode: 500);
+            suggestions[proposalIndex] = proposal with { State = action == "edit" ? "edited-approved" : "approved" };
+            Write(OwnerProposalsPath(owner), JsonSerializer.Serialize(suggestions, Json));
+            return Results.NoContent();
+        }
+    }
+
+    public IResult ReviewMemoryPatterns(string owner)
+    {
+        lock (memoryGate)
+        {
+            var proposals = ReadOwnerMemories(owner)
+                .Where(entry => entry.Status is not ("deleted" or "archived"))
+                .GroupBy(entry => (entry.Category, Text: Normalize(entry.Text)))
+                .Where(group => group.Key.Text.Length > 0 && group.Count() > 1)
+                .OrderByDescending(group => group.Max(entry => entry.CreatedAt))
+                .Take(20)
+                .Select(group => new
+                {
+                    kind = "possible-duplicate",
+                    evidence = group.Select(entry => new
+                    {
+                        entry.Id, entry.Text, entry.Status, entry.Source, entry.ConversationId, entry.CreatedAt,
+                        version = entry.History.Length
+                    }).ToArray()
+                }).ToArray();
+            return Results.Ok(proposals);
+        }
+    }
 
     private string MemoryIndexPath(string owner, string version) =>
         OwnerMemoryPath(owner) + "." + MemoryDigest(version) + ".vectors";
@@ -137,7 +375,7 @@ sealed class Practice(IDataProtector protector, string directory)
         DateTimeOffset? after, DateTimeOffset? before, MemoryEmbeddings embeddings, CancellationToken cancellationToken)
     {
         MemoryEntry[] Candidates() => ReadOwnerMemories(owner)
-            .Where(entry => entry.Status != "deleted" && (category is null || category == entry.Category) &&
+            .Where(entry => entry.Status is not ("deleted" or "archived") && (category is null || category == entry.Category) &&
                 (status is null || status == entry.Status) && (after is null || entry.CreatedAt >= after) &&
                 (before is null || entry.CreatedAt <= before))
             .OrderByDescending(entry => entry.CreatedAt).ToArray();
@@ -163,7 +401,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 queryVector = output[0];
                 lock (memoryGate)
                 {
-                    var current = ReadOwnerMemories(owner).Where(entry => entry.Status != "deleted")
+                    var current = ReadOwnerMemories(owner).Where(entry => entry.Status is not ("deleted" or "archived"))
                         .ToDictionary(entry => entry.Id, entry => MemoryDigest(entry.Text));
                     vectors = Read<MemoryIndex>(MemoryIndexPath(owner, version)) is { } latest && latest.Version == version
                         ? latest.Vectors : [];
@@ -205,13 +443,14 @@ sealed class Practice(IDataProtector protector, string directory)
     {
         lock (memoryGate)
         {
-            var entries = ReadOwnerMemories(owner).Where(entry => entry.Status != "deleted");
+            var ownerEntries = ReadOwnerMemories(owner);
             if (id is { } key)
             {
-                var entry = entries.FirstOrDefault(item => item.Id == key);
+                var entry = ownerEntries.FirstOrDefault(item => item.Id == key && item.Status != "deleted");
                 return entry is null ? Results.NotFound() :
                     history ? Results.Ok(entry.History) : Results.Ok(entry);
             }
+            var entries = ownerEntries.Where(entry => entry.Status is not ("deleted" or "archived"));
             entries = entries.Where(entry => (category is null || entry.Category == category) &&
                 (status is null || entry.Status == status));
             if (string.IsNullOrWhiteSpace(query)) return Results.Ok(entries.TakeLast(100).ToArray());
