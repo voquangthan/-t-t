@@ -29,6 +29,7 @@ export function Overview({ onNavigate, onChat }: { onNavigate: (view: View) => v
   const [taskLoading, setTaskLoading] = useState(true);
   const [eventLoading, setEventLoading] = useState(true);
   const [noteLoading, setNoteLoading] = useState(true);
+  const [reload, setReload] = useState(0);
   const today = useMemo(() => new Intl.DateTimeFormat("vi-VN", {
     weekday: "long", day: "numeric", month: "long", timeZone: "Asia/Bangkok",
   }).format(new Date()), []);
@@ -39,6 +40,8 @@ export function Overview({ onNavigate, onChat }: { onNavigate: (view: View) => v
     const calendarController = new AbortController();
     const calendarTimeout = window.setTimeout(() => calendarController.abort(), 8000);
     signal.addEventListener("abort", () => calendarController.abort(), { once: true });
+    setTaskLoading(true); setEventLoading(true); setNoteLoading(true);
+    setTaskMessage(""); setCalendarMessage(""); setNoteMessage("");
     void Promise.all([
       read<Task[]>("/api/memory/agentic/tasks", signal).then(value => setTasks(value.filter(task => task.status === "open"))).catch(() => setTaskMessage("Chưa tải được danh sách việc.")).finally(() => { if (!signal.aborted) setTaskLoading(false); }),
       read<Note[]>("/api/memory?category=note", signal).then(value => setNotes(value.filter(note => note.status !== "deleted" && note.status !== "archived").sort((a, b) => Date.parse(b.createdAt ?? "") - Date.parse(a.createdAt ?? "")).slice(0, 5))).catch(() => setNoteMessage("Chưa tải được ghi chú.")).finally(() => { if (!signal.aborted) setNoteLoading(false); }),
@@ -58,7 +61,9 @@ export function Overview({ onNavigate, onChat }: { onNavigate: (view: View) => v
       })(),
     ]);
     return () => { controller.abort(); window.clearTimeout(calendarTimeout); };
-  }, []);
+  }, [reload]);
+
+  function retry() { setReload(value => value + 1); }
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -81,15 +86,15 @@ export function Overview({ onNavigate, onChat }: { onNavigate: (view: View) => v
     <div className="overview-grid">
       <section className="overview-card overview-tasks">
         <div className="overview-card-head"><div><span className="overview-icon"><Icon name="tasks"/></span><h2>Việc hôm nay</h2></div><button className="text-link" type="button" onClick={() => onNavigate("tasks")}>Tất cả <Icon name="arrow"/></button></div>
-        {taskLoading ? <p className="overview-muted">Đang tải việc…</p> : taskMessage ? <p className="overview-muted">{taskMessage}</p> : tasks.length ? <ul className="overview-list">{tasks.slice(0, 4).map(task => <li key={task.id}><span className="task-dot"/><span>{task.text}</span><small>{task.calendarReminderAt ? dateTime(task.calendarReminderAt) : "Đang mở"}</small></li>)}</ul> : <div className="overview-empty"><p>Chưa có việc đang mở.</p><button type="button" onClick={() => onChat("Giúp mình ghi lại một việc cần làm hôm nay.")}>Thêm việc qua Chat</button></div>}
+        {taskLoading ? <p className="overview-muted" role="status">Đang tải việc…</p> : taskMessage ? <div className="overview-empty"><p role="alert">{taskMessage}</p><button type="button" onClick={retry}>Thử tải lại</button></div> : tasks.length ? <ul className="overview-list">{tasks.slice(0, 4).map(task => <li key={task.id}><span className="task-dot"/><span>{task.text}</span><small>{task.calendarReminderAt ? dateTime(task.calendarReminderAt) : "Đang mở"}</small></li>)}</ul> : <div className="overview-empty"><p>Chưa có việc đang mở.</p><button type="button" onClick={() => onChat("Giúp mình ghi lại một việc cần làm hôm nay.")}>Thêm việc qua Chat</button></div>}
       </section>
       <section className="overview-card overview-calendar">
         <div className="overview-card-head"><div><span className="overview-icon"><Icon name="calendar"/></span><h2>Lịch sắp tới</h2></div><button className="text-link" type="button" onClick={() => onNavigate("calendar")}>Mở lịch <Icon name="arrow"/></button></div>
-        {eventLoading ? <p className="overview-muted">Đang tải lịch…</p> : calendarMessage ? <div className="overview-empty"><p>{calendarMessage}</p><button type="button" onClick={() => onNavigate("calendar")}>Mở Lịch</button></div> : events.length ? <ul className="overview-list">{events.slice(0, 4).map(item => <li key={item.id}><span className="event-time">{dateTime(item.start)}</span><span>{item.title}</span></li>)}</ul> : <div className="overview-empty"><p>Chưa có sự kiện sắp tới.</p><button type="button" onClick={() => onNavigate("calendar")}>Xem lịch</button></div>}
+        {eventLoading ? <p className="overview-muted" role="status">Đang tải lịch…</p> : calendarMessage ? <div className="overview-empty"><p role="alert">{calendarMessage}</p><button type="button" onClick={retry}>Thử tải lại</button><button type="button" onClick={() => onNavigate("calendar")}>Mở Lịch</button></div> : events.length ? <ul className="overview-list">{events.slice(0, 4).map(item => <li key={item.id}><span className="event-time">{dateTime(item.start)}</span><span>{item.title}</span></li>)}</ul> : <div className="overview-empty"><p>Chưa có sự kiện sắp tới.</p><button type="button" onClick={() => onNavigate("calendar")}>Xem lịch</button></div>}
       </section>
       <section className="overview-card overview-notes">
         <div className="overview-card-head"><div><span className="overview-icon"><Icon name="notes"/></span><h2>Ghi chú gần đây</h2></div><button className="text-link" type="button" onClick={() => onNavigate("notes")}>Tất cả <Icon name="arrow"/></button></div>
-        {noteLoading ? <p className="overview-muted">Đang tải ghi chú…</p> : noteMessage ? <p className="overview-muted">{noteMessage}</p> : notes.length ? <ul className="overview-list overview-note-list">{notes.slice(0, 4).map(note => <li key={note.id}><span className="note-mark"/><span>{note.text}</span></li>)}</ul> : <div className="overview-empty"><p>Ghi lại ý muốn nhớ để tìm lại trong Chat.</p><button type="button" onClick={() => onNavigate("notes")}>Tạo ghi chú</button></div>}
+        {noteLoading ? <p className="overview-muted" role="status">Đang tải ghi chú…</p> : noteMessage ? <div className="overview-empty"><p role="alert">{noteMessage}</p><button type="button" onClick={retry}>Thử tải lại</button></div> : notes.length ? <ul className="overview-list overview-note-list">{notes.slice(0, 4).map(note => <li key={note.id}><span className="note-mark"/><span>{note.text}</span></li>)}</ul> : <div className="overview-empty"><p>Ghi lại ý muốn nhớ để tìm lại trong Chat.</p><button type="button" onClick={() => onNavigate("notes")}>Tạo ghi chú</button></div>}
       </section>
     </div>
     <div className="overview-footer"><span>Đệ Tốt chỉ thay đổi lịch hoặc công việc khi bạn yêu cầu rõ ràng.</span><button type="button" onClick={() => onChat("Giúp mình chọn một việc nhỏ để bắt đầu hôm nay.")}>Gợi ý bước tiếp theo <Icon name="arrow"/></button></div>

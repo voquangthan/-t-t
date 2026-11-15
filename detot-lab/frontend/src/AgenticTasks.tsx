@@ -24,10 +24,13 @@ export function AgenticTasks() {
   const [ends, setEnds] = useState<Record<string, string>>({});
   const [requests, setRequests] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [reload, setReload] = useState(0);
 
   const refresh = useCallback(async () => {
+    setLoading(true); setLoadError("");
     try {
       const rows = await api<Task[]>("/agentic/tasks");
       setTasks(rows);
@@ -37,7 +40,8 @@ export function AgenticTasks() {
         previous[task.id] ?? localDate(task.calendarReminderAt ?? undefined)])));
       setEnds(previous => Object.fromEntries(rows.map(task => [task.id,
         previous[task.id] ?? localDate(new Date(new Date(task.calendarReminderAt ?? Date.now() + 60 * 60 * 1000).getTime() + 15 * 60 * 1000).toISOString())])));
-    } catch (error) { setNotice(error instanceof Error ? error.message : "Không tải được danh sách việc."); }
+    } catch (error) { setLoadError(error instanceof Error ? error.message : "Không tải được danh sách việc."); }
+    finally { setLoading(false); }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh, reload]);
@@ -68,6 +72,8 @@ export function AgenticTasks() {
     try {
       await api(`/${task.id}/complete`, { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ version: task.version, requestId: crypto.randomUUID(), category: "task" }) });
+      const saved = await api<Task>(`/${task.id}`);
+      if (saved.status !== "done") throw new Error("Backend chưa xác nhận trạng thái hoàn thành. Hãy tải lại danh sách trước khi thử lại.");
       setNotice("Đã đánh dấu công việc hoàn thành; nhắc lịch được giữ nguyên để bạn tự quản lý trong Google Calendar.");
       setReload(value => value + 1);
     } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa cập nhật được công việc."); }
@@ -78,7 +84,8 @@ export function AgenticTasks() {
     <h1>Việc cần theo dõi</h1>
     <p>Chọn công việc và thời gian để tạo nhắc trên Google Calendar. Đệ Tốt chỉ tạo lịch sau thao tác này.</p>
     {notice && <p role="status">{notice}</p>}
-    {tasks.length === 0 && <p>Chưa có công việc nào trong Memory.</p>}
+    {loadError && <p role="alert">{loadError} <button type="button" onClick={() => setReload(value => value + 1)}>Thử tải lại</button></p>}
+    {loading && tasks.length === 0 ? <p role="status">Đang tải công việc…</p> : !loading && !loadError && tasks.length === 0 ? <p>Chưa có công việc nào trong Memory.</p> : null}
     {tasks.map(task => <article className="agentic-task" key={task.id}>
       <h2>{task.text}</h2><small>{task.status === "open" ? "Đang mở" : "Hoàn thành"} · mã {task.id} · v{task.version}</small>
       {task.calendarEventId && <p>Đã liên kết Google Calendar · {task.calendarReminderAt ? new Date(task.calendarReminderAt).toLocaleString() : task.calendarEventId}</p>}

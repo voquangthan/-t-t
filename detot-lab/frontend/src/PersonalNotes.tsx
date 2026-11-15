@@ -26,12 +26,19 @@ export function PersonalNotes() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   const reload = useCallback(async () => {
-    const rows = await request<Note[]>("/api/memory?category=note");
-    setNotes(rows.filter(item => item.status !== "deleted" && item.status !== "archived"));
+    setLoading(true); setLoadError("");
+    try {
+      const rows = await request<Note[]>("/api/memory?category=note");
+      setNotes(rows.filter(item => item.status !== "deleted" && item.status !== "archived"));
+    } catch (cause) {
+      setLoadError(cause instanceof Error ? cause.message : "Không tải được ghi chú.");
+    } finally { setLoading(false); }
   }, []);
-  useEffect(() => { void reload().catch(cause => setError(cause instanceof Error ? cause.message : "Không tải được ghi chú.")); }, [reload]);
+  useEffect(() => { void reload(); }, [reload]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -82,10 +89,11 @@ export function PersonalNotes() {
     <div className="personal-notes-heading"><div><h1>Ghi chú cá nhân</h1><p>Lưu điều bạn muốn Đệ Tốt nhớ. Ghi chú được mã hóa và có thể tìm lại trong Chat.</p></div>
       <button type="button" onClick={() => compose()} disabled={busy}>Ghi chú mới</button></div>
     {error && <p className="cloud-error" role="alert">{error}</p>}{notice && <p className="cloud-notice" role="status">{notice}</p>}
+    {loadError && <p className="cloud-error" role="alert">{loadError} <button type="button" onClick={() => void reload()}>Thử tải lại</button></p>}
     <div className="personal-notes-layout">
       <div className="personal-notes-list">
         <label>Tìm ghi chú<input value={query} onChange={event => setQuery(event.target.value)} placeholder="Tìm theo nội dung…" /></label>
-        {visible.length === 0 ? <p className="muted">{notes.length ? "Không có ghi chú khớp." : "Chưa có ghi chú. Bạn có thể lưu bằng nút này hoặc nhắn “nhớ giúp mình…” trong Chat."}</p> : visible.map(note => {
+        {loading && notes.length === 0 ? <p role="status">Đang tải ghi chú…</p> : loadError && notes.length === 0 ? null : visible.length === 0 ? <p className="muted">{notes.length ? "Không có ghi chú khớp." : "Chưa có ghi chú. Bạn có thể lưu bằng nút này hoặc nhắn “nhớ giúp mình…” trong Chat."}</p> : visible.map(note => {
           const parsed = parseNote(note.text);
           return <article className={`personal-note${editing?.id === note.id ? " selected" : ""}`} key={note.id}>
             <button className="personal-note-open" type="button" onClick={() => compose(note)} disabled={busy}>
