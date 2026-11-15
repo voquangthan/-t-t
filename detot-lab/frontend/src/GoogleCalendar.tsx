@@ -65,6 +65,7 @@ export function GoogleCalendar() {
 function CalendarEvents({ account }: { account: string }) {
   const path = `calendar/${encodeURIComponent(account)}/events`;
   const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<CalendarEvent | "new">();
   const [requestId, setRequestId] = useState("");
@@ -85,13 +86,14 @@ function CalendarEvents({ account }: { account: string }) {
         const data = await calendarApi<{ events: CalendarEvent[]; truncated: boolean }>(path, { signal: controller.signal });
         if (!controller.signal.aborted) {
           setEvents(data.events);
+          setLoadError("");
           setTruncated(data.truncated);
           setScheduleReady(!data.truncated);
         }
       } catch (cause) {
         if (!controller.signal.aborted) {
           setScheduleReady(false);
-          setError(cause instanceof Error ? cause.message : "Không tải được lịch.");
+          setLoadError(cause instanceof Error ? cause.message : "Không tải được lịch.");
         }
       } finally { loading = false; }
     }
@@ -167,8 +169,9 @@ function CalendarEvents({ account }: { account: string }) {
       {suggestion && <p role="status">{suggestion} <button type="button" onClick={() => setSuggestion("")}>Bỏ qua</button></p>}
     </section>
     <p>Lịch chính · 30 ngày trước đến 90 ngày tới · UTC+07:00</p>
-    <button disabled={busy} onClick={() => { setError(""); reload(value => value + 1); }}>Tải lại lịch</button>{" "}
+    <button disabled={busy} onClick={() => reload(value => value + 1)}>Tải lại lịch</button>{" "}
     <button disabled={busy} onClick={() => { setRequestId(crypto.randomUUID()); setEditing("new"); }}>Tạo sự kiện</button>
+    {loadError && <p role="alert">{loadError}</p>}
     {error && <p role="alert">{error}</p>}
     {truncated && <p>Đang hiển thị 1.000 sự kiện đầu tiên trong khoảng này.</p>}
     {editing && <form key={selected?.id ?? "new"} onSubmit={save}>

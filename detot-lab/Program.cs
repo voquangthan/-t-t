@@ -224,7 +224,7 @@ memory.MapPost("/", (HttpContext context, MemoryEdit edit) =>
     !IsLocalMutation(context) ? Results.StatusCode(403) :
     practice is null ? Results.StatusCode(503) :
     edit.Text?.Trim() is not { Length: > 0 and <= 500 } value || edit.RequestId == Guid.Empty ||
-    edit.Category is not ("task" or "device" or "person" or "preference" or "event") ? Results.BadRequest() :
+    edit.Category is not ("task" or "device" or "person" or "preference" or "event" or "note") ? Results.BadRequest() :
     Results.Ok(new { reply = practice.ApplyMemory(MemoryOwner(context), "save", value, edit.Category, null, edit.RequestId, app.Logger) }));
 memory.MapPatch("/{id:guid}", (HttpContext context, Guid id, MemoryEdit edit) =>
     !IsLocalMutation(context) ? Results.StatusCode(403) :
@@ -916,7 +916,7 @@ static async Task<(string Intent, string? Work, string? Category, Guid? MemoryId
         const string classification = """
                 Phân loại ý định của tin nhắn hiện tại. Trả đúng JSON object {"intent":"none","work":null,"category":null,"memoryId":null}.
                 intent=save chỉ khi người dùng trực tiếp yêu cầu ghi nhớ một mục rõ ràng cho lần sau.
-                Với save, work là đoạn nguyên văn liên tục tối đa 500 ký tự, category là task, device, person, preference hoặc event.
+                Với save, work là đoạn nguyên văn liên tục tối đa 500 ký tự, category là task, device, person, preference, event hoặc note. Dùng note cho nội dung người dùng muốn lưu như ghi chú cá nhân; chỉ lưu khi họ yêu cầu rõ.
                 intent=recall khi người dùng hỏi về điều đã nói, làm, sửa, quyết định hoặc lưu trước đây; bao gồm cách diễn đạt khác và câu hỏi về một đối tượng cụ thể. work là cụm ngắn nhất nguyên văn trong câu nêu chủ đề/đối tượng cần tìm; nếu câu hỏi về quá khứ quá chung chung thì null để Backend yêu cầu làm rõ, không đoán. category là loại nếu xác định rõ, nếu không thì null.
                 intent=complete khi người dùng trực tiếp yêu cầu đánh dấu việc đã hoàn thành. category=task. work là UUID nguyên văn, hoặc cụm tên thiết bị/phòng nguyên văn ngắn nhất, hoặc null nếu không có.
                 intent=update khi người dùng trực tiếp yêu cầu sửa một ký ức đã lưu và cung cấp Memory ID chính xác. memoryId phải là UUID D-format nguyên văn có trong tin nhắn; work là nội dung mới cần lưu, nguyên văn liên tục có trong tin nhắn, tối đa 500 ký tự; category=null. Nếu thiếu ID hoặc nội dung mới rõ ràng, trả intent=none, work=null, category=null, memoryId=null.

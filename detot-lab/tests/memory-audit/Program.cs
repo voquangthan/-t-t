@@ -83,6 +83,40 @@ if (args is ["agentic"])
     return;
 }
 
+if (args is ["notes"])
+{
+    var notesRoot = Path.Combine(Path.GetTempPath(), "detot-personal-notes-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(notesRoot);
+    try
+    {
+        var protection = new EphemeralDataProtectionProvider();
+        var owner = "owner-notes";
+        var notes = new Practice(protection.CreateProtector("Detot.Practice.v1"), notesRoot);
+        var saved = notes.ApplyMemory(owner, "save", "Nhà thuốc: mua thuốc nhỏ mắt.", "note", null,
+            Guid.NewGuid(), NullLogger.Instance);
+        Require(Guid.TryParse(saved.Split(' ').Last().TrimEnd('.'), out var id));
+        var stored = ReadValue(notes.QueryMemory(owner, id, null));
+        Require(stored.GetProperty("category").GetString() == "note" &&
+            stored.GetProperty("text").GetString() == "Nhà thuốc: mua thuốc nhỏ mắt.");
+        Require(((IStatusCodeHttpResult)notes.QueryMemory("owner-other", id, null)).StatusCode == 404);
+        Require(((IStatusCodeHttpResult)notes.EditMemory(owner, id, 0, "nội dung cũ", false)).StatusCode == 409);
+        Require(((IStatusCodeHttpResult)notes.EditMemory(owner, id, 1,
+            "Nhà thuốc: mua thuốc nhỏ mắt và kem chống nắng.", false)).StatusCode == 204);
+
+        var restarted = new Practice(protection.CreateProtector("Detot.Practice.v1"), notesRoot);
+        var revised = ReadValue(restarted.QueryMemory(owner, id, null));
+        Require(revised.GetProperty("text").GetString() == "Nhà thuốc: mua thuốc nhỏ mắt và kem chống nắng.");
+        Require(revised.GetProperty("history").GetArrayLength() == 2);
+        var files = Directory.GetFiles(notesRoot, "memory-*.bin");
+        Require(files.Length >= 2 && files.All(file => !File.ReadAllText(file).Contains("kem chống nắng", StringComparison.Ordinal)));
+        Require(((IStatusCodeHttpResult)restarted.EditMemory(owner, id, 2, null, delete: true)).StatusCode == 204);
+        Require(((IStatusCodeHttpResult)restarted.QueryMemory(owner, id, null)).StatusCode == 404);
+        Console.WriteLine("PASS: encrypted personal note create, owner isolation, versioned edit, restart and soft-delete.");
+    }
+    finally { try { Directory.Delete(notesRoot, recursive: true); } catch { } }
+    return;
+}
+
 if (args is ["ranking"])
 {
     var semantic = MemoryRanking.Cosine([1, 0], [0.98f, 0.1f]);
@@ -135,6 +169,8 @@ if (args is ["parser"])
         Require(MemoryIntentParser.Parse(output, "Nhớ việc máy in", false).Intent == "failed");
     Require(MemoryIntentParser.Parse("""{"intent":"save","work":"máy in","category":"task"}""",
         "Nhớ việc máy in", false).Intent == "save");
+    Require(MemoryIntentParser.Parse("""{"intent":"save","work":"mua sữa yến mạch","category":"note"}""",
+        "Ghi chú giúp mình: mua sữa yến mạch", false).Category == "note");
     Require(MemoryIntentParser.Parse("""{"intent":"schedule","work":"kiểm tra máy in","category":"task"}""",
         "Nhắc mình kiểm tra máy in ngày mai", false).Intent == "schedule");
     Require(MemoryIntentParser.Parse("""{"intent":"schedule","work":"máy in","category":"device"}""",
@@ -236,6 +272,9 @@ static void Require(bool condition)
 {
     if (!condition) throw new InvalidDataException("Memory audit assertion failed.");
 }
+
+static JsonElement ReadValue(IResult result) => JsonSerializer.SerializeToElement(
+    ((IValueHttpResult)result).Value!, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
 sealed class FailingHttpClientFactory : IHttpClientFactory
 {

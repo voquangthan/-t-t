@@ -7,9 +7,9 @@ using Microsoft.AspNetCore.DataProtection;
 sealed class Practice(IDataProtector protector, string directory)
 {
     private readonly object chatLearningGate = new();
+    private readonly object caseGate = new();
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private string ProfilePath => Path.Combine(directory, "notes.bin");
-    private string LearningPath => Path.Combine(directory, "learning.bin");
     private string WorkMemoryPath => Path.Combine(directory, "current-work.bin");
     private string StructuredMemoryPath => Path.Combine(directory, "structured-memory.bin");
     private readonly object memoryGate = new();
@@ -21,6 +21,7 @@ sealed class Practice(IDataProtector protector, string directory)
         Path.Combine(directory, $"memory-choice-{StableSkillKey("owner", owner)}-{id:N}.bin");
     public bool HasMemoryChoice(string owner, Guid? source) => source is { } id && id != Guid.Empty &&
         File.Exists(MemoryChoicePath(owner, id));
+    private string LearningPath => Path.Combine(directory, "learning.bin");
     private string ChatLearningPath => Path.Combine(directory, "chat-learning.bin");
     private string CasePath(Guid id) => Path.Combine(directory, $"{id:N}.bin");
 
@@ -33,7 +34,6 @@ sealed class Practice(IDataProtector protector, string directory)
     }
     public string? Case(Guid id) => Read<string>(CasePath(id));
     public void SaveNotes(string notes) => Write(ProfilePath, notes.Trim());
-    public void ClearChatLearning()
     public string ApplyMemory(string owner, string intent, string? value, string? category, Guid? source, Guid? requestId, ILogger logger)
     {
         lock (memoryGate)
@@ -55,7 +55,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 return $"Yêu cầu này đã được xử lý · mã {previous.Id:D}.";
 
             var now = DateTimeOffset.UtcNow;
-            if (intent == "save" && value is not null && category is ("task" or "device" or "person" or "preference" or "event"))
+            if (intent == "save" && value is not null && category is ("task" or "device" or "person" or "preference" or "event" or "note"))
             {
                 if (entries.Count >= 1000) return "Kho ký ức đã đạt giới hạn 1.000 mục.";
                 var entry = new MemoryEntry(Guid.NewGuid(), category, value, source, now,
@@ -652,6 +652,7 @@ sealed class Practice(IDataProtector protector, string directory)
         string? BeforeStatus = null, string? AfterStatus = null, string? OwnerId = null);
     private sealed record MemoryChoice(DateTimeOffset ExpiresAt, MemoryCandidate[] Candidates);
     private sealed record MemoryCandidate(Guid Id, int Version);
+    public void ClearChatLearning()
     {
         lock (chatLearningGate) Write(ChatLearningPath, JsonSerializer.Serialize(ChatLearningProfile.Empty, Json));
     }
@@ -744,6 +745,11 @@ sealed class Practice(IDataProtector protector, string directory)
     // mentioned by the user or passes a practice turn to an external tool.
     public Turn Process(Guid conversationId, string message, bool start)
     {
+        lock (caseGate) return ProcessTurn(conversationId, message, start);
+    }
+
+    private Turn ProcessTurn(Guid conversationId, string message, bool start)
+    {
         var state = start ? null : ReadState(Case(conversationId));
         if (state is null)
         {
@@ -755,6 +761,38 @@ sealed class Practice(IDataProtector protector, string directory)
 
         var active = Scenarios.First(scenario => scenario.Id == state.ScenarioId);
         var text = Normalize(message);
+        if (active.Recovery is { } recovery && text == Normalize(recovery.Action))
+        {
+            if (state.Stage != "repair")
+                return new Turn("Hãy xác nhận chẩn đoán bằng dữ kiện trước khi thay đổi cấu hình giả lập.", true);
+            SaveState(conversationId, state with { Stage = "verify" });
+            return new Turn($"Đã thực hiện thao tác giả lập. Hãy kiểm tra lại bằng **{recovery.Verification}** trước khi bàn giao.", true);
+        }
+
+        if (active.Recovery is { } verification && ContainsAny(text, verification.Verification))
+        {
+            if (state.Stage == "verify")
+            {
+                SaveState(conversationId, state with { Stage = "handoff", Recovered = true });
+                return new Turn($"**Đã xác minh phục hồi.** {verification.Success}\n\n{HandoffPrompt}", true);
+            }
+            if (!state.Recovered)
+                return new Turn(verification.Failure, true);
+            return new Turn(verification.Success, true);
+        }
+        if (state.Stage == "investigate" && text is ("goi y" or "hint" or "minh bi roi"))
+        {
+            var level = Math.Min(state.HintsUsed + 1, 3);
+            var next = active.Checks.FirstOrDefault(check => !state.Evidence.Contains(check.Id));
+            SaveState(conversationId, state with { HintsUsed = level });
+            var hint = level switch
+            {
+                1 => "Xác định phạm vi ảnh hưởng trước: chỉ một máy, nhiều máy, hay một dịch vụ?",
+                2 when next is not null => $"Thử kiểm tra {next.Label} và đối chiếu với dữ kiện đã xem.",
+                _ => "Chọn kết quả bất thường nhất và giải thích nó gây ra triệu chứng bằng cách nào."
+            };
+            return new Turn($"**Gợi ý {level}/3** · {hint}", true);
+        }
         if (ContainsAny(text, "doi ca", "chuyen sang ca", "tao ca moi", "switch scenario", "new incident"))
         {
             var replacement = SelectScenario(message);
@@ -771,10 +809,22 @@ sealed class Practice(IDataProtector protector, string directory)
 
         if (state.Stage == "handoff")
         {
+            if (text is "bo qua ban giao" or "skip handoff")
+            {
+                var summary = RecordCompletion(active, state, goodHandoff: false, endedEarly: false);
+                SaveCase(conversationId, null);
+                return new Turn($"{Resolution(active, state, "Ca trực đã hoàn tất.")}\n\n{summary}", true);
+            }
             var (feedback, goodHandoff) = EvaluateHandoff(active, message);
             var progress = RecordCompletion(active, state, goodHandoff, endedEarly: false);
             SaveCase(conversationId, null);
             return new Turn($"{feedback}\n\n{Resolution(active, state, "Ca trực đã hoàn tất.")}\n\n{progress}", true);
+        }
+
+        if (ContainsAny(text, "format c", "remove item", "xoa toan bo", "tat firewall", "disable firewall"))
+        {
+            SaveState(conversationId, state with { UnsafeAttempts = state.UnsafeAttempts + 1 });
+            return new Turn("Quản trị viên từ chối thao tác có rủi ro trong ca này. Hãy dùng kiểm tra chỉ đọc để thu thập bằng chứng trước.", true);
         }
 
         if (IsDiagnosisAttempt(text))
@@ -788,7 +838,14 @@ sealed class Practice(IDataProtector protector, string directory)
                 : [.. state.Evidence, check.Id];
             state = state with { Evidence = evidence };
             SaveState(conversationId, state);
-            return new Turn($"**Kết quả giả lập — {check.Label}:**\n{check.Result}\n\nĐã thu thập {evidence.Count} mục dữ kiện. Bạn muốn kiểm tra gì tiếp? Dữ liệu và lệnh trong ca này đều là giả lập.", true);
+            var speaker = check.Id switch
+            {
+                "cable" => "Nhân viên tại chỗ",
+                "ou" or "port" or "leases" => "Quản trị viên",
+                _ => "Thiết bị giả lập"
+            };
+            var captured = state.Stage == "verify" || state.Recovered ? " (dữ kiện trước khi sửa)" : "";
+            return new Turn($"**{speaker} — {check.Label}{captured}:**\n{check.Result}\n\nĐã thu thập {evidence.Count} mục dữ kiện. Bạn muốn kiểm tra gì tiếp? Dữ liệu và lệnh trong ca này đều là giả lập.", true);
         }
 
         var options = string.Join(" · ", active.Checks.Select(item => item.Label));
@@ -797,7 +854,8 @@ sealed class Practice(IDataProtector protector, string directory)
 
     private Turn Diagnose(Guid id, Scenario scenario, ScenarioState state, string normalized)
     {
-        var correct = scenario.RootTerms.Any(term => normalized.Contains(Normalize(term), StringComparison.Ordinal));
+        var correct = !ContainsAny(normalized, "khong phai", "not caused by", "ruled out") &&
+            scenario.RootTerms.Any(term => ContainsAny(normalized, term));
         if (!correct)
         {
             var updatedWrong = state with { WrongDiagnoses = state.WrongDiagnoses + 1 };
@@ -805,19 +863,31 @@ sealed class Practice(IDataProtector protector, string directory)
             return new Turn("Giả thuyết này chưa khớp với dữ kiện đã thu thập. Hãy đối chiếu thêm kết quả rồi thử lại; nguyên nhân vẫn được giữ kín trong ca.", true);
         }
 
-        if (state.Evidence.Count < state.RequiredEvidence)
-            return new Turn($"Bạn có thể đang đi đúng hướng, nhưng chưa đủ bằng chứng để chốt. Ca này cần ít nhất {state.RequiredEvidence} kết quả kiểm tra; hãy thu thập thêm dữ kiện rồi nêu lại nguyên nhân.", true);
+        if (state.Evidence.Count < state.RequiredEvidence ||
+            (scenario.RequiredCheck is { } required && !state.Evidence.Contains(required)))
+            return new Turn($"Chưa đủ bằng chứng để chốt. Ca này cần ít nhất {state.RequiredEvidence} kết quả kiểm tra, gồm dữ kiện trực tiếp về nguyên nhân.", true);
 
-        var solvedState = state with { Stage = "handoff", Solved = true };
+        var solvedState = state with { Stage = scenario.Recovery is null ? "handoff" : "repair", Solved = true };
         SaveState(id, solvedState);
-        return new Turn($"**Đúng — nguyên nhân đã được xác nhận:** {scenario.Cause}\n\n**Cách khắc phục trong tình huống giả lập:** {scenario.Fix}\n\nBạn đã dùng {state.Evidence.Count} mục dữ kiện. Hãy viết hai câu bàn giao bằng tiếng Anh: triệu chứng/nguyên nhân và bước xử lý/khôi phục.", true);
+        var next = scenario.Recovery is { } recovery
+            ? $"Trong ca, nhập **{recovery.Action}** để thực hiện thay đổi rồi kiểm tra lại."
+            : HandoffPrompt;
+        return new Turn($"**Đúng — nguyên nhân đã được xác nhận:** {scenario.Cause}\n\n**Cách khắc phục đề xuất:** {scenario.Fix}\n\n{next}", true);
     }
+
+    private const string HandoffPrompt = "Viết hai câu bàn giao bằng tiếng Việt hoặc tiếng Anh: triệu chứng và nguyên nhân, bước xử lý và cách xác minh. Gõ **bỏ qua bàn giao** để hoàn tất.";
 
     private static string Opening(Guid id, Scenario scenario) =>
         $"**Sự cố #INC-{id.ToString("N")[..8].ToUpperInvariant()} — {scenario.Title}**\n\n{scenario.Report}\n\nBạn đang trực IT. Bạn muốn kiểm tra gì trước? Có thể hỏi: {string.Join(", ", scenario.Checks.Select(item => item.Label))}.\n\nĐây là tình huống hoàn toàn giả lập; không có lệnh nào được chạy trên máy thật.";
 
     private static string Resolution(Scenario scenario, ScenarioState state, string heading) =>
-        $"**{heading}**\nNguyên nhân: {scenario.Cause}\nKhắc phục đề xuất trong môi trường giả lập: {scenario.Fix}\nDữ kiện đã xem: {(state.Evidence.Count == 0 ? "chưa thu thập" : string.Join(", ", state.Evidence))}.";
+        $"**{heading}**\nNguyên nhân: {scenario.Cause}\nKhắc phục đề xuất trong môi trường giả lập: {scenario.Fix}\n" +
+        $"Dữ kiện đã xem: {(state.Evidence.Count == 0 ? "chưa thu thập" : string.Join(", ", scenario.Checks.Where(check => state.Evidence.Contains(check.Id)).Select(check => check.Label)))}.\n" +
+        $"Bằng chứng: {Math.Min(state.Evidence.Count, state.RequiredEvidence)}/{state.RequiredEvidence} mục" +
+        (scenario.RequiredCheck is { } required && !state.Evidence.Contains(required) ? ", còn thiếu kiểm tra trực tiếp." : ".") +
+        $"\nChẩn đoán: {(state.Solved ? "đạt" : "chưa đạt")}. An toàn: {state.UnsafeAttempts} thao tác rủi ro bị chặn." +
+        $"\nHiệu quả: {state.Evidence.Count} kiểm tra khác nhau, {state.HintsUsed} cấp gợi ý, {state.WrongDiagnoses} giả thuyết sai." +
+        $"\nPhục hồi: {(state.Recovered ? "đã xác minh" : "chưa xác minh")}.";
 
     private static (string Feedback, bool Good) EvaluateHandoff(Scenario scenario, string handoff)
     {
@@ -981,7 +1051,7 @@ sealed class Practice(IDataProtector protector, string directory)
         "nguyen nhan", "toi nghi", "toi doan", "theo toi", "ket luan", "root cause", "cause is", "because", "chac la", "co the la");
 
     private static bool ContainsAny(string text, params string[] terms) =>
-        terms.Any(term => text.Contains(Normalize(term), StringComparison.Ordinal));
+        terms.Any(term => $" {text} ".Contains($" {Normalize(term)} ", StringComparison.Ordinal));
 
     private static string Normalize(string value)
     {
@@ -996,10 +1066,13 @@ sealed class Practice(IDataProtector protector, string directory)
     }
 
     private sealed record Check(string Id, string Label, string[] Triggers, string Result);
+    private sealed record Recovery(string Action, string Verification, string Failure, string Success);
     private sealed record Scenario(string Id, string Title, string Report, string Cause, string Fix,
-        string[] SelectTerms, string[] RootTerms, Check[] Checks);
+        string[] SelectTerms, string[] RootTerms, Check[] Checks, string? RequiredCheck = null,
+        Recovery? Recovery = null);
     private sealed record ScenarioState(string ScenarioId, List<string> Evidence, string Stage,
-        int RequiredEvidence = 2, int WrongDiagnoses = 0, bool Solved = false);
+        int RequiredEvidence = 2, int WrongDiagnoses = 0, bool Solved = false, int HintsUsed = 0, int UnsafeAttempts = 0,
+        bool Recovered = false);
     private sealed record DomainProgress(int Completed, int CorrectDiagnoses, int WrongDiagnoses,
         int ChecksUsed, int GoodHandoffs, int EarlyEnds)
     {
@@ -1030,6 +1103,52 @@ sealed class Practice(IDataProtector protector, string directory)
 
     private static readonly Scenario[] Scenarios =
     [
+        new("lan", "Một máy trạm mất kết nối LAN",
+            "Máy quầy tiếp nhận mất mạng sau khi di chuyển bàn; máy bên cạnh vẫn dùng được.",
+            "Cáp mạng chưa cắm hết vào ổ tường.", "Cắm lại cáp, kiểm tra đèn link và thử kết nối gateway.",
+            ["mạng lan", "lan"], ["cáp mạng chưa cắm hết", "cáp lỏng", "loose cable"],
+            [
+                new("link", "đèn link", ["đèn link", "link status"], "Card mạng báo Media disconnected; đèn link tắt."),
+                new("cable", "cáp mạng", ["cáp mạng", "ổ tường"], "Nhân viên tại chỗ xác nhận đầu cáp ở ổ tường chưa cài khớp."),
+                new("neighbor", "máy bên cạnh", ["máy bên cạnh", "phạm vi"], "Máy bên cạnh kết nối gateway và ứng dụng nội bộ bình thường.")
+            ], "cable", new("cắm lại cáp", "ping gateway", "Ping gateway thất bại vì chưa có kết nối LAN.",
+                "Đèn link sáng và gateway trả lời 4/4 gói.")),
+        new("dhcp", "Máy mới không nhận IP",
+            "Máy mới chỉ có địa chỉ 169.254.23.9; các máy đã kết nối từ trước vẫn dùng mạng.",
+            "Pool DHCP đã hết địa chỉ khả dụng.", "Rà soát lease và mở rộng pool trong dải đã được duyệt.",
+            ["dhcp"], ["hết địa chỉ", "pool dhcp cạn", "scope exhausted"],
+            [
+                new("ip", "ipconfig /all", ["ipconfig"], "DHCP Enabled: Yes; IPv4: 169.254.23.9; Default Gateway: none."),
+                new("leases", "DHCP leases", ["lease", "pool"], "Máy chủ báo 100/100 địa chỉ đã cấp; còn 0 địa chỉ khả dụng."),
+                new("log", "DHCP log", ["log", "nhật ký"], "Máy chủ nhận DHCPDISCOVER từ máy mới nhưng không gửi DHCPOFFER vì không còn lease trống.")
+            ], "leases", new("mở rộng pool DHCP", "ipconfig /renew", "Không nhận được DHCPOFFER.", "Đã nhận IP 10.20.4.120/24 và gateway 10.20.4.1.")),
+        new("vlan", "Máy mới vào nhầm mạng khách",
+            "Sau khi đổi cổng cắm, máy kế toán có mạng nhưng không mở được ứng dụng nội bộ.",
+            "Cổng access được gán nhầm VLAN khách.", "Đối chiếu sơ đồ cổng đã duyệt, khôi phục VLAN kế toán và xác minh lại địa chỉ.",
+            ["vlan"], ["nhầm vlan", "vlan khách", "wrong vlan"],
+            [
+                new("ip", "ipconfig /all", ["ipconfig"], "Máy nhận 10.40.30.42; mạng kế toán dùng dải 10.40.20.0/24."),
+                new("port", "cấu hình cổng access", ["cổng access", "switchport"], "Cổng đang ở access VLAN 30 (Guest); hồ sơ bàn kế toán yêu cầu VLAN 20."),
+                new("gateway", "kiểm tra gateway", ["gateway", "ping"], "Gateway 10.40.30.1 phản hồi; ứng dụng nội bộ không truy cập được từ mạng khách.")
+            ], "port", new("khôi phục VLAN kế toán", "kiểm tra ứng dụng nội bộ", "Không kết nối được từ VLAN khách.", "Máy nhận IP 10.40.20.42 và ứng dụng trả HTTP 200.")),
+        new("windows-disk", "Windows không lưu được tệp",
+            "Nhân viên báo ứng dụng vẫn mở được nhưng lưu tệp mới thì thất bại.",
+            "Ổ hệ thống đã đầy.", "Kiểm tra báo cáo sử dụng ổ đĩa và giải phóng dung lượng theo chính sách lưu giữ.",
+            ["windows", "ổ đĩa"], ["ổ hệ thống đã đầy", "ổ đĩa đầy", "disk full"],
+            [
+                new("volume", "dung lượng ổ đĩa", ["dung lượng", "get-volume"], "Windows báo ổ C: còn 0 byte khả dụng."),
+                new("log", "nhật ký ứng dụng", ["log", "nhật ký"], "Ứng dụng trả ERROR_DISK_FULL khi lưu tệp tạm."),
+                new("access", "quyền thư mục", ["quyền", "access"], "Tài khoản có quyền ghi vào thư mục làm việc.")
+            ], "volume", new("dọn tệp tạm theo chính sách", "lưu tệp thử", "Ứng dụng trả ERROR_DISK_FULL.", "Ổ C: còn 4 GB và đã lưu được tệp thử.")),
+        new("ad-policy", "Máy mới thiếu chính sách máy trạm",
+            "Nhân viên đăng nhập được, nhưng cấu hình máy trạm chuẩn chưa xuất hiện trên máy mới.",
+            "Đối tượng máy tính nằm sai OU.", "Nhờ quản trị viên đối chiếu OU theo danh mục máy và xác minh lại chính sách sau khi điều chỉnh.",
+            ["active directory", "group policy", "gpo"], ["sai ou", "nhầm ou", "wrong ou"],
+            [
+                new("policy", "báo cáo chính sách", ["gpresult", "báo cáo chính sách"], "Báo cáo máy chưa có chính sách Workstation Baseline."),
+                new("ou", "vị trí đối tượng máy", ["ou", "đối tượng máy"], "Quản trị viên báo đối tượng máy nằm ở OU Staging; chính sách chỉ liên kết với OU Workstations."),
+                new("time", "thời gian đồng bộ", ["đồng bộ", "thời gian"], "Lần làm mới gần nhất hoàn tất lúc 09:10.")
+            ], "ou", new("chuyển máy về OU Workstations", "xác minh policy máy trạm", "Chưa áp dụng Workstation Baseline.", "Báo cáo mới xác nhận đã áp dụng Workstation Baseline.")),
         new("printer", "Không in được qua máy in mạng",
             "Nhân viên phòng kế toán báo không in được tài liệu. Các máy khác vẫn in bình thường.",
             "Dịch vụ Print Spooler trên máy trạm đang dừng.",
@@ -1041,7 +1160,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 new("spooler", "trạng thái Print Spooler", ["spooler", "dịch vụ in", "hàng đợi in", "print service"], "Trên máy trạm: Print Spooler = Stopped. Hàng đợi còn 3 job; dịch vụ trên máy khác vẫn Running."),
                 new("driver", "driver máy in", ["driver", "trình điều khiển"], "Driver đúng phiên bản và máy in được ánh xạ đúng. Chưa có dấu hiệu lỗi driver."),
                 new("log", "Event Viewer", ["event viewer", "log", "nhật ký", "event id"], "System log giả lập ghi nhận Service Control Manager Event 7031: Print Spooler terminated unexpectedly lúc 09:12 trên máy trạm."),
-            ]),
+            ], "spooler", new("khởi động lại Print Spooler", "in trang thử", "Trang thử nằm trong hàng đợi.", "Print Spooler đang chạy và máy đã in trang thử.")),
         new("windows-dns", "Máy chủ nội bộ không phân giải được tên miền",
             "Một nhóm người dùng không mở được ứng dụng nội bộ bằng tên miền; truy cập bằng IP vẫn được. Các dịch vụ khác trên máy chủ còn hoạt động.",
             "DNS forwarder trên máy chủ đang trỏ tới địa chỉ cũ không còn phản hồi.",
@@ -1052,7 +1171,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 new("lookup", "nslookup", ["nslookup", "phân giải", "resolve"], "Truy vấn app.intra tới DNS 10.20.0.10 hết thời gian chờ; truy vấn trực tiếp tới DNS dự phòng 10.20.0.11 trả về 10.20.8.25."),
                 new("service", "dịch vụ DNS Server", ["dịch vụ dns", "dns service", "dns server status"], "DNS Server service đang Running và các truy vấn nội bộ đã cache vẫn trả lời."),
                 new("log", "DNS Server log", ["event viewer", "log", "nhật ký"], "DNS log giả lập báo forwarder 192.0.2.53 không phản hồi qua nhiều lần thử."),
-            ]),
+            ], "log", new("cập nhật DNS forwarder", "nslookup app.intra", "DNS 10.20.0.10 hết thời gian chờ.", "DNS 10.20.0.10 trả địa chỉ 10.20.8.25.")),
         new("sql-pool", "API chậm khi tải cao",
             "API quản lý nhân viên bắt đầu trả 503 vào giờ cao điểm. Health endpoint của ứng dụng vẫn phản hồi, nhưng request cần truy cập dữ liệu bị chậm.",
             "Connection pool tới SQL Server bị cạn do các request không giải phóng kết nối đúng cách.",
@@ -1063,7 +1182,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 new("logs", "log ứng dụng", ["log", "nhật ký", "exception", "lỗi"], "Log giả lập lặp lại Timeout while acquiring a connection from pool; không có lỗi đăng nhập SQL."),
                 new("pool", "connection pool metrics", ["pool", "connection", "kết nối database", "sql connection"], "Active connections = 100/100, wait queue tăng; số connection không giảm sau khi request hoàn tất."),
                 new("deploy", "lịch sử triển khai", ["deploy", "triển khai", "release", "phiên bản"], "Không có bản deploy trong 24 giờ. Lượng request tăng khoảng 4 lần từ 10:00."),
-            ]),
+            ], "pool", new("sửa vòng đời connection", "chạy lại tải thử", "Request trả HTTP 503.", "Request trả HTTP 200; kết nối được trả về pool sau mỗi request.")),
         new("api-token", "Tích hợp API trả về 401",
             "Một dịch vụ nội bộ không lấy được hồ sơ nhân viên từ API đối tác. DNS và kết nối mạng bình thường; lỗi bắt đầu sau một khoảng thời gian chạy ổn định.",
             "Access token của tích hợp đã hết hạn và tiến trình không làm mới token trước khi gửi request.",
@@ -1074,7 +1193,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 new("logs", "log request", ["log", "nhật ký", "response", "header"], "Log giả lập ghi HTTP 401 invalid_token; request tới được host và TLS handshake thành công."),
                 new("token", "thời hạn token", ["token", "jwt", "authorization", "xác thực"], "Token hết hạn lúc 08:45. Tiến trình vẫn dùng token cũ; refresh job báo chưa được đăng ký."),
                 new("deploy", "cấu hình refresh", ["refresh", "cấu hình", "config"], "Cấu hình giả lập có client ID test nhưng thiếu lịch refresh token; không có secret nào được hiển thị."),
-            ]),
+            ], "token", new("sửa luồng refresh token", "gửi lại request thử", "API trả HTTP 401.", "API trả HTTP 200 với credential test được làm mới.")),
         new("docker-env", "Container khởi động rồi thoát",
             "Sau lần triển khai gần nhất, một container API liên tục restart. Các container khác trong cùng môi trường vẫn chạy.",
             "Container thiếu biến môi trường ConnectionStrings__Main nên ứng dụng thoát khi khởi tạo.",
@@ -1085,7 +1204,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 new("logs", "docker logs", ["docker logs", "log", "nhật ký", "stderr"], "Log giả lập: Configuration key 'ConnectionStrings:Main' was not found; process exited with code 1."),
                 new("env", "danh sách tên biến môi trường", ["env", "environment", "biến môi trường", "docker inspect"], "Danh sách tên biến cho thấy thiếu ConnectionStrings__Main. Giá trị secret không được lưu hoặc hiển thị."),
                 new("deploy", "deployment manifest", ["compose", "manifest", "yaml", "deploy", "triển khai"], "Manifest giả lập của service API không khai báo ConnectionStrings__Main; revision vừa deploy thay đổi phần env."),
-            ]),
+            ], "env", new("bổ sung biến cấu hình test", "chạy lại health check", "Container chưa sẵn sàng.", "Container chạy ổn định; health endpoint trả HTTP 200.")),
         new("security-lockout", "Tài khoản dịch vụ bị khóa",
             "Một tác vụ đồng bộ nội bộ ngừng chạy. Bảng điều khiển ghi nhận nhiều lần đăng nhập thất bại từ máy chủ tác vụ; chưa có dấu hiệu truy cập thành công bất thường.",
             "Tác vụ đang dùng credential cũ sau khi tài khoản dịch vụ được xoay vòng mật khẩu, dẫn tới khóa tài khoản.",
@@ -1096,6 +1215,6 @@ sealed class Practice(IDataProtector protector, string directory)
                 new("account", "trạng thái tài khoản", ["tài khoản", "account status", "lockout", "bị khóa"], "Tài khoản svc-sync đang Locked sau 10 lần thử sai; MFA và nhóm quyền không thay đổi."),
                 new("rotation", "lịch sử credential", ["credential", "mật khẩu", "password", "rotate", "xoay vòng"], "Bản ghi giả lập cho thấy credential được xoay vòng lúc 08:00; tác vụ vẫn tham chiếu revision cũ."),
                 new("owner", "chủ sở hữu tác vụ", ["owner", "chủ sở hữu", "tác vụ", "scheduled task"], "Tác vụ thuộc nhóm IT Operations; không có thay đổi chủ sở hữu hoặc quyền truy cập gần đây."),
-            ]),
+            ], "rotation", new("đồng bộ credential test và mở khóa", "chạy lại tác vụ đồng bộ", "Tác vụ lỗi đăng nhập.", "Tác vụ hoàn tất và audit ghi nhận đăng nhập thành công từ máy chủ tác vụ.")),
     ];
 }

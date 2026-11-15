@@ -33,12 +33,12 @@ internal static class MemoryIntentParser
             var kind = category.GetString();
             return intent.GetString() switch
             {
-                "save" when targetId is null && work is not null && kind is ("task" or "device" or "person" or "preference" or "event") => ("save", work, kind, null),
+                "save" when targetId is null && work is not null && kind is ("task" or "device" or "person" or "preference" or "event" or "note") => ("save", work, kind, null),
                 "complete" when targetId is null && kind is null or "task" => ("complete", work, null, null),
                 "select" when pendingChoice && kind is null && int.TryParse(value.GetString(), out var ordinal) &&
                     ordinal is >= 1 and <= 10 && targetId is null => ("complete", ordinal.ToString(CultureInfo.InvariantCulture), null, null),
                 "recall" when targetId is null && (value.ValueKind == JsonValueKind.Null || work is not null) &&
-                    kind is (null or "task" or "device" or "person" or "preference" or "event") => ("recall", work, kind, null),
+                    kind is (null or "task" or "device" or "person" or "preference" or "event" or "note") => ("recall", work, kind, null),
                 "schedule" when targetId is null && work is not null && kind == "task" => ("schedule", work, "task", null),
                 "update" when targetId is not null && work is not null && kind is null => ("update", work, null, targetId),
                 "none" when targetId is null && value.ValueKind == JsonValueKind.Null && kind is null => ("none", null, null, null),
