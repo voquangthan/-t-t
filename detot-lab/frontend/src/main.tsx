@@ -6,6 +6,8 @@ import { CloudStorage } from "./CloudStorage";
 import { TrustedLearning } from "./TrustedLearning";
 import { MemoryReview } from "./MemoryReview";
 import { AgenticTasks } from "./AgenticTasks";
+import { PersonalNotes } from "./PersonalNotes";
+import { Icon, Overview } from "./Overview";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
@@ -82,11 +84,15 @@ function AttachmentChip({ file, onRemove }: { file: File; onRemove: () => void }
 }
 
 function App() {
-  const [calendar, setCalendar] = useState(() => new URLSearchParams(location.search).has("calendar"));
-  const [cloudStorage, setCloudStorage] = useState(() => new URLSearchParams(location.search).has("drive"));
-  const [trustedLearning, setTrustedLearning] = useState(false);
-  const [memoryReview, setMemoryReview] = useState(false);
-  const [agenticTasks, setAgenticTasks] = useState(false);
+  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
+  const [view, setView] = useState<AppView>(() => {
+    const params = new URLSearchParams(location.search);
+    return params.has("calendar") ? "calendar" : params.has("drive") ? "cloud" : "overview";
+  });
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("detot.sidebar-collapsed") === "true");
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const [learningIntent, setLearningIntent] = useState<LearningIntent>();
   const [items, setItems] = useState(readHistory);
   const [active, setActive] = useState<string | undefined>(() => {
@@ -187,7 +193,8 @@ function App() {
       setBusy(false);
     }
   }
-  const select = (id?: string) => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(false); setAgenticTasks(false); setActive(id); setDraft(""); setAttachments([]); setSide(false); setError(""); retry.current = null; };
+  const navigate = (next: AppView) => { setView(next); setPracticeNotes(undefined); setSide(false); setMobileHistoryOpen(false); setError(""); };
+  const select = (id?: string) => { setView("chat"); setActive(id); setDraft(""); setAttachments([]); setSide(false); setMobileHistoryOpen(false); setError(""); retry.current = null; };
 
   const addAttachments = (incoming: File[]) => {
     const combined = [...attachments, ...incoming];
@@ -202,10 +209,11 @@ function App() {
     if ((!text.trim() && files.length === 0) || request.current) return;
     const learning = files.length === 0 && !context && !startPractice && !base.practice ? parseLearningIntent(text) : null;
     if (learning) {
-      setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setLearningIntent(learning);
+      setView("learning"); setLearningIntent(learning);
       setPracticeNotes(undefined); setSide(false); setDraft(""); setError("");
       return;
     }
+    setView("chat");
     const prompt = [text.trim() || "Đọc và phân tích các tệp đính kèm.",
       files.length ? `Tệp đính kèm: ${files.map(file => file.name).join(", ")}` : ""].filter(Boolean).join("\n").slice(0, 1500);
     const displayText = (files.length ? `${prompt}\n📎 ${files.map(file => file.name).join(", ")}` : prompt).slice(0, 450);
@@ -284,7 +292,7 @@ function App() {
 
   function beginMiniPractice() {
     const session: Conversation = { ...blank(), title: "Luyện nhanh 5 phút", miniPractice: true };
-    setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setPracticeNotes(undefined); setSide(false);
+    setView("chat"); setPracticeNotes(undefined); setSide(false);
     void send("Bắt đầu một thử thách code 5 phút phù hợp với mình.", session, [], uid(), undefined, false, [], true);
   }
 
@@ -294,174 +302,95 @@ function App() {
   }
 
   const last = conversation?.messages.at(-1);
-  return <div className="app">
-    {side && <button className="scrim" aria-label="Đóng sidebar" onClick={() => setSide(false)} />}
-    <aside className={side ? "open" : ""}>
-      <div className="brand"><span className="mark">✦</span><div>Đệ Tốt<small>Không gian cá nhân</small></div></div>
-      <button className="new" disabled={busy} onClick={() => { select(); input.current?.focus(); }}>＋ Cuộc trò chuyện mới</button>
-      <input aria-label="Tìm cuộc trò chuyện" placeholder="Tìm cuộc trò chuyện…" value={query} onChange={event => setQuery(event.target.value)} />
-      <nav aria-label="Lịch sử">
-        {query.trim() && visibleItems.length === 0 && <p role="status">Không tìm thấy cuộc trò chuyện.</p>}
-        {visibleItems.map(item => <div className={item.id === active ? "row selected" : "row"} key={item.id}>
-          <button className="title" aria-current={!calendar && item.id === active ? "true" : undefined} disabled={busy} onClick={() => select(item.id)}>{item.pinned ? "◆ " : ""}{item.title}</button>
-          <details><summary aria-label={`Thao tác với ${item.title}`}>⋯</summary><div className="menu">
-            <button disabled={busy} onClick={() => void updateConversation({ ...item, pinned: !item.pinned })}>{item.pinned ? "Bỏ ghim" : "Ghim"}</button>
-            <button disabled={busy} onClick={() => {
-              const title = window.prompt("Tên cuộc trò chuyện", item.title)?.trim();
-              if (title) void updateConversation({ ...item, title: title.slice(0, 100) });
-            }}>Đổi tên</button>
-            <button disabled={busy} onClick={async () => {
-              if (!window.confirm(remoteWorkspace ? "Xóa cuộc trò chuyện khỏi lịch sử trên laptop?" :
-                item.gatewayLinked ? "Xóa cuộc trò chuyện khỏi Gateway và trình duyệt?" : "Xóa bản lưu cũ trên trình duyệt?")) return;
-              setBusy(true);
-              try {
-                if (remoteWorkspace || item.gatewayLinked) {
-                  const response = await fetch(`/api/chat/${encodeURIComponent(item.id)}`, { method: "DELETE" });
-                  if (!response.ok) throw new Error("Gateway chưa xác nhận xóa. Hãy thử lại.");
-                }
-                setItems(old => old.filter(value => value.id !== item.id));
-                if (active === item.id) select();
-              } catch (cause) {
-                setError(cause instanceof Error ? cause.message : "Không xóa được cuộc trò chuyện.");
-              } finally { setBusy(false); }
-            }}>{item.gatewayLinked ? "Xóa cuộc trò chuyện" : "Xóa bản lưu cũ"}</button>
-          </div></details>
-        </div>)}
+  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập" };
+  const navItems: Array<{id:AppView;label:string;icon:string}> = [
+    {id:"overview",label:"Tổng quan",icon:"overview"},{id:"chat",label:"Trò chuyện",icon:"chat"},{id:"tasks",label:"Công việc",icon:"tasks"},{id:"calendar",label:"Lịch",icon:"calendar"},{id:"notes",label:"Ghi chú",icon:"notes"}
+  ];
+  const toolItems: Array<{id:AppView;label:string;icon:string}> = [
+    {id:"cloud",label:"Cloud Storage",icon:"cloud"},{id:"learning",label:"Nguồn học",icon:"book"},{id:"dreaming",label:"Dreaming",icon:"dream"},{id:"practice",label:"Ca trực giả lập",icon:"practice"},{id:"skills",label:"Bản đồ học tập",icon:"skills"}
+  ];
+  const startChat = (text:string) => {setView("chat");void send(text,blank(),[],uid());};
+  async function openSkills(){
+    setBusy(true);
+    try{const response=await fetch("/api/practice/notes");if(!response.ok)throw new Error("Không tải được ghi chú học tập.");
+      const data:{notes:string;learning?:string;map?:typeof learningMap;chatLearning?:typeof chatLearning}=await response.json();
+      setPracticeNotes(data.notes);setPracticeLearning(data.learning??"");setLearningMap(data.map??{completed:0,nextStep:"",topics:[]});setChatLearning(data.chatLearning??{summary:"",skills:[]});navigate("skills");
+    }catch(cause){setError((cause as Error).message);}finally{setBusy(false);}
+  }
+  const historyPanel = <>
+    <button className="history-new" disabled={busy} onClick={()=>{select();input.current?.focus();}}>＋ Cuộc trò chuyện mới</button>
+    <label className="history-search"><Icon name="search"/><input aria-label="Tìm cuộc trò chuyện" placeholder="Tìm cuộc trò chuyện…" value={query} onChange={event=>setQuery(event.target.value)}/></label>
+    <div className="history-label">GẦN ĐÂY</div><nav className="history-list" aria-label="Lịch sử trò chuyện">
+      {query.trim()&&visibleItems.length===0&&<p role="status">Không tìm thấy cuộc trò chuyện.</p>}
+      {visibleItems.map(item=><div className={"history-row "+(item.id===active?"selected":"")} key={item.id}>
+        <button className="history-title" aria-current={item.id===active?"page":undefined} disabled={busy} onClick={()=>select(item.id)}>{item.pinned?"◆ ":""}{item.title}</button>
+        <details><summary aria-label={"Thao tác với "+item.title}>⋯</summary><div className="history-menu">
+          <button disabled={busy} onClick={()=>void updateConversation({...item,pinned:!item.pinned})}>{item.pinned?"Bỏ ghim":"Ghim"}</button>
+          <button disabled={busy} onClick={()=>{const name=window.prompt("Tên cuộc trò chuyện",item.title)?.trim();if(name)void updateConversation({...item,title:name.slice(0,100)});}}>Đổi tên</button>
+          <button disabled={busy} onClick={async()=>{if(!window.confirm("Xóa cuộc trò chuyện khỏi lịch sử?"))return;setBusy(true);try{if(remoteWorkspace||item.gatewayLinked){const response=await fetch("/api/chat/"+encodeURIComponent(item.id),{method:"DELETE"});if(!response.ok)throw new Error("Gateway chưa xác nhận xóa.");}setItems(old=>old.filter(value=>value.id!==item.id));if(active===item.id)select();}catch(cause){setError((cause as Error).message);}finally{setBusy(false);}}}>{item.gatewayLinked?"Xóa cuộc trò chuyện":"Xóa bản lưu cũ"}</button>
+        </div></details>
+      </div>)}
+    </nav>
+  </>;
+  return <div className={"app "+(collapsed?"nav-collapsed ":"")+(view==="chat"&&historyOpen?"with-chat-history":"")}>
+    {side&&<button className="nav-scrim" aria-label="Đóng điều hướng" onClick={()=>setSide(false)}/>}
+    <aside className={"app-sidebar "+(side?"open ":"")+(collapsed?"collapsed":"")}>
+      <div className="brand"><span className="mark">✦</span><div className="brand-copy">Đệ Tốt<small>Không gian cá nhân</small></div></div>
+      <nav className="primary-nav" aria-label="Điều hướng chính">
+        {navItems.map(item=><button key={item.id} className={"nav-item "+(view===item.id?"active":"")} aria-current={view===item.id?"page":undefined} title={collapsed?item.label:undefined} onClick={()=>item.id==="chat"?select():navigate(item.id)}><Icon name={item.icon}/><span>{item.label}</span></button>)}
+        <button className="nav-item tools-toggle" aria-expanded={toolsOpen} title={collapsed?"Công cụ":undefined} onClick={()=>setToolsOpen(value=>!value)}><Icon name="tools"/><span>Công cụ</span><Icon name="chevron"/></button>
+        {toolsOpen&&<div className="tools-list">{toolItems.map(item=><button key={item.id} className={"nav-item tool-item "+(view===item.id?"active":"")} title={collapsed?item.label:undefined} onClick={()=>{if(item.id==="practice"){select();void send("Bắt đầu một ca trực giả lập.",blank(),[],uid(),undefined,true);}else if(item.id==="skills")void openSkills();else{if(item.id==="learning")setLearningIntent(undefined);navigate(item.id);}}}><Icon name={item.icon}/><span>{item.label}</span></button>)}</div>}
       </nav>
-      <div className="sidebar-footer">
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(true); setTrustedLearning(false); setMemoryReview(false); setAgenticTasks(false); setPracticeNotes(undefined); setSide(false); }}>Cloud Storage</button>{" "}
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(true); setMemoryReview(false); setAgenticTasks(false); setPracticeNotes(undefined); setSide(false); }}>Nguồn học</button>{" "}
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(true); setAgenticTasks(false); setPracticeNotes(undefined); setSide(false); }}>Dreaming · rà soát ký ức</button>{" "}
-        <button disabled={busy} onClick={() => { setCalendar(false); setCloudStorage(false); setTrustedLearning(false); setMemoryReview(false); setAgenticTasks(true); setPracticeNotes(undefined); setSide(false); }}>Việc & nhắc lịch</button>{" "}
-        <button disabled={busy} onClick={() => { select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true); }}>Ca trực giả lập</button>{" "}
-        <button disabled={busy} onClick={async () => {
-          setBusy(true);
-          try {
-            const response = await fetch("/api/practice/notes");
-            if (!response.ok) throw new Error("Không tải được ghi chú học tập.");
-            const data: { notes: string; learning?: string; map?: typeof learningMap; chatLearning?: typeof chatLearning } = await response.json();
-            setPracticeNotes(data.notes);
-            setPracticeLearning(data.learning ?? "");
-            setLearningMap(data.map ?? { completed: 0, nextStep: "", topics: [] });
-            setChatLearning(data.chatLearning ?? { summary: "", skills: [] });
-            setCalendar(false);
-            setCloudStorage(false);
-            setTrustedLearning(false);
-            setSide(false);
-          } catch (cause) { setCalendar(false); setCloudStorage(false); setError((cause as Error).message); }
-          finally { setBusy(false); }
-        }}>Bản đồ học tập</button>{" "}
-        <button aria-pressed={calendar} onClick={() => { setCalendar(!calendar); setCloudStorage(false); setTrustedLearning(false); setSide(false); }}>Lịch</button>{" "}
-        <button onClick={() => setDark(!dark)}>{dark ? "☼ Giao diện sáng" : "☾ Giao diện tối"}</button>
-      </div>
+      <div className="sidebar-spacer"/>
+      <details className="account-menu"><summary title={collapsed?"Tài khoản và trạng thái":undefined}><span className="account-avatar">ĐT</span><span className="account-copy"><strong>Tài khoản</strong><small>{remoteWorkspace?"Đã đăng nhập":"Máy này"}</small></span><Icon name="chevron"/></summary>
+        <div className="account-popover"><div className="account-status"><span className="status-dot"/>Lab · dữ liệu thử</div><div className="google-profile-slot"><GoogleProfiles/></div>{remoteWorkspace&&<form method="post" action="/logout"><button className="account-action">Đăng xuất</button></form>}<button className="account-action" onClick={()=>setDark(!dark)}>{dark?"☼":"☾"} Giao diện {dark?"sáng":"tối"}</button></div>
+      </details>
+      <button className="collapse-toggle" aria-label={collapsed?"Mở rộng thanh điều hướng":"Thu gọn thanh điều hướng"} onClick={()=>setCollapsed(value=>{localStorage.setItem("detot.sidebar-collapsed",String(!value));return !value;})}><Icon name={collapsed?"expand":"collapse"}/><span>Thu gọn</span></button>
     </aside>
-    <main>
-      <header><button className="mobile" aria-label="Mở lịch sử" onClick={() => setSide(true)}>☰</button><strong>{cloudStorage ? "Cloud Storage" : trustedLearning ? "Nguồn học" : calendar ? "Lịch" : conversation?.title ?? "Cuộc trò chuyện mới"}</strong>{conversation?.miniPractice && <><span className="mini-practice-badge">Luyện nhanh · có thể dừng bất cứ lúc nào</span><button type="button" disabled={busy} onClick={() => void endMiniPractice()}>Kết thúc lượt luyện</button></>}<span className="lab">Lab · dữ liệu thử</span><GoogleProfiles />{remoteWorkspace && <form method="post" action="/logout"><button>Đăng xuất</button></form>}</header>
-      {practiceNotes !== undefined && <section aria-label="Bản đồ học tập" className="transcript">
-        <h2>Bản đồ học tập</h2>
-        <p><strong>Tiến độ:</strong> {practiceLearning}</p>
-        <p>{learningMap.nextStep}</p>
-        <button type="button" disabled={busy} onClick={() => {
-          setPracticeNotes(undefined);
-          setCalendar(false); setCloudStorage(false); setTrustedLearning(false);
-          select(); void send("Bắt đầu một ca trực giả lập.", blank(), [], uid(), undefined, true);
-        }}>Luyện ca được đề xuất</button>{" "}
-        <button type="button" disabled={busy} onClick={beginMiniPractice}>Luyện nhanh 5 phút</button>
-        {learningMap.completed > 0 && <div className="learning-map">
-          {learningMap.topics.map(topic => <article className="learning-topic" key={topic.id}>
-            <div className="learning-topic-heading"><strong>{topic.title}</strong><span>{topic.mastery}% tín hiệu tiến bộ</span></div>
-            <progress max={100} value={topic.mastery} aria-label={`Tiến độ ${topic.title}`} />
-            <p>{topic.confidence} · {topic.completed} ca · chẩn đoán đúng {topic.correctDiagnoses}, sai {topic.wrongDiagnoses} · bàn giao tốt {topic.goodHandoffs}</p>
-            <p>{topic.signal}</p>
-          </article>)}
+    {view==="chat"&&historyOpen&&<aside className={"chat-history "+(mobileHistoryOpen?"mobile-history-open":"")} aria-label="Lịch sử cuộc trò chuyện">{historyPanel}</aside>}
+    {mobileHistoryOpen&&<button className="history-scrim" aria-label="Đóng lịch sử" onClick={()=>setMobileHistoryOpen(false)}/>}
+    <main className="main-content">
+      <header className="topbar"><button className="mobile-nav-button" aria-label="Mở điều hướng" onClick={()=>setSide(true)}><Icon name="menu"/></button>
+        {view==="chat"&&<button className="history-toggle" aria-label="Lịch sử trò chuyện" onClick={()=>{if(window.matchMedia("(max-width: 760px)").matches)setMobileHistoryOpen(true);else setHistoryOpen(open=>!open);}}><Icon name="history"/></button>}
+        <strong>{titles[view]}</strong><span className="topbar-spacer"/>
+        {conversation?.practice&&<button className="topbar-action" disabled={busy} onClick={()=>{select();input.current?.focus();}}>Chuyển sang chat thường</button>}
+        {conversation?.miniPractice&&<><span className="mini-practice-badge">Luyện nhanh · có thể dừng bất cứ lúc nào</span><button className="topbar-action" disabled={busy} onClick={()=>void endMiniPractice()}>Kết thúc lượt luyện</button></>}
+        {view==="chat"&&<button className="topbar-action" disabled={busy} onClick={()=>{select();input.current?.focus();}}>＋ Chat mới</button>}
+      </header>
+      {error&&<div className="global-error" role="alert">{error} {retry.current&&<button onClick={()=>retry.current?.()}>Thử lại</button>}</div>}
+      <div className={"view-content "+(view==="chat"?"chat-content":"")}>
+        {view==="overview"&&<Overview onNavigate={navigate} onChat={startChat}/>}
+        {view==="tasks"&&<AgenticTasks/>}{view==="calendar"&&<Calendar/>}{view==="notes"&&<PersonalNotes/>}
+        {view==="cloud"&&<CloudStorage/>}{view==="learning"&&<TrustedLearning initialRequest={learningIntent}/>}
+        {view==="dreaming"&&<MemoryReview/>}
+        {view==="skills"&&<section className="learning-dashboard" aria-label="Bản đồ học tập">
+          <section className="learning-overview"><h2>Bản đồ học tập</h2><p><strong>Tiến độ:</strong> {practiceLearning}</p><p>{learningMap.nextStep}</p>
+            <button disabled={busy} onClick={()=>{select();void send("Bắt đầu một ca trực giả lập.",blank(),[],uid(),undefined,true);}}>Luyện ca được đề xuất</button>{" "}<button disabled={busy} onClick={beginMiniPractice}>Luyện nhanh 5 phút</button>
+            {learningMap.completed>0&&<div className="learning-map">{learningMap.topics.map(topic=><article className="learning-topic" key={topic.id}><div className="learning-topic-heading"><strong>{topic.title}</strong><span>{topic.mastery}% tín hiệu tiến bộ</span></div><progress max={100} value={topic.mastery}/><p>{topic.confidence} · {topic.completed} ca · chẩn đoán đúng {topic.correctDiagnoses}, sai {topic.wrongDiagnoses} · bàn giao tốt {topic.goodHandoffs}</p><p>{topic.signal}</p></article>)}</div>}
+            <p className="muted">Điểm tiến bộ được làm mượt khi còn ít lượt. Bản đồ chỉ lưu số liệu tổng hợp.</p></section>
+          <section className="chat-learning"><div className="chat-learning-heading"><div><h3>Hiểu cách bạn học qua trò chuyện</h3><p>{chatLearning.summary||"Chưa có tín hiệu học tập."}</p></div>{chatLearning.skills.length>0&&<button disabled={busy} onClick={async()=>{if(!window.confirm("Xóa toàn bộ tín hiệu cá nhân hóa rút ra từ các buổi ôn code?"))return;setBusy(true);try{const response=await fetch("/api/practice/chat-learning",{method:"DELETE"});if(!response.ok)throw new Error("Không xóa được tín hiệu học tập.");setChatLearning({summary:"Tín hiệu đã xóa.",skills:[]});}catch(cause){setError((cause as Error).message);}finally{setBusy(false);}}}>Xóa tín hiệu</button>}</div>
+            {chatLearning.skills.map(item=><article className="learning-topic" key={item.topic+item.skill}><strong>{item.topic} · {item.skill}</strong><p>{item.pattern}</p><p>{item.observations} lượt · tự áp dụng {item.progressSignals} · cần gợi ý {item.practiceSignals}</p></article>)}</section>
+          <section className="learning-notes"><h3>Ghi chú học tập</h3><textarea value={practiceNotes??""} maxLength={2000} onChange={event=>setPracticeNotes(event.target.value)}/><button disabled={busy} onClick={async()=>{setBusy(true);try{const response=await fetch("/api/practice/notes",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({notes:practiceNotes??""})});if(!response.ok)throw new Error("Không lưu được ghi chú học tập.");}catch(cause){setError((cause as Error).message);}finally{setBusy(false);}}}>Lưu ghi chú</button></section>
+        </section>}
+        {view==="chat"&&<div className="chat-page">
+          <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
+            {!conversation?.messages.length&&<div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
+            {conversation?.messages.map((message,index)=><article key={message.id} className={message.role}><div className="author">{message.role==="user"?"Bạn":"Đệ Tốt"}</div>{message.tool&&<div className="tool">✓ {message.tool}</div>}
+              {message.role==="assistant"?<Markdown remarkPlugins={[gfm]} components={{code:Code,img:({alt})=><span>{alt||"[Hình ảnh]"}</span>,a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>}}>{message.text}</Markdown>:<div className="user-text">{message.text}</div>}
+              {message.role==="user"&&<button className="action" disabled={busy} onClick={()=>{const text=window.prompt("Sửa tin nhắn và tạo nhánh mới",message.text)?.trim();if(text&&conversation)void send(text,{...conversation,id:uid(),pinned:false},forkMessages(conversation.messages,index));}}>Sửa và tạo nhánh</button>}
+              {message.role==="assistant"&&index===conversation.messages.length-1&&!message.tool&&!message.calendarContext&&<button className="action" disabled={busy} onClick={()=>{const previous=conversation.messages[index-1];if(previous?.role==="user")void send(previous.text,conversation,forkMessages(conversation.messages,index-1));}}>Tạo lại câu trả lời</button>}
+            </article>)}
+            {busy&&<p className="progress" role="status">Đệ Tốt đang xử lý…</p>}<div ref={end}/>
+          </section>
+          <footer><form className={attachments.length?"composer has-attachments":"composer"} onDragOver={event=>event.preventDefault()} onDrop={event=>{event.preventDefault();addAttachments(Array.from(event.dataTransfer.files));}} onSubmit={event=>{event.preventDefault();void send(draft);}}>
+            <input ref={fileInput} className="file-input" type="file" multiple aria-label="Chọn tệp để phân tích" accept=".txt,.md,.markdown,.json,.jsonl,.ndjson,.xml,.csv,.tsv,.cs,.py,.js,.jsx,.ts,.tsx,.sql,.html,.css,.yml,.yaml,.toml,.ini,.sh,.ps1,.java,.go,.rs,.php,.rb,.c,.h,.cpp,.hpp,.docx,.xlsx,.pptx,.zip,.pdf,.doc,.xls,.ppt,.parquet,.sqlite,.sqlite3,.db,.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.bmp" onChange={event=>{addAttachments(Array.from(event.target.files??[]));event.currentTarget.value="";}}/>
+            {attachments.length>0&&<div className="attachment-list" aria-label="Tệp đính kèm">{attachments.map((file,index)=><AttachmentChip key={file.name+index} file={file} onRemove={()=>setAttachments(old=>old.filter((_,item)=>item!==index))}/>)}</div>}
+            <textarea ref={input} aria-label="Tin nhắn" rows={2} maxLength={1500} placeholder="Nhắn cho Đệ Tốt…" value={draft} onChange={event=>setDraft(event.target.value)} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();void send(draft);}}}/>
+            <div className="controls">{last?.calendarContext&&<button type="button" disabled={busy||!draft.trim()} onClick={()=>void send(draft,conversation,conversation?.messages,uid(),last.calendarContext)}>Bổ sung cho lịch</button>}
+              <button type="button" disabled={busy||attachments.length>=5||!!conversation?.miniPractice} onClick={()=>fileInput.current?.click()}>＋ Tệp</button>{busy?<button type="button" onClick={()=>request.current?.abort()}>Dừng</button>:<button className="primary" disabled={!draft.trim()&&attachments.length===0}>Gửi ↑</button>}</div>
+          </form><p>{remoteWorkspace?"Lịch sử tự lưu trên laptop.":"Lịch sử lưu trên trình duyệt."} Tệp được trích xuất trong lab; phần văn bản gửi tới nhà cung cấp LLM. PDF/ảnh cần OCR hoặc adapter tương ứng.</p></footer>
         </div>}
-        <p className="muted">Điểm tiến bộ được làm mượt khi còn ít lượt. Đệ Tốt chỉ lưu số liệu tổng hợp, không lưu log, mã nguồn hay nội dung trò chuyện trong bản đồ này.</p>
-        <section className="chat-learning" aria-label="Tín hiệu từ các buổi ôn code">
-          <div className="chat-learning-heading"><div><h3>Hiểu cách bạn học qua trò chuyện</h3><p>{chatLearning.summary || "Chưa có tín hiệu học tập."}</p></div>
-            {chatLearning.skills.length > 0 && <button type="button" disabled={busy} onClick={async () => {
-              if (!window.confirm("Xóa toàn bộ tín hiệu cá nhân hóa rút ra từ các buổi ôn code?")) return;
-              setBusy(true); setError("");
-              try {
-                const response = await fetch("/api/practice/chat-learning", { method: "DELETE" });
-                if (!response.ok) throw new Error("Không xóa được tín hiệu học tập.");
-                setChatLearning({ summary: "Khi bạn trao đổi về kiến thức hoặc code, Đệ Tốt sẽ âm thầm ghi nhận tín hiệu lặp lại để cá nhân hóa gợi ý.", skills: [] });
-              } catch (cause) { setError((cause as Error).message); }
-              finally { setBusy(false); }
-            }}>Xóa tín hiệu</button>}
-          </div>
-          {chatLearning.skills.length > 0 && <div className="learning-map">{chatLearning.skills.slice(0, 8).map(item => <article className="learning-topic" key={`${item.topic}-${item.skill}`}>
-            <div className="learning-topic-heading"><strong>{item.topic} · {item.skill}</strong><span>{item.confidence}</span></div>
-            <p>{item.pattern}</p>
-            <p>{item.observations} lượt được ghi nhận · tự áp dụng {item.progressSignals} · cần gợi ý {item.practiceSignals}</p>
-          </article>)}</div>}
-          <p className="muted">Sau mỗi lượt chat thường, model đang cấu hình sẽ phân loại tín hiệu học trong nền. Chỉ nhãn kỹ năng và số liệu tổng hợp được lưu mã hóa; không lưu đoạn chat. Có thể xóa tại đây.</p>
-        </section>
-        <form onSubmit={async event => {
-          event.preventDefault();
-          setBusy(true);
-          setError("");
-          try {
-            const response = await fetch("/api/practice/notes", {
-              method: "PUT", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ notes: practiceNotes }),
-            });
-            if (!response.ok) throw new Error("Không lưu được ghi chú học tập.");
-            setPracticeNotes(undefined);
-          } catch (cause) { setError((cause as Error).message); }
-          finally { setBusy(false); }
-        }}>
-          <label>Ghi chú học tập<textarea value={practiceNotes} maxLength={2000}
-            onChange={event => setPracticeNotes(event.target.value)} /></label>
-          <button disabled={busy}>Lưu</button>{" "}
-          <button type="button" disabled={busy} onClick={() => setPracticeNotes("")}>Xóa nội dung</button>{" "}
-          <button type="button" disabled={busy} onClick={() => setPracticeNotes(undefined)}>Đóng</button>
-        </form>
-      </section>}
-      {agenticTasks ? <AgenticTasks /> : memoryReview ? <MemoryReview /> : cloudStorage ? <CloudStorage /> : trustedLearning ? <TrustedLearning initialRequest={learningIntent} /> : calendar ? <Calendar /> : <>
-      <section className="transcript" aria-label="Nội dung trò chuyện" aria-busy={busy}>
-        {!conversation?.messages.length && <div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
-        {conversation?.messages.map((message, index) => <article key={message.id} className={message.role}>
-          <div className="author">{message.role === "user" ? "Bạn" : "Đệ Tốt"}</div>
-          {message.tool && <div className="tool">✓ {message.tool}</div>}
-          {message.role === "assistant" ? <Markdown remarkPlugins={[gfm]} components={{
-            code: Code, img: ({ alt }) => <span>{alt || "[Hình ảnh]"}</span>,
-            a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-          }}>{message.text}</Markdown> : <div className="user-text">{message.text}</div>}
-          {message.role === "user" && <button className="action" disabled={busy} onClick={() => {
-            const text = window.prompt("Sửa tin nhắn và tạo nhánh mới", message.text)?.trim();
-            if (text && conversation) void send(text, { ...conversation, id: uid(), pinned: false }, forkMessages(conversation.messages, index));
-          }}>Sửa và tạo nhánh</button>}
-          {message.role === "assistant" && index === conversation.messages.length - 1 && !message.tool && !message.calendarContext && <button className="action" disabled={busy} onClick={() => {
-            const previous = conversation.messages[index - 1];
-            if (previous?.role === "user") void send(previous.text, conversation, forkMessages(conversation.messages, index - 1));
-          }}>Tạo lại câu trả lời</button>}
-        </article>)}
-        {busy && <p className="progress" role="status">Đệ Tốt đang xử lý…</p>}
-        <div ref={end} />
-      </section>
-      <footer>
-        {error && <div className="error" role="alert">{error} {retry.current && <button onClick={() => retry.current?.()}>Thử lại</button>}</div>}
-        <form className={attachments.length ? "composer has-attachments" : "composer"} onDragOver={event => event.preventDefault()}
-          onDrop={event => { event.preventDefault(); addAttachments(Array.from(event.dataTransfer.files)); }}
-          onSubmit={event => { event.preventDefault(); void send(draft); }}>
-          <input ref={fileInput} className="file-input" type="file" multiple aria-label="Chọn tệp để phân tích"
-            accept=".txt,.md,.markdown,.json,.jsonl,.ndjson,.xml,.csv,.tsv,.cs,.py,.js,.jsx,.ts,.tsx,.sql,.html,.css,.yml,.yaml,.toml,.ini,.sh,.ps1,.java,.go,.rs,.php,.rb,.c,.h,.cpp,.hpp,.docx,.xlsx,.pptx,.zip,.pdf,.doc,.xls,.ppt,.parquet,.sqlite,.sqlite3,.db,.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.bmp"
-            onChange={event => { addAttachments(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
-          {attachments.length > 0 && <div className="attachment-list" aria-label="Tệp đính kèm">
-            {attachments.map((file, index) => <AttachmentChip key={`${file.name}-${index}`} file={file}
-              onRemove={() => setAttachments(old => old.filter((_, item) => item !== index))} />)}
-          </div>}
-          <textarea ref={input} aria-label="Tin nhắn" rows={2} maxLength={1500} placeholder="Nhắn cho Đệ Tốt…" value={draft} onChange={event => setDraft(event.target.value)}
-            onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(draft); } }} />
-          <div className="controls">
-            {last?.calendarContext && <button type="button" disabled={busy || !draft.trim()} onClick={() => void send(draft, conversation, conversation?.messages, uid(), last.calendarContext)}>Bổ sung cho lịch</button>}
-            <button type="button" disabled={busy || attachments.length >= 5 || !!conversation?.miniPractice} onClick={() => fileInput.current?.click()}>＋ Tệp</button>
-            {busy ? <button type="button" onClick={() => request.current?.abort()}>Dừng</button> : <button className="primary" disabled={!draft.trim() && attachments.length === 0}>Gửi ↑</button>}
-          </div>
-        </form>
-        <p>{remoteWorkspace ? "Lịch sử tự lưu trên laptop." : "Lịch sử lưu trên trình duyệt."} Tệp được trích xuất trong lab; phần văn bản gửi tới nhà cung cấp LLM. PDF/ảnh cần OCR hoặc adapter tương ứng.</p>
-      </footer>
-      </>}
+      </div>
     </main>
   </div>;
 }
