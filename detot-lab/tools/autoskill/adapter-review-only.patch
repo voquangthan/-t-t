@@ -1,0 +1,511 @@
+diff --git a/AutoSkill4OpenClaw/adapter/embedded_runtime.js b/AutoSkill4OpenClaw/adapter/embedded_runtime.js
+index a313474..96e7c16 100644
+--- a/AutoSkill4OpenClaw/adapter/embedded_runtime.js
++++ b/AutoSkill4OpenClaw/adapter/embedded_runtime.js
+@@ -1,7 +1,9 @@
+ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
++import crypto from "node:crypto";
+ import { fileURLToPath } from "node:url";
++import { sanitizeExperienceText, sanitizeSkillCandidate } from "./detot-privacy.mjs";
+ 
+ function asString(v) {
+   if (v == null) return "";
+@@ -890,11 +892,49 @@ function sanitizeMessage(item) {
+   if (!item || typeof item !== "object") return null;
+   const role = trimmed(item.role).toLowerCase();
+   if (!["system", "user", "assistant", "tool"].includes(role)) return null;
+-  const content = trimmed(collectText(item.content));
++  const content = sanitizeExperienceText(trimmed(collectText(item.content)));
+   if (!content) return null;
+   return { role, content };
+ }
+ 
++function proposalId(userId, sessionId, candidate) {
++  const basis = `${userId}\n${sessionId}\n${JSON.stringify(candidate)}`;
++  return crypto.createHash("sha256").update(basis).digest("hex").slice(0, 24);
++}
++
++function writeReviewProposal({ reviewQueueDir, userId, candidate, evidence }) {
++  const uid = slug(userId || "default", "default");
++  const id = proposalId(uid, evidence?.session_id || "", candidate);
++  const root = path.join(path.resolve(reviewQueueDir), "Users", uid);
++  ensureDir(root);
++  const target = path.join(root, `${id}.json`);
++  if (fs.existsSync(target)) return { status: "proposed", proposal_id: id, path: target, duplicate: true };
++  const privacy = sanitizeSkillCandidate(candidate);
++  if (!privacy.safe) return { status: "skipped", reason: `privacy_gate_${privacy.reasons[0] || "rejected"}` };
++  const safeCandidate = privacy.candidate;
++  const proposal = {
++    proposal_id: id,
++    owner_id: uid,
++    status: "pending_review",
++    version: "0.1.0",
++    created_at: new Date().toISOString(),
++    source: "autoskill-openclaw-adapter",
++    evidence: {
++      session_id: String(evidence?.session_id || ""),
++      turn_count: Number(evidence?.turn_count || 0),
++      has_successful_main_turn: Boolean(evidence?.has_successful_main_turn),
++      successful_main_turn: Boolean(evidence?.has_successful_main_turn),
++      source_hash: crypto.createHash("sha256").update(JSON.stringify(evidence || {})).digest("hex"),
++    },
++    candidate: safeCandidate,
++    history: [{ version: "0.1.0", action: "proposed", at: new Date().toISOString() }],
++  };
++  const temporary = `${target}.${process.pid}.tmp`;
++  fs.writeFileSync(temporary, JSON.stringify(proposal, null, 2), { encoding: "utf8", flag: "wx" });
++  fs.renameSync(temporary, target);
++  return { status: "proposed", proposal_id: id, path: target, duplicate: false };
++}
++
+ function sanitizeMessages(list) {
+   if (!Array.isArray(list)) return [];
+   const out = [];
+@@ -2137,7 +2177,17 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     };
+   }
+ 
+-  async function maintainSkill({ userId, candidate, modelHint }) {
++  async function maintainSkill({ userId, candidate, modelHint, sessionEvidence }) {
++    if (cfg.reviewOnly === true) {
++      const proposal = writeReviewProposal({
++        reviewQueueDir: cfg.embedded.reviewQueueDir,
++        userId,
++        candidate,
++        evidence: sessionEvidence,
++      });
++      if (proposal.status !== "proposed") return proposal;
++      return { status: "proposed", proposal_id: proposal.proposal_id, duplicate: proposal.duplicate };
++    }
+     const skillBankDir = path.resolve(cfg.embedded.skillBankDir);
+     const openclawSkillsDir = path.resolve(cfg.embedded.openclawSkillsDir);
+     const mirrorEnabled = isMirrorInstallEnabled(cfg);
+@@ -2253,6 +2303,10 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+         }
+         continue;
+       }
++      if (cfg.reviewOnly === true && !session.messages.some((message) => message.role === "tool")) {
++        results.push({ session_id: session.session_id, status: "skipped", reason: "no_tool_evidence" });
++        continue;
++      }
+       try {
+         const candidate = await extractCandidate({
+           invokeModel,
+@@ -2275,6 +2329,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+           userId: payloadUser || ended.user,
+           candidate,
+           modelHint,
++          sessionEvidence: session.evidence,
+         });
+         results.push({ session_id: session.session_id, ...maintain });
+         if (log?.info) {
+@@ -2297,6 +2352,14 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+   }
+ 
+   async function processLiveCheckpointSessions(items, payloadUser, modelHint) {
++    if (cfg.reviewOnly === true) {
++      return (Array.isArray(items) ? items : []).map((item) => ({
++        session_id: item?.session_id || "",
++        status: "skipped",
++        reason: "review_only_requires_closed_session",
++        checkpoint: Number(item?.checkpoint || 0) || 0,
++      }));
++    }
+     const results = [];
+     for (const item of items) {
+       const session = loadClosedSession(item);
+@@ -2351,6 +2414,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+           userId: payloadUser || item.user,
+           candidate,
+           modelHint,
++          sessionEvidence: session.evidence,
+         });
+         results.push({ session_id: session.session_id, checkpoint, ...maintain });
+         if (log?.info) {
+@@ -2374,7 +2438,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+ 
+   function summarizeEndedSessionResults(results) {
+     const items = Array.isArray(results) ? results : [];
+-    const changed = items.filter((x) => x.status === "added" || x.status === "merged");
++    const changed = items.filter((x) => x.status === "added" || x.status === "merged" || x.status === "proposed");
+     return {
+       status: changed.length ? "scheduled" : "skipped",
+       reason: changed.length ? "" : "session_not_extractable",
+@@ -2401,7 +2465,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+         }
+       }
+       if (log?.info) {
+-        const changedCount = results.filter((x) => x.status === "added" || x.status === "merged").length;
++        const changedCount = results.filter((x) => x.status === "added" || x.status === "merged" || x.status === "proposed").length;
+         const failedCount = results.filter((x) => x.status === "failed").length;
+         log.info(
+           `[autoskill-openclaw-adapter] embedded closed sessions processed source=${source} total=${results.length} changed=${changedCount} failed=${failedCount}`,
+@@ -2444,7 +2508,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+         }
+       }
+       if (log?.info) {
+-        const changedCount = results.filter((x) => x.status === "added" || x.status === "merged").length;
++        const changedCount = results.filter((x) => x.status === "added" || x.status === "merged" || x.status === "proposed").length;
+         const failedCount = results.filter((x) => x.status === "failed").length;
+         log.info(
+           `[autoskill-openclaw-adapter] embedded live checkpoints processed source=${source} total=${results.length} changed=${changedCount} failed=${failedCount}`,
+@@ -2526,6 +2590,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+   function scheduleStartupRecovery() {
+     if (state.recoveryStarted) return;
+     state.recoveryStarted = true;
++    pruneExpiredFinalizedArchives();
+     const recoverable = listRecoverableClosedSessions();
+     if (!recoverable.length) return;
+     if (log?.info) {
+@@ -2536,6 +2601,35 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     queueEndedSessionProcessing(recoverable, "", "", "startup_recovery", false);
+   }
+ 
++  function pruneExpiredFinalizedArchives() {
++    const root = path.resolve(cfg.embedded.sessionArchiveDir);
++    const retentionDays = Math.max(1, Math.min(90, Number(cfg.embedded.archiveRetentionDays) || 7));
++    const cutoff = nowMs() - retentionDays * 24 * 60 * 60 * 1000;
++    let removed = 0;
++    const visit = (dir) => {
++      let entries = [];
++      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
++      for (const entry of entries) {
++        const abs = path.join(dir, entry.name);
++        if (entry.isSymbolicLink()) continue;
++        if (entry.isDirectory()) { visit(abs); continue; }
++        if (!entry.isFile() || !/\.\d+\.[a-z0-9_-]+\.(?:jsonl|json)$/iu.test(entry.name)) continue;
++        try {
++          const stat = fs.statSync(abs);
++          if (stat.mtimeMs >= cutoff) continue;
++          fs.unlinkSync(abs);
++          removed += 1;
++        } catch (_) {
++          // Retention is best-effort and never broadens beyond finalized files.
++        }
++      }
++    };
++    visit(root);
++    if (removed && log?.info) {
++      log.info(`[autoskill-openclaw-adapter] pruned expired finalized archives count=${removed} retention_days=${retentionDays}`);
++    }
++  }
++
+   if (typeof setTimeout === "function") {
+     const timer = setTimeout(() => {
+       scheduleStartupRecovery();
+diff --git a/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs b/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs
+index 04b7593..c4c161d 100644
+--- a/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs
++++ b/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs
+@@ -23,11 +23,12 @@ function makeSandbox() {
+   const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoskill-embedded-"));
+   const sessionArchiveDir = path.join(root, "sessions");
+   const skillBankDir = path.join(root, "SkillBank");
++  const reviewQueueDir = path.join(root, "review_queue");
+   const openclawSkillsDir = path.join(root, "openclaw-skills");
+   fs.mkdirSync(sessionArchiveDir, { recursive: true });
+   fs.mkdirSync(skillBankDir, { recursive: true });
+   fs.mkdirSync(openclawSkillsDir, { recursive: true });
+-  return { root, sessionArchiveDir, skillBankDir, openclawSkillsDir };
++  return { root, sessionArchiveDir, skillBankDir, reviewQueueDir, openclawSkillsDir };
+ }
+ 
+ async function waitFor(check, timeoutMs = 1500) {
+@@ -50,6 +51,7 @@ function makeConfig(paths, overrides = {}) {
+     embedded: {
+       sessionArchiveDir: paths.sessionArchiveDir,
+       skillBankDir: paths.skillBankDir,
++      reviewQueueDir: paths.reviewQueueDir,
+       openclawSkillsDir: paths.openclawSkillsDir,
+       bm25TopK: 8,
+       ...embeddedOverride,
+@@ -57,6 +59,94 @@ function makeConfig(paths, overrides = {}) {
+   };
+ }
+ 
++test("review-only mode redacts private identifiers and never installs an unapproved skill", async () => {
++  const paths = makeSandbox();
++  const processor = createEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async invokeModel() {
++      return JSON.stringify({ skills: [{ name: "Safe routine", description: "A routine", prompt: "Check safely", confidence: 0.9 }] });
++    },
++  });
++  const result = await processor.handle({
++    user: "detot-owner", session_id: "success-1", turn_type: "main", session_done: true, success: true,
++    messages: [
++      { role: "user", content: "Use api_key: sk-abcdefghijklmnopqrstuvwxyz123456 for this task; contact me at private.person@example.com or 0912345678." },
++      { role: "user", content: "My bank account is 1234567890123456." },
++      { role: "assistant", content: "Completed the repeatable checklist." },
++      { role: "tool", content: "staging copy verified" },
++    ],
++  }, {}, {});
++  assert.equal(result.status, "scheduled");
++  assert.equal(result.jobs[0].status, "proposed");
++  assert.equal(listSkillDirs(paths.skillBankDir, "detot-owner").length, 0);
++  assert.equal(fs.readdirSync(paths.openclawSkillsDir).length, 0);
++  const archiveDir = path.join(paths.sessionArchiveDir, "detot-owner");
++  const archiveName = fs.readdirSync(archiveDir).find((name) => name.endsWith(".jsonl"));
++  assert.ok(archiveName);
++  const archive = fs.readFileSync(path.join(archiveDir, archiveName), "utf8");
++  assert.doesNotMatch(archive, /sk-abcdefghijklmnopqrstuvwxyz123456|private\.person@example\.com|0912345678|1234567890123456/);
++  assert.match(archive, /PRIVATE_SESSION_OMITTED/);
++  const proposalFile = path.join(paths.reviewQueueDir, "Users", "detot-owner", `${result.jobs[0].proposal_id}.json`);
++  const proposal = JSON.parse(fs.readFileSync(proposalFile, "utf8"));
++  assert.equal(proposal.status, "pending_review");
++  assert.equal(proposal.owner_id, "detot-owner");
++  assert.match(proposal.evidence.source_hash, /^[a-f0-9]{64}$/);
++});
++
++test("review-only mode keeps the previous approved skill unchanged after a weak failed-then-fixed attempt", async () => {
++  const paths = makeSandbox();
++  writeExistingSkill({ skillBankDir: paths.skillBankDir, userId: "detot-owner", dirName: "approved-v1", name: "Approved routine", prompt: "Keep verified steps and validate outcome before completion." });
++  const before = fs.readFileSync(path.join(paths.skillBankDir, "Users", "detot-owner", "approved-v1", "SKILL.md"), "utf8");
++  const processor = createEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async invokeModel() {
++      return JSON.stringify({ skills: [{ name: "Weak routine", description: "Unverified", prompt: "Try random steps", confidence: 0.2 }] });
++    },
++  });
++  await processor.handle({
++    user: "detot-owner", session_id: "fail-fix-1", turn_type: "main", session_done: false, success: false,
++    messages: [{ role: "user", content: "Attempted the workflow." }, { role: "assistant", content: "It failed." }],
++  }, {}, {});
++  const result = await processor.handle({
++    user: "detot-owner", session_id: "fail-fix-1", turn_type: "main", session_done: true, success: true,
++    messages: [
++      { role: "user", content: "Attempted the workflow." },
++      { role: "assistant", content: "It failed, then the verified fix worked." },
++      { role: "tool", content: "staging copy verified" },
++    ],
++  }, {}, {});
++  assert.equal(result.jobs[0].status, "proposed");
++  assert.equal(listSkillDirs(paths.skillBankDir, "detot-owner").length, 1);
++  assert.equal(fs.readFileSync(path.join(paths.skillBankDir, "Users", "detot-owner", "approved-v1", "SKILL.md"), "utf8"), before);
++});
++
++test("review-only mode skips sessions without tool evidence", async () => {
++  const paths = makeSandbox();
++  let invokeCount = 0;
++  const processor = createEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async invokeModel() { invokeCount += 1; return JSON.stringify({ skills: [] }); },
++  });
++  const result = await processor.handle({
++    user: "detot-owner", session_id: "no-tools", turn_type: "main", session_done: true, success: true,
++    messages: [{ role: "user", content: "Tell me a story." }, { role: "assistant", content: "Once upon a time." }],
++  }, {}, {});
++  assert.equal(result.jobs[0].reason, "no_tool_evidence");
++  assert.equal(invokeCount, 0);
++  assert.equal(fs.existsSync(paths.reviewQueueDir), false);
++});
++
++test("review-only session archives expire after the configured retention window", async () => {
++  const paths = makeSandbox();
++  const userDir = path.join(paths.sessionArchiveDir, "detot-owner");
++  fs.mkdirSync(userDir, { recursive: true });
++  const oldFile = path.join(userDir, "expired.100000.session_done.jsonl");
++  fs.writeFileSync(oldFile, "{}\n");
++  const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
++  fs.utimesSync(oldFile, old, old);
++  createEmbeddedProcessor(makeConfig(paths, { reviewOnly: true, embedded: { archiveRetentionDays: 7 } }), {}, makeLogger(), {
++    async invokeModel() { return JSON.stringify({ skills: [] }); },
++  });
++  assert.equal(await waitFor(() => !fs.existsSync(oldFile)), true);
++});
++
+ function listSkillDirs(skillBankDir, userId = "user1") {
+   const userRoot = path.join(skillBankDir, "Users", userId);
+   if (!fs.existsSync(userRoot)) return [];
+diff --git a/AutoSkill4OpenClaw/adapter/index.js b/AutoSkill4OpenClaw/adapter/index.js
+index 478b036..32195e4 100644
+--- a/AutoSkill4OpenClaw/adapter/index.js
++++ b/AutoSkill4OpenClaw/adapter/index.js
+@@ -19,6 +19,7 @@ const DEFAULTS = {
+   extractOnAgentEnd: true,
+   successOnly: true,
+   includeUserFeedback: true,
++  reviewOnly: false,
+   timeoutMs: 5000,
+   retries: 1,
+   logPayload: false,
+@@ -33,8 +34,10 @@ const DEFAULTS = {
+   embedded: {
+     sessionArchiveDir: "",
+     sessionMaxTurns: 20,
++    archiveRetentionDays: 7,
+     liveExtractEveryTurns: 5,
+     skillBankDir: "",
++    reviewQueueDir: "",
+     openclawSkillsDir: "",
+     promptPackPath: "",
+     bm25TopK: 8,
+@@ -716,6 +719,10 @@ function normalizeConfig(raw) {
+     rawEmbeddedCfg.modelModes ??
+     env.AUTOSKILL_OPENCLAW_EMBEDDED_MODEL_MODES ??
+     DEFAULTS.embedded.modelInvocation.modes;
++  const liveExtractEveryTurnsInput =
++    rawEmbeddedCfg.liveExtractEveryTurns ??
++    (asString(env.AUTOSKILL_OPENCLAW_EMBEDDED_LIVE_EXTRACT_EVERY_TURNS || "").trim() || undefined) ??
++    DEFAULTS.embedded.liveExtractEveryTurns;
+   cfg.embedded = {
+     sessionArchiveDir: resolvePathInput(
+       rawEmbeddedCfg.sessionArchiveDir || env.AUTOSKILL_OPENCLAW_EMBEDDED_SESSION_DIR,
+@@ -732,21 +739,27 @@ function normalizeConfig(raw) {
+         ) || DEFAULTS.embedded.sessionMaxTurns,
+       ),
+     ),
++    archiveRetentionDays: Math.max(
++      1,
++      Math.min(90, Number(rawEmbeddedCfg.archiveRetentionDays ?? 7) || 7),
++    ),
+     liveExtractEveryTurns: Math.max(
+       0,
+       Math.min(
+         1000,
+-        Number(
+-          rawEmbeddedCfg.liveExtractEveryTurns ??
+-            env.AUTOSKILL_OPENCLAW_EMBEDDED_LIVE_EXTRACT_EVERY_TURNS ??
+-            DEFAULTS.embedded.liveExtractEveryTurns,
+-        ) || DEFAULTS.embedded.liveExtractEveryTurns,
++        Number.isFinite(Number(liveExtractEveryTurnsInput))
++          ? Number(liveExtractEveryTurnsInput)
++          : DEFAULTS.embedded.liveExtractEveryTurns,
+       ),
+     ),
+     skillBankDir: resolvePathInput(
+       rawEmbeddedCfg.skillBankDir || env.AUTOSKILL_SKILLBANK_DIR || env.AUTOSKILL_REPO_SKILLBANK_DIR,
+       defaultSkillBankDir,
+     ),
++    reviewQueueDir: resolvePathInput(
++      rawEmbeddedCfg.reviewQueueDir,
++      path.join(path.dirname(defaultSessionArchiveDir), "review_queue"),
++    ),
+     openclawSkillsDir: resolvePathInput(
+       rawEmbeddedCfg.openclawSkillsDir || env.AUTOSKILL_OPENCLAW_SKILLS_DIR || env.OPENCLAW_SKILLS_DIR,
+       defaultOpenclawSkillsDir,
+@@ -825,6 +838,7 @@ function normalizeConfig(raw) {
+     DEFAULTS.extractOnAgentEnd,
+   );
+   cfg.successOnly = asBool(cfg.successOnly, DEFAULTS.successOnly);
++  cfg.reviewOnly = asBool(cfg.reviewOnly, DEFAULTS.reviewOnly);
+   cfg.includeUserFeedback = asBool(cfg.includeUserFeedback, DEFAULTS.includeUserFeedback);
+   cfg.logPayload = asBool(cfg.logPayload, DEFAULTS.logPayload);
+   return cfg;
+diff --git a/AutoSkill4OpenClaw/adapter/index.test.mjs b/AutoSkill4OpenClaw/adapter/index.test.mjs
+index 5c78bff..51a94e8 100644
+--- a/AutoSkill4OpenClaw/adapter/index.test.mjs
++++ b/AutoSkill4OpenClaw/adapter/index.test.mjs
+@@ -700,7 +700,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
+         extractOnAgentEnd: true,
+       });
+       assert.equal(cfg.runtimeMode, "embedded");
+-      assert.equal(cfg.embedded.skillBankDir, "/tmp/autoskill-skillbank");
++      assert.equal(cfg.embedded.skillBankDir, path.resolve("/tmp/autoskill-skillbank"));
+       assert.equal(cfg.embedded.sessionMaxTurns, 20);
+       assert.equal(cfg.embedded.bm25TopK, 8);
+       assert.deepEqual(cfg.embedded.modelInvocation.modes, [
+@@ -728,6 +728,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
+   );
+ });
+ 
++test("review-only lab config pins embedded paths and disables retrieval", async () => {
++  const cfg = normalizeConfig({
++    userId: "detot-owner",
++    runtimeMode: "embedded",
++    openclawSkillInstallMode: "openclaw_mirror",
++    reviewOnly: true,
++    recallEnabled: false,
++    skillRetrieval: { enabled: false },
++    embedded: {
++      sessionArchiveDir: "D:/lab/.state/autoskill/sessions",
++      reviewQueueDir: "D:/lab/.state/autoskill/proposals",
++      skillBankDir: "D:/lab/.state/autoskill/SkillBank",
++      openclawSkillsDir: "D:/lab/.state/autoskill/unused-mirror",
++      liveExtractEveryTurns: 0,
++      archiveRetentionDays: 7,
++    },
++  });
++  assert.equal(cfg.userId, "detot-owner");
++  assert.equal(cfg.runtimeMode, "embedded");
++  assert.equal(cfg.reviewOnly, true);
++  assert.equal(cfg.skillRetrieval.enabled, false);
++  assert.equal(cfg.recallEnabled, false);
++  assert.equal(cfg.embedded.sessionArchiveDir, path.resolve("D:/lab/.state/autoskill/sessions"));
++  assert.equal(cfg.embedded.reviewQueueDir, path.resolve("D:/lab/.state/autoskill/proposals"));
++  assert.equal(cfg.embedded.liveExtractEveryTurns, 0);
++  assert.equal(cfg.embedded.archiveRetentionDays, 7);
++});
++
+ test("normalizeConfig supports embedded session max turns override", async () => {
+   await withEnv(
+     {
+@@ -784,7 +812,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
+       ]);
+       assert.equal(cfg.embedded.modelInvocation.timeoutMs, 35000);
+       assert.equal(cfg.embedded.modelInvocation.retries, 2);
+-      assert.equal(cfg.embedded.modelInvocation.openclawHome, "/tmp/openclaw-home");
++      assert.equal(cfg.embedded.modelInvocation.openclawHome, path.resolve("/tmp/openclaw-home"));
+       assert.equal(cfg.embedded.modelInvocation.manualBaseUrl, "http://127.0.0.1:8999/v1");
+       assert.equal(cfg.embedded.modelInvocation.manualApiKey, "k-test");
+       assert.equal(cfg.embedded.modelInvocation.manualModel, "m-test");
+@@ -825,7 +853,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
+         extractOnAgentEnd: true,
+       });
+       assert.equal(cfg.runtimeMode, "embedded");
+-      assert.equal(cfg.embedded.promptPackPath, "/tmp/openclaw-shared-pack.txt");
++      assert.equal(cfg.embedded.promptPackPath, path.resolve("/tmp/openclaw-shared-pack.txt"));
+     },
+   );
+ });
+diff --git a/AutoSkill4OpenClaw/adapter/openclaw.plugin.json b/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
+index 44bdf9d..03bcf5c 100644
+--- a/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
++++ b/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
+@@ -4,6 +4,9 @@
+   "description": "AutoSkill adapter for OpenClaw embedded or sidecar skill evolution workflows.",
+   "version": "0.1.0",
+   "kind": "lifecycle",
++  "activation": {
++    "onCapabilities": ["hook"]
++  },
+   "main": "./index.js",
+   "configSchema": {
+     "type": "object",
+@@ -48,6 +51,13 @@
+             "default": 20,
+             "description": "Auto-close a long-lived embedded session after N turns when session_id never changes. 0 disables."
+           },
++          "archiveRetentionDays": {
++            "type": "integer",
++            "minimum": 1,
++            "maximum": 90,
++            "default": 7,
++            "description": "Remove only AutoSkill-owned finalized conversation archive files older than this many days."
++          },
+           "liveExtractEveryTurns": {
+             "type": "integer",
+             "minimum": 0,
+@@ -60,6 +70,11 @@
+             "default": "",
+             "description": "AutoSkill SkillBank root directory."
+           },
++          "reviewQueueDir": {
++            "type": "string",
++            "default": "",
++            "description": "Owner-partitioned directory for immutable skill proposals awaiting human review."
++          },
+           "openclawSkillsDir": {
+             "type": "string",
+             "default": "",
+@@ -215,6 +230,11 @@
+         "type": "boolean",
+         "default": true
+       },
++      "reviewOnly": {
++        "type": "boolean",
++        "default": false,
++        "description": "Store sanitized candidates as pending proposals; never merge into SkillBank or mirror into OpenClaw."
++      },
+       "successOnly": {
+         "type": "boolean",
+         "default": true
