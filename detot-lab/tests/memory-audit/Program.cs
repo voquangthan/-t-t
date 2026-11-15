@@ -70,7 +70,38 @@ if (args is ["ranking"])
     Require(MemoryRanking.Keyword("may in", "may in phong ke toan") == 1);
     Require(MemoryRanking.Keyword("pin", "may in") == 0);
     Require(MemoryRanking.Combine(semantic, 0) > MemoryRanking.Combine(0, 0.5));
-    Console.WriteLine("PASS: hybrid ranking arithmetic with synthetic vectors.");
+    // Scores measured with the local BGE-M3 model on a held-out audit memory: some useful
+    // cross-language paraphrases scored 0.545-0.554 while nearby non-matches stayed below 0.534.
+    Require(MemoryRanking.Combine(0.592, 0) > 0);
+    Require(MemoryRanking.Combine(0.553, 0) > 0);
+    Require(MemoryRanking.Combine(0.534, 0) == 0);
+    Require(MemoryRanking.Combine(0.425, 0) == 0);
+    Require(MemoryRanking.Combine(0.258, 0) == 0);
+    Require(MemoryRanking.Combine(0.1, 0.6) > 0);
+    Require(MemoryRanking.Combine(0.1, 0.2) == 0);
+    Console.WriteLine("PASS: hybrid ranking rejects measured vague/off-topic BGE-M3 scores and retains strong lexical fallback.");
+    return;
+}
+
+if (args is ["embedding-fallback"])
+{
+    var fallbackRoot = Path.Combine(Path.GetTempPath(), "detot-memory-fallback-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(fallbackRoot);
+    try
+    {
+        var practice = new Practice(new EphemeralDataProtectionProvider().CreateProtector("Detot.Practice.v1"), fallbackRoot);
+        practice.ApplyMemory("owner-a", "save", "Máy in phòng kế toán bị kẹt giấy.", "device", Guid.NewGuid(),
+            Guid.NewGuid(), NullLogger.Instance);
+        var embeddings = new MemoryEmbeddings(new FailingHttpClientFactory(), "bge-m3", "test", NullLogger.Instance);
+        var relevant = await practice.SearchMemoryAsync("owner-a", "máy in phòng kế toán", null, null,
+            null, null, embeddings, CancellationToken.None);
+        var unrelated = await practice.SearchMemoryAsync("owner-a", "how to cook rice", null, null,
+            null, null, embeddings, CancellationToken.None);
+        Require(relevant.Length == 1 && relevant[0].Score > 0);
+        Require(unrelated.Length == 0);
+        Console.WriteLine("PASS: Ollama HTTP failure falls back to lexical retrieval without unrelated memory hits.");
+    }
+    finally { try { Directory.Delete(fallbackRoot, recursive: true); } catch { } }
     return;
 }
 
@@ -86,6 +117,10 @@ if (args is ["parser"])
         "Nhắc mình kiểm tra máy in ngày mai", false).Intent == "schedule");
     Require(MemoryIntentParser.Parse("""{"intent":"schedule","work":"máy in","category":"device"}""",
         "Nhắc mình máy in ngày mai", false).Intent == "failed");
+    Require(MemoryIntentParser.Parse("""{"intent":"recall","work":null,"category":null,"memoryId":null}""",
+        "Tôi đã thay đổi gì trước đây?", false) is { Intent: "recall", Work: null });
+    Require(MemoryIntentParser.Parse("""{"intent":"recall","work":"máy in","category":"device","memoryId":null}""",
+        "Mình đã sửa gì ở máy in?", false) is { Intent: "recall", Work: "máy in" });
     var updateId = Guid.NewGuid();
     var updateMessage = $"Cập nhật Memory ID {updateId:D} thành nội dung mới đã xác minh.";
     var parsedUpdate = MemoryIntentParser.Parse(
@@ -178,4 +213,15 @@ void Check(Guid id, string status, int count)
 static void Require(bool condition)
 {
     if (!condition) throw new InvalidDataException("Memory audit assertion failed.");
+}
+
+sealed class FailingHttpClientFactory : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(new FailingHttpMessageHandler());
+}
+
+sealed class FailingHttpMessageHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromException<HttpResponseMessage>(new HttpRequestException("Simulated embedding provider outage."));
 }

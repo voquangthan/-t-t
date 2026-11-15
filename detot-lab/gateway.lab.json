@@ -39,11 +39,7 @@
     }
   },
   "tools": {
-    "allow": [
-      "detot_lab_fixture",
-      "detot_google_calendar_create",
-      "detot_trial_calendar_create"
-    ],
+    "profile": "minimal",
     "deny": [
       "exec",
       "process",

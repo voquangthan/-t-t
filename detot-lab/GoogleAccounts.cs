@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -56,11 +57,21 @@ static class GoogleAccounts
             if (!enabled) return Results.Problem("Kết nối Google đang tắt trong cấu hình lab.", statusCode: 503);
             await mutex.WaitAsync(ctx.RequestAborted);
             try { return await action(); }
-            catch (Exception error) when (error is HttpRequestException or JsonException or IOException or CryptographicException
+            catch (Exception error) when (error is HttpRequestException or GoogleTokenException or JsonException or IOException or CryptographicException
                 or KeyNotFoundException or InvalidOperationException or OperationCanceledException)
             {
                 ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("GoogleAccounts")
-                    .LogWarning("Google API request failed ({ErrorType}).", error.GetType().Name);
+                    .LogWarning("Google API request failed ({ErrorType}, HTTP {StatusCode}).",
+                        error.GetType().Name, error is HttpRequestException httpError
+                            ? httpError.StatusCode?.ToString() ?? "unknown"
+                            : error is GoogleTokenException tokenError ? ((int)tokenError.StatusCode).ToString() : "not-applicable");
+                if (error is GoogleTokenException googleTokenError)
+                    return Results.Problem("Google OAuth token refresh was rejected.", statusCode: 502,
+                        extensions: new Dictionary<string, object?>
+                        {
+                            ["upstreamStatusCode"] = (int)googleTokenError.StatusCode,
+                            ["upstreamErrorCode"] = googleTokenError.ErrorCode
+                        });
                 return Results.Problem("Không hoàn tất được yêu cầu Google. Kiểm tra kết nối hoặc cấp lại quyền.", statusCode: 502);
             }
             finally { mutex.Release(); }
@@ -381,8 +392,23 @@ static class GoogleAccounts
             values["client_secret"] = secret!;
             using var body = new FormUrlEncodedContent(values);
             using var response = await http.PostAsync("https://oauth2.googleapis.com/token", body, ct);
-            response.EnsureSuccessStatusCode();
-            return JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var content = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var code = "unknown";
+                try
+                {
+                    using var error = JsonDocument.Parse(content);
+                    if (error.RootElement.TryGetProperty("error", out var value) && value.ValueKind == JsonValueKind.String)
+                    {
+                        var candidate = value.GetString();
+                        if (candidate is not null && candidate.Length <= 48 && candidate.All(char.IsAsciiLetterOrDigit)) code = candidate;
+                    }
+                }
+                catch (JsonException) { }
+                throw new GoogleTokenException(response.StatusCode, code);
+            }
+            return JsonDocument.Parse(content);
         }
     }
 
@@ -417,6 +443,11 @@ static class GoogleAccounts
 
     private sealed record Account(string Id, string Email, string RefreshToken, string? Scope = null, bool Calendar = false,
         Note[]? Notes = null, bool Selected = false);
+    private sealed class GoogleTokenException(HttpStatusCode statusCode, string errorCode) : Exception
+    {
+        public HttpStatusCode StatusCode { get; } = statusCode;
+        public string ErrorCode { get; } = errorCode;
+    }
     private sealed record Note(string Id, string Text);
     internal static bool ValidReminderMinutes(int[]? minutes) => minutes is null ||
         (minutes.Length <= 5 && minutes.All(value => value is >= 0 and <= 40320) && minutes.Distinct().Count() == minutes.Length);
