@@ -118,7 +118,9 @@ export function WeatherIntelligence({ compact = false, onNavigate }: {
         <div className="weather-alert-heading"><strong>{item.title}</strong><span>Xác suất mưa {item.probability}% · tín hiệu {item.certainty}</span></div>
         <p><strong>Thời gian:</strong> {time(item.startsAt)}–{time(item.endsAt)}</p>
         <p><strong>Vì sao:</strong> {item.reason}</p><p><strong>Gợi ý:</strong> {item.advice}</p>
-        <div className="weather-source"><a href={item.sourceUrl} target="_blank" rel="noreferrer">Nguồn dự báo: {item.source}</a><span> · Thời tiết có thể thay đổi.</span></div>
+        <div className="weather-source"><a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather data by Open-Meteo.com</a><span> · </span>
+          <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a><span> · </span>
+          <a href={item.sourceUrl} target="_blank" rel="noreferrer">Chi tiết dữ liệu dự báo</a><span> · Gợi ý đã được Đệ Tốt lọc và diễn giải; thời tiết có thể thay đổi.</span></div>
         {!compact && <div className="weather-feedback"><span>{snapshot?.feedbackAllowed ? "Phản hồi chỉ lưu cục bộ" : "Phản hồi đang tắt"}</span>
           <button disabled={busy || !snapshot?.feedbackAllowed} onClick={() => void feedback(item, "interested")}>Hữu ích</button>
           <button disabled={busy || !snapshot?.feedbackAllowed} onClick={() => void feedback(item, "dismissed")}>Bỏ qua</button>
@@ -126,7 +128,7 @@ export function WeatherIntelligence({ compact = false, onNavigate }: {
       </article>)}</div> : <p className="weather-quiet">{snapshot?.location ? "Chưa có tín hiệu thời tiết đủ rõ để gợi ý. Đệ Tốt sẽ im lặng khi không có điều đáng chú ý." : "Chọn thành phố để bắt đầu; chưa có địa điểm nào được quan sát."}</p>}
       {!compact && <div className="weather-actions"><button disabled={busy || !snapshot?.location} onClick={() => void refresh()}>Kiểm tra ngay</button>
         {snapshot?.feedbackAllowed ? <span>Đã bật học phản hồi cục bộ.</span> : <button className="text-link" onClick={() => onNavigate?.("privacy")}>Bật học từ phản hồi</button>}</div>}
-      {!compact && <p className="weather-attribution"><a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather data by Open-Meteo.com</a> · Dữ liệu dự báo chỉ mang tính tham khảo; nguồn không bảo đảm độ chính xác hoặc tính liên tục.</p>}
+      {!compact && <p className="weather-attribution"><a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather data by Open-Meteo.com</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a> · Đệ Tốt lọc dữ liệu theo ngưỡng mưa và chuyển thành gợi ý AI. Đây không phải cảnh báo chính thức; dự báo có thể thay đổi và nhà cung cấp không bảo đảm độ chính xác hoặc tính liên tục.</p>}
     </>}
   </section>;
 }

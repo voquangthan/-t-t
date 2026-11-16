@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -33,6 +34,19 @@ try
     var encryptedWeather = File.ReadAllText(Directory.GetFiles(Path.Combine(root, "weather"), "weather-*.bin").Single());
     Check(!encryptedWeather.Contains("Đà Nẵng", StringComparison.Ordinal) && !encryptedWeather.Contains("16.05", StringComparison.Ordinal),
         "local weather location/cache must be encrypted at rest");
+
+    var deceptiveHandler = new WeatherTestHandler { DeceptiveModel = true };
+    var deceptiveService = NewService(Path.Combine(root, "deceptive-weather"), protection, consent, deceptiveHandler);
+    var grounded = await deceptiveService.SetLocationAsync(ownerA, "Đà Nẵng", CancellationToken.None);
+    Check(grounded.Suggestions.Length == 1 && grounded.Suggestions[0].Title == "Có thể mưa lớn" &&
+        grounded.Suggestions[0].Probability == 85 && grounded.Suggestions[0].Reason.Contains("18.0 mm", StringComparison.Ordinal) &&
+        !grounded.Suggestions[0].Reason.Contains("evacuate", StringComparison.OrdinalIgnoreCase) &&
+        grounded.Suggestions[0].Advice == "Mang áo mưa hoặc ô nếu phải ra ngoài trong khung giờ này.",
+        "model-written warning, measurements, reason and advice text must be ignored; backend facts and advice remain bounded");
+    var unsafeAdviceHandler = new WeatherTestHandler { UnsupportedAdvice = true };
+    var unsafeAdvice = await NewService(Path.Combine(root, "unsafe-advice"), protection, consent, unsafeAdviceHandler)
+        .SetLocationAsync(ownerA, "Đà Nẵng", CancellationToken.None);
+    Check(unsafeAdvice.Suggestions.Length == 0, "unknown AI advice codes must fail closed without creating a suggestion");
 
     _ = await service.RefreshAsync(ownerA, false, CancellationToken.None);
     Check(handler.ForecastCalls == 1 && handler.DeepSeekCalls == 1, "fresh cache must prevent duplicate provider and model calls");
@@ -88,6 +102,34 @@ try
     Check(failedSnapshot.Suggestions.Length == 0 && failedSnapshot.Error is not null,
         "provider failure must produce no fabricated alert and a safe status");
 
+    var offlineHandler = new WeatherTestHandler { FailForecastNetwork = true };
+    var offline = await NewService(Path.Combine(root, "offline-weather"), protection, consent, offlineHandler)
+        .SetLocationAsync(ownerB, "Đà Nẵng", CancellationToken.None);
+    Check(offline.Suggestions.Length == 0 && offline.Error?.Contains("Không kết nối", StringComparison.Ordinal) == true,
+        "network loss during forecast retrieval must not fabricate an alert and must return a safe status");
+
+    var failedModelHandler = new WeatherTestHandler { FailDeepSeek = true };
+    var failedModel = await NewService(Path.Combine(root, "bad-model"), protection, consent, failedModelHandler)
+        .SetLocationAsync(ownerB, "Đà Nẵng", CancellationToken.None);
+    Check(failedModel.Suggestions.Length == 0 && failedModel.Error is not null,
+        "DeepSeek errors must not create or preserve a new unsupported suggestion");
+
+    var staleOwner = "synthetic-weather-stale-owner";
+    GrantWeather(consent, staleOwner);
+    var staleDirectory = Path.Combine(root, "stale-weather");
+    var freshState = await NewService(staleDirectory, protection, consent, new WeatherTestHandler())
+        .SetLocationAsync(staleOwner, "Đà Nẵng", CancellationToken.None);
+    Check(freshState.Suggestions.Length == 1, "fresh fixture should establish a cached suggestion before aging it");
+    var staleFile = Directory.GetFiles(staleDirectory, "weather-*.bin").Single();
+    var weatherProtector = protection.CreateProtector("Detot.WeatherIntelligence.v1");
+    var stateJson = JsonNode.Parse(weatherProtector.Unprotect(File.ReadAllText(staleFile)))!;
+    stateJson["cache"]!["fetchedAt"] = DateTimeOffset.UtcNow.AddHours(-3).ToString("O");
+    File.WriteAllText(staleFile, weatherProtector.Protect(stateJson.ToJsonString()));
+    var staleRead = await NewService(staleDirectory, protection, consent, new WeatherTestHandler { FailForecast = true })
+        .RefreshAsync(staleOwner, true, CancellationToken.None);
+    Check(staleRead.Suggestions.Length == 0 && !staleRead.ForecastCurrent && staleRead.Error is not null,
+        "a forecast older than two hours must not be shown as an active suggestion when refresh fails");
+
     var blocking = new WeatherTestHandler { BlockDeepSeek = true };
     var racing = NewService(Path.Combine(root, "race-weather"), protection, consent, blocking);
     var run = racing.SetLocationAsync(ownerB, "Đà Nẵng", CancellationToken.None);
@@ -107,7 +149,7 @@ try
     Check((await restarted.GetAsync(ownerA, CancellationToken.None)).Location is null &&
         Directory.GetFiles(Path.Combine(root, "weather"), "weather-*.bin").Length == 0,
         "explicit location deletion must cancel work and remove its encrypted local store");
-    Console.WriteLine("PASS: weather default deny, owner isolation, encrypted restart, cache and dedupe, source-grounded suggestions, feedback consent, provider failure and mid-request revocation.");
+    Console.WriteLine("PASS: weather default deny, owner isolation, encrypted restart, cache/dedupe, grounded AI output, stale data, network/provider/model failure, feedback consent and mid-request revocation.");
 }
 finally { try { Directory.Delete(root, recursive: true); } catch { } }
 
@@ -137,6 +179,10 @@ sealed class WeatherTestHandler : HttpMessageHandler
     public int ForecastCalls { get; private set; }
     public int DeepSeekCalls { get; private set; }
     public bool FailForecast { get; init; }
+    public bool FailForecastNetwork { get; init; }
+    public bool FailDeepSeek { get; init; }
+    public bool DeceptiveModel { get; init; }
+    public bool UnsupportedAdvice { get; init; }
     public bool BlockDeepSeek { get; init; }
     public string DeepSeekPayload { get; private set; } = "";
     public TaskCompletionSource DeepSeekStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -151,6 +197,7 @@ sealed class WeatherTestHandler : HttpMessageHandler
         if (url.Contains("api.open-meteo.com", StringComparison.Ordinal))
         {
             ForecastCalls++;
+            if (FailForecastNetwork) throw new HttpRequestException("synthetic network unavailable");
             if (FailForecast) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
             var start = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).AddHours(1);
             if (start.Hour >= 20) start = new DateTimeOffset(start.Date.AddDays(1).AddHours(8), TimeSpan.FromHours(7));
@@ -163,6 +210,7 @@ sealed class WeatherTestHandler : HttpMessageHandler
         {
             DeepSeekCalls++;
             DeepSeekPayload = await request.Content!.ReadAsStringAsync(cancellationToken);
+            if (FailDeepSeek) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
             if (BlockDeepSeek)
             {
                 DeepSeekStarted.TrySetResult();
@@ -170,7 +218,10 @@ sealed class WeatherTestHandler : HttpMessageHandler
                 catch (OperationCanceledException) { DeepSeekCancelled.TrySetResult(); throw; }
             }
             var opaque = "c0";
-            var content = JsonSerializer.Serialize(new { suggestions = new[] { new { id = opaque, adviceCode = "carry_rain_gear" } } });
+            var modelItem = DeceptiveModel
+                ? new { id = opaque, adviceCode = "carry_rain_gear", title = "Flash Flood Warning", reason = "Evacuate now", probability = 1000 }
+                : new { id = opaque, adviceCode = UnsupportedAdvice ? "evacuate" : "carry_rain_gear", title = "", reason = "", probability = 0 };
+            var content = JsonSerializer.Serialize(new { suggestions = new[] { modelItem } });
             return JsonResponse(JsonSerializer.Serialize(new { choices = new[] { new { finish_reason = "stop", message = new { content } } } }));
         }
         return new HttpResponseMessage(HttpStatusCode.NotFound);
