@@ -7,6 +7,7 @@ import { TrustedLearning } from "./TrustedLearning";
 import { MemoryReview } from "./MemoryReview";
 import { AgenticTasks } from "./AgenticTasks";
 import { PersonalNotes } from "./PersonalNotes";
+import { ConsentSettings } from "./ConsentSettings";
 import { Icon, Overview } from "./Overview";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
@@ -26,6 +27,33 @@ type HistoryEntry = { conversation: Conversation; revision: string };
 Object.entries({ javascript, typescript, python, json, csharp }).forEach(([name, language]) => hljs.registerLanguage(name, language));
 const uid = () => crypto.randomUUID();
 const blank = (): Conversation => ({ id: uid(), title: "Cuộc trò chuyện mới", pinned: false, messages: [] });
+type DailyTask = { id: string; text: string; status: string; calendarReminderAt?: string | null };
+type DailyNote = { id: string; text: string; status?: string; createdAt?: string | null };
+type DailyEvent = { id: string; summary?: string; title?: string; start?: { dateTime?: string; date?: string } | string; end?: { dateTime?: string; date?: string } | string };
+type DailyCalendarAccount = { id: string; email?: string };
+type ConsentRequirement = { source: string; purpose: string; destination: string };
+
+async function dailyRead<T>(path: string, signal: AbortSignal): Promise<T> {
+  const response = await fetch(path, { signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+function dailyDateKey(value: string | Date) {
+  const parts = new Intl.DateTimeFormat("en", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(value));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(item => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function dailyEventStart(event: DailyEvent) {
+  if (typeof event.start === "string") return event.start;
+  return event.start?.dateTime ?? (event.start?.date ? `${event.start.date}T00:00:00+07:00` : "");
+}
+
+function dailyEventEnd(event: DailyEvent) {
+  if (typeof event.end === "string") return event.end;
+  return event.end?.dateTime ?? (event.end?.date ? `${event.end.date}T23:59:59+07:00` : "");
+}
 type LearningIntent = { topic: string; domains: string[]; exactUrl?: string; collect?: boolean };
 function parseLearningIntent(text: string): LearningIntent | null {
   const match = text.trim().match(/^(?:đệ tốt[, ]*)?(tìm và học|học kiến thức từ|học|cập nhật kiến thức|tìm tài liệu)\s+(.+)$/i);
@@ -84,7 +112,7 @@ function AttachmentChip({ file, onRemove }: { file: File; onRemove: () => void }
 }
 
 function App() {
-  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
+  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "privacy" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
   const [view, setView] = useState<AppView>(() => {
     const params = new URLSearchParams(location.search);
     return params.has("calendar") ? "calendar" : params.has("drive") ? "cloud" : "overview";
@@ -107,6 +135,7 @@ function App() {
   const [dark, setDark] = useState(() => remoteWorkspace || localStorage.getItem("detot.theme") !== "light");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [dailyLoading, setDailyLoading] = useState(false);
   const [practiceNotes, setPracticeNotes] = useState<string>();
   const [practiceLearning, setPracticeLearning] = useState("");
   const [learningMap, setLearningMap] = useState<{ completed: number; nextStep: string; topics: Array<{
@@ -204,11 +233,12 @@ function App() {
     setAttachments(combined);
   };
 
-  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string,
-    startPractice = false, files = attachments, startMiniPractice = false) {
+  async function send(text: string, base = conversation ?? blank(), prefix = base.messages, requestId = uid(), context?: string | null,
+    startPractice = false, files = attachments, startMiniPractice = false, extraContext?: string,
+    extraConsents?: ConsentRequirement[]) {
     if ((!text.trim() && files.length === 0) || request.current) return;
     const previousMessage = prefix.at(-1);
-    const pendingCalendarContext = context ?? (previousMessage?.role === "assistant" ? previousMessage.calendarContext : undefined);
+    const pendingCalendarContext = context === null ? undefined : context ?? (previousMessage?.role === "assistant" ? previousMessage.calendarContext : undefined);
     const learning = files.length === 0 && !pendingCalendarContext && !startPractice && !base.practice ? parseLearningIntent(text) : null;
     if (learning) {
       setView("learning"); setLearningIntent(learning);
@@ -231,9 +261,28 @@ function App() {
     setBusy(true);
     const controller = new AbortController();
     request.current = controller;
-    retry.current = () => void send(text, base, prefix, requestId, pendingCalendarContext, startPractice, files, startMiniPractice);
+    retry.current = () => void send(text, base, prefix, requestId, context === null ? null : pendingCalendarContext,
+      startPractice, files, startMiniPractice, extraContext, extraConsents);
     try {
-      let documentContext: string | undefined;
+      const requestConsents = [...(extraConsents ?? [])];
+      if (files.length) requestConsents.push(
+        { source: "uploaded_files", purpose: "direct_request", destination: "local_only" },
+        { source: "uploaded_files", purpose: "direct_request", destination: "DeepSeek" },
+      );
+      if (prefix.length && !startPractice && !startMiniPractice && !base.practice && !base.miniPractice)
+        requestConsents.push({ source: "chat_history", purpose: "direct_request", destination: "DeepSeek" });
+      if (remoteWorkspace && revisions.current.has(target.id))
+        requestConsents.push({ source: "chat_history", purpose: "direct_request", destination: "local_only" });
+      if (pendingCalendarContext) requestConsents.push(
+        { source: "calendar", purpose: "direct_request", destination: "DeepSeek" },
+      );
+      if (requestConsents.length) {
+        const permission = await fetch("/api/consent/check", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ requirements: requestConsents, requestId }) });
+        if (permission.status === 403) throw new Error("Yêu cầu cần quyền cho nguồn dữ liệu tương ứng trong mục Quyền riêng tư.");
+        if (!permission.ok) throw new Error("Không kiểm tra được quyền riêng tư trước khi truy xuất dữ liệu.");
+      }
+      let documentContext: string | undefined = extraContext;
       let visionImages: string[] = [];
       if (files.length) {
         if (files.reduce((total, file) => total + file.size, 0) > 9 * 1024 * 1024)
@@ -247,7 +296,7 @@ function App() {
         visionImages = Array.isArray(parsed.images) ? parsed.images.filter((item: unknown): item is string => typeof item === "string") : [];
       }
       await sync(target);
-      const suggestion = pendingCalendarContext || target.practice || target.miniPractice ? undefined : await suggestFromChat(user.text, controller.signal);
+      const suggestion = pendingCalendarContext || target.practice || target.miniPractice || extraContext ? undefined : await suggestFromChat(user.text, controller.signal);
       if (suggestion !== undefined) {
         const assistant: Message = { id: uid(), role: "assistant", text: suggestion };
         const completed = { ...target, messages: [...target.messages, assistant] };
@@ -262,7 +311,7 @@ function App() {
           ? { "Content-Type": "application/json", "X-Detot-History-Revision": revision }
           : { "Content-Type": "application/json" },
         body: JSON.stringify({ message: prompt, requestId, calendarContext: pendingCalendarContext, conversationId: target.id, startPractice,
-          miniPractice: target.miniPractice, startMiniPractice, documentContext, visionImages,
+          miniPractice: target.miniPractice, startMiniPractice, documentContext, visionImages, consentRequirements: requestConsents,
           history: prefix.slice(-8).map(message => ({ role: message.role, text: message.text.slice(0, 450) })) }),
         signal: controller.signal,
       });
@@ -302,6 +351,80 @@ function App() {
     }
   }
 
+  async function askDailyOverview() {
+    if (dailyLoading || busy || conversation?.practice || conversation?.miniPractice) return;
+    setDailyLoading(true);
+    setError("");
+    const controller = new AbortController();
+    try {
+      const required: ConsentRequirement[] = [
+        { source: "task_memory", purpose: "direct_request", destination: "DeepSeek" },
+        { source: "task_memory", purpose: "direct_request", destination: "local_only" },
+        { source: "calendar", purpose: "direct_request", destination: "DeepSeek" },
+        { source: "calendar", purpose: "direct_request", destination: "local_only" },
+        { source: "personal_notes", purpose: "direct_request", destination: "DeepSeek" },
+        { source: "personal_notes", purpose: "direct_request", destination: "local_only" },
+      ];
+      const permission = await fetch("/api/consent/check", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requirements: required, requestId: crypto.randomUUID() }) });
+      if (permission.status === 403) throw new Error("Tổng quan cần quyền đọc cục bộ và dùng trong Chat cho Công việc, Google Calendar và Ghi chú trong mục Quyền riêng tư.");
+      if (!permission.ok) throw new Error("Không kiểm tra được quyền riêng tư trước khi đọc dữ liệu.");
+      const [tasksResult, notesResult, calendarResult] = await Promise.allSettled([
+        dailyRead<DailyTask[]>("/api/memory/agentic/tasks", controller.signal),
+        dailyRead<DailyNote[]>("/api/memory?category=note", controller.signal),
+        (async () => {
+          const accounts = await dailyRead<DailyCalendarAccount[]>("/api/google/calendar/accounts", controller.signal);
+          if (accounts.length) {
+            return dailyRead<{ events: DailyEvent[] }>(`/api/google/calendar/${encodeURIComponent(accounts[0].id)}/events`, controller.signal);
+          }
+          return dailyRead<{ events: DailyEvent[]; enabled?: boolean }>("/api/calendar", controller.signal);
+        })(),
+      ]);
+      const today = dailyDateKey(new Date());
+      const dateLabel = new Intl.DateTimeFormat("vi-VN", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Bangkok" }).format(new Date());
+      const contextLines = [`TỔNG QUAN NGÀY ${dateLabel.toLocaleUpperCase("vi-VN")} (múi giờ Asia/Bangkok).`,
+        "Đây là dữ liệu cá nhân đã được người dùng yêu cầu xem. Chỉ tóm tắt dữ liệu dưới đây; phân biệt rõ mục nào không có dữ liệu. Không tự tạo sự kiện, nhắc lịch hoặc đánh dấu công việc hoàn thành."];
+
+      if (tasksResult.status === "fulfilled") {
+        const openTasks = tasksResult.value.filter(task => task.status === "open");
+        const todayTasks = openTasks.filter(task => task.calendarReminderAt && dailyDateKey(task.calendarReminderAt) === today);
+        const unscheduledTasks = openTasks.filter(task => !task.calendarReminderAt);
+        contextLines.push("\nCÔNG VIỆC ĐANG MỞ HẸN HÔM NAY:", ...(todayTasks.length ? todayTasks.slice(0, 20).map(task => `- ${task.text} (nhắc ${new Date(task.calendarReminderAt!).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })})`) : ["- Không có việc nào được hẹn hôm nay."]),
+          "\nCÔNG VIỆC ĐANG MỞ CHƯA CÓ GIỜ HẸN:", ...(unscheduledTasks.length ? unscheduledTasks.slice(0, 10).map(task => `- ${task.text}`) : ["- Không có."]));
+      } else contextLines.push("\nCÔNG VIỆC: Không tải được danh sách công việc.");
+
+      if (calendarResult.status === "fulfilled") {
+        const todayEvents = calendarResult.value.events.filter(event => {
+          const start = dailyEventStart(event);
+          const end = dailyEventEnd(event) || start;
+          const allDay = typeof event.start === "object" && !!event.start?.date && !event.start?.dateTime;
+          return start && dailyDateKey(start) <= today && (allDay ? dailyDateKey(end) > today : dailyDateKey(end) >= today);
+        }).sort((a, b) => Date.parse(dailyEventStart(a)) - Date.parse(dailyEventStart(b))).slice(0, 30);
+        contextLines.push("\nSỰ KIỆN TRONG LỊCH HÔM NAY:", ...(todayEvents.length ? todayEvents.map(event => {
+          const start = dailyEventStart(event);
+          const allDay = typeof event.start === "object" && !!event.start?.date && !event.start?.dateTime;
+          const time = allDay ? "cả ngày" : new Date(start).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" });
+          return `- ${time}: ${event.summary ?? event.title ?? "Sự kiện"}`;
+        }) : ["- Không có sự kiện hôm nay."]));
+      } else contextLines.push("\nLỊCH: Không tải được lịch.");
+
+      if (notesResult.status === "fulfilled") {
+        const recentNotes = notesResult.value.filter(note => note.status !== "deleted" && note.status !== "archived")
+          .sort((a, b) => Date.parse(b.createdAt ?? "") - Date.parse(a.createdAt ?? ""))
+          .slice(0, 5);
+        contextLines.push("\nGHI CHÚ CÁ NHÂN GẦN ĐÂY:", ...(recentNotes.length ? recentNotes.map(note => `- ${note.text.slice(0, 500)}`) : ["- Chưa có ghi chú."]));
+      } else contextLines.push("\nGHI CHÚ: Không tải được ghi chú cá nhân.");
+
+      const base = conversation ?? blank();
+      void send("Dựa trên tổng quan cá nhân hôm nay, hãy giúp mình nắm lịch trình, việc cần chú ý và một bước tiếp theo phù hợp. Trả lời ngắn gọn bằng tiếng Việt.",
+        base, base.messages, uid(), null, false, [], false, contextLines.join("\n").slice(0, 120_000), required);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không tải được tổng quan hôm nay.");
+    } finally {
+      setDailyLoading(false);
+    }
+  }
+
   function beginMiniPractice() {
     const session: Conversation = { ...blank(), title: "Luyện nhanh 5 phút", miniPractice: true };
     setView("chat"); setPracticeNotes(undefined); setSide(false);
@@ -314,9 +437,9 @@ function App() {
   }
 
   const last = conversation?.messages.at(-1);
-  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập" };
+  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", privacy:"Quyền riêng tư", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập" };
   const navItems: Array<{id:AppView;label:string;icon:string}> = [
-    {id:"overview",label:"Tổng quan",icon:"overview"},{id:"chat",label:"Trò chuyện",icon:"chat"},{id:"tasks",label:"Công việc",icon:"tasks"},{id:"calendar",label:"Lịch",icon:"calendar"},{id:"notes",label:"Ghi chú",icon:"notes"}
+    {id:"overview",label:"Tổng quan",icon:"overview"},{id:"chat",label:"Trò chuyện",icon:"chat"},{id:"tasks",label:"Công việc",icon:"tasks"},{id:"calendar",label:"Lịch",icon:"calendar"},{id:"notes",label:"Ghi chú",icon:"notes"},{id:"privacy",label:"Quyền riêng tư",icon:"privacy"}
   ];
   const toolItems: Array<{id:AppView;label:string;icon:string}> = [
     {id:"cloud",label:"Cloud Storage",icon:"cloud"},{id:"learning",label:"Nguồn học",icon:"book"},{id:"dreaming",label:"Dreaming",icon:"dream"},{id:"practice",label:"Ca trực giả lập",icon:"practice"},{id:"skills",label:"Bản đồ học tập",icon:"skills"}
@@ -367,12 +490,14 @@ function App() {
         <strong>{titles[view]}</strong><span className="topbar-spacer"/>
         {conversation?.practice&&<button className="topbar-action" disabled={busy} onClick={()=>{select();input.current?.focus();}}>Chuyển sang chat thường</button>}
         {conversation?.miniPractice&&<><span className="mini-practice-badge">Luyện nhanh · có thể dừng bất cứ lúc nào</span><button className="topbar-action" disabled={busy} onClick={()=>void endMiniPractice()}>Kết thúc lượt luyện</button></>}
+        {view==="chat"&&!conversation?.practice&&!conversation?.miniPractice&&<button className="topbar-action daily-overview-action" disabled={busy||dailyLoading} title="Đọc công việc, sự kiện hôm nay và ghi chú gần đây để soạn tổng quan trong Chat" onClick={()=>void askDailyOverview()}>{dailyLoading?"Đang tải tổng quan…":"Tóm tắt hôm nay"}</button>}
         {view==="chat"&&<button className="topbar-action" disabled={busy} onClick={()=>{select();input.current?.focus();}}>＋ Chat mới</button>}
       </header>
       {error&&<div className="global-error" role="alert">{error} {retry.current&&<button onClick={()=>retry.current?.()}>Thử lại</button>}</div>}
       <div className={"view-content "+(view==="chat"?"chat-content":"")}>
         {view==="overview"&&<Overview onNavigate={navigate} onChat={startChat}/>}
         {view==="tasks"&&<AgenticTasks/>}{view==="calendar"&&<Calendar/>}{view==="notes"&&<PersonalNotes/>}
+        {view==="privacy"&&<ConsentSettings/>}
         {view==="cloud"&&<CloudStorage/>}{view==="learning"&&<TrustedLearning initialRequest={learningIntent}/>}
         {view==="dreaming"&&<MemoryReview/>}
         {view==="skills"&&<section className="learning-dashboard" aria-label="Bản đồ học tập">

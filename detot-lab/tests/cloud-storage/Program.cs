@@ -42,6 +42,19 @@ foreach (var (name, run) in checks)
 Console.WriteLine($"{checks.Count - failed}/{checks.Count} checks passed");
 return failed == 0 ? 0 : 1;
 
+static ConsentPolicy GrantSyntheticLearning(string directory, IDataProtectionProvider protection)
+{
+    var policy = new ConsentPolicy(Path.Combine(directory, "consent-test"), protection);
+    foreach (var permission in new[]
+    {
+        new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service"),
+        new ConsentPolicy.ConsentRequirement("trusted_learning", "direct_request", "local_only"),
+        new ConsentPolicy.ConsentRequirement("trusted_learning", "direct_request", "DeepSeek"),
+        new ConsentPolicy.ConsentRequirement("public_web", "direct_request", "external_service"),
+    }) policy.Set("workspace-owner", permission.Source, permission.Purpose, permission.Destination, true, "synthetic-test");
+    return policy;
+}
+
 static Task GoogleOAuthClientSelectionKeepsTokenOwner()
 {
     var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -315,8 +328,9 @@ static async Task TrustedLearningWorkflow()
     try
     {
         var protection = new EphemeralDataProtectionProvider();
+        var testConsent = GrantSyntheticLearning(root, protection);
         var service = new TrustedLearningSources(root, protection, new FakeHttpClientFactory(), storage,
-            NullLogger<TrustedLearningSources>.Instance);
+            NullLogger<TrustedLearningSources>.Instance, consent: testConsent);
         var pending = await service.AddAsync(new("drive-folder", "Programming docs", "drive://datasets/programming", "CC-BY-4.0", ""), CancellationToken.None);
         Assert(pending.Status == "pending" && pending.ApprovedUtc is null, "new sources must begin pending, not approved");
         await Throws<InvalidOperationException>(() => service.ApproveAsync(pending.Id, CancellationToken.None));
@@ -375,7 +389,7 @@ static async Task TrustedLearningWorkflow()
             await Throws<OperationCanceledException>(() => interrupted);
         }
         var restartedService = new TrustedLearningSources(root, protection, new FakeHttpClientFactory(), storage,
-            NullLogger<TrustedLearningSources>.Instance);
+            NullLogger<TrustedLearningSources>.Instance, consent: GrantSyntheticLearning(root, protection));
         Assert(restartedService.List().Single().WorkerState == "queued", "a source interrupted while running should be queued after restart");
         storage.BlockDownloads = false;
         await restartedService.RunDueAsync(CancellationToken.None);
@@ -396,14 +410,16 @@ static async Task TrustedLearningWorkflow()
         Assert(injection.Quarantined > 0 && service.Search("reveal system prompt").Count == 0,
             "prompt injection text should be quarantined and excluded from RAG retrieval");
         var secondMachine = new TrustedLearningSources(Path.Combine(root, "second-device"), new EphemeralDataProtectionProvider(),
-            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance);
+            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance,
+            consent: GrantSyntheticLearning(Path.Combine(root, "second-device"), new EphemeralDataProtectionProvider()));
         await secondMachine.InitializeCloudSnapshotAsync(CancellationToken.None);
         Assert(secondMachine.Search("reveal system prompt").Count == 0 && secondMachine.List().Single().Status == "approved" &&
             secondMachine.Search("VLAN trunk").Any(item => item.LicenseEvidenceUrl?.StartsWith("drive://", StringComparison.Ordinal) == true),
             "the verified Drive snapshot should preserve source state, license evidence and keep quarantined content out of RAG");
         storage.OperationLatency = TimeSpan.FromMilliseconds(15);
         var baselineService = new TrustedLearningSources(Path.Combine(root, "legacy-benchmark"), new EphemeralDataProtectionProvider(),
-            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance);
+            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance,
+            consent: GrantSyntheticLearning(Path.Combine(root, "legacy-benchmark"), new EphemeralDataProtectionProvider()));
         var listsBeforeBaseline = storage.ListCount;
         var downloadsBeforeBaseline = storage.DownloadCount;
         var beforeTimer = Stopwatch.StartNew();
@@ -432,10 +448,15 @@ static async Task TrustedLearningWorkflow()
         storage.FailLists = false;
         await service.RunDueAsync(CancellationToken.None);
         var revokedMirror = new TrustedLearningSources(Path.Combine(root, "after-revocation"), new EphemeralDataProtectionProvider(),
-            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance);
+            new FakeHttpClientFactory(), storage, NullLogger<TrustedLearningSources>.Instance,
+            consent: GrantSyntheticLearning(Path.Combine(root, "after-revocation"), new EphemeralDataProtectionProvider()));
         await revokedMirror.InitializeCloudSnapshotAsync(CancellationToken.None);
         Assert(!service.Dashboard().CloudMirrorPending && revokedMirror.Search("VLAN trunk").Count == 0,
             "a later successful mirror retry should purge revoked knowledge for other devices");
+        testConsent.Set("workspace-owner", "trusted_learning", "skill_learning", "external_service", false, "synthetic-test");
+        await service.RevokeConsentAsync(CancellationToken.None);
+        Assert(service.List().Count == 0 && service.Search("VLAN trunk").Count == 0,
+            "revoking learning consent must clear the local source cache and derived index");
     }
     finally { try { Directory.Delete(root, recursive: true); } catch { } }
 }
@@ -446,8 +467,9 @@ static async Task TrustedLearningRejectsUnsafeSources()
     Directory.CreateDirectory(root);
     try
     {
-        var service = new TrustedLearningSources(root, new EphemeralDataProtectionProvider(), new FakeHttpClientFactory(), new FakeStorageProvider(),
-            NullLogger<TrustedLearningSources>.Instance);
+        var protection = new EphemeralDataProtectionProvider();
+        var service = new TrustedLearningSources(root, protection, new FakeHttpClientFactory(), new FakeStorageProvider(),
+            NullLogger<TrustedLearningSources>.Instance, consent: GrantSyntheticLearning(root, protection));
         await Throws<ArgumentException>(() => service.AddAsync(new("website", "Unsafe", "https://localhost/private", "CC-BY-4.0", "https://example.org/license"), CancellationToken.None));
         await Throws<ArgumentException>(() => service.AddAsync(new("website", "Write not supported", "https://example.org/docs", "", "", "read-write"), CancellationToken.None));
         var unknownLicense = await service.AddAsync(new("website", "Unlicensed", "https://example.org/docs", "MIT", "https://example.org/LICENSE", "read"), CancellationToken.None);
@@ -476,7 +498,7 @@ static async Task AutonomousScopeSurvivesRestart()
             searchProvider: new FakeSearchDiscoveryProvider([
                 new("ASP.NET Core middleware", "https://example.org/middleware", "Middleware pipeline documentation"),
                 new("Out of scope", "https://example.com/middleware", "Middleware pipeline documentation"),
-            ]));
+            ]), consent: GrantSyntheticLearning(directory.FullName, keys));
         var service = Open();
         await Throws<ArgumentException>(() => service.QueueLearningAsync(new("middleware", null, []), CancellationToken.None));
         var queued = await service.QueueLearningAsync(new("ASP.NET Core middleware", null, ["example.org"]), CancellationToken.None);
@@ -515,7 +537,7 @@ static async Task TrustedLearningResumesLargeSources()
     {
         var protection = new EphemeralDataProtectionProvider();
         var service = new TrustedLearningSources(root, protection, new FakeHttpClientFactory(), storage,
-            NullLogger<TrustedLearningSources>.Instance);
+            NullLogger<TrustedLearningSources>.Instance, consent: GrantSyntheticLearning(root, protection));
         var source = await service.AddAsync(new("drive-folder", "Networking corpus", "drive://datasets/programming", null, null), CancellationToken.None);
         await service.CheckAsync(source.Id, CancellationToken.None);
         await service.ApproveAsync(source.Id, CancellationToken.None);
@@ -531,7 +553,7 @@ static async Task TrustedLearningResumesLargeSources()
             "partial new chunks must stay staged while the previous complete version remains active");
 
         var restarted = new TrustedLearningSources(root, protection, new FakeHttpClientFactory(), storage,
-            NullLogger<TrustedLearningSources>.Instance);
+            NullLogger<TrustedLearningSources>.Instance, consent: GrantSyntheticLearning(root, protection));
         Assert(restarted.List().Single().ProcessingOffset == 80 && restarted.List().Single().WorkerState == "queued" &&
             restarted.Search("baselineflag").Count > 0,
             "a restart must preserve the source checkpoint");
@@ -562,7 +584,7 @@ static async Task TrustedLearningPaginatesDriveArtifacts()
     try
     {
         var service = new TrustedLearningSources(root, new EphemeralDataProtectionProvider(), new FakeHttpClientFactory(), storage,
-            NullLogger<TrustedLearningSources>.Instance);
+            NullLogger<TrustedLearningSources>.Instance, consent: GrantSyntheticLearning(root, new EphemeralDataProtectionProvider()));
         var source = await service.AddAsync(new("drive-folder", "Large Drive corpus", "drive://datasets/programming", null, null), CancellationToken.None);
         await service.CheckAsync(source.Id, CancellationToken.None);
         await service.ApproveAsync(source.Id, CancellationToken.None);
@@ -589,7 +611,7 @@ static async Task TrustedLearningQuarantinesDriveArtifacts()
     try
     {
         var service = new TrustedLearningSources(root, new EphemeralDataProtectionProvider(), new FakeHttpClientFactory(), storage,
-            NullLogger<TrustedLearningSources>.Instance);
+            NullLogger<TrustedLearningSources>.Instance, consent: GrantSyntheticLearning(root, new EphemeralDataProtectionProvider()));
         var source = await service.AddAsync(new("drive-folder", "Learning corpus", "drive://datasets/programming", null, null), CancellationToken.None);
         await service.CheckAsync(source.Id, CancellationToken.None);
         await service.ApproveAsync(source.Id, CancellationToken.None);

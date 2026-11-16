@@ -8,7 +8,7 @@ type Suggestion = {
   id: string; kind: "merge" | "update" | "supersede" | "archive"; evidence: Evidence[];
   reason: string; proposedText?: string; confidence: number; createdAt: string; assessment?: string;
 };
-type WorkerStatus = { scanned: number; total: number; pending: boolean; retryCount: number; retryAt?: string };
+type WorkerStatus = { scanned: number; total: number; pending: boolean; retryCount: number; retryAt?: string; consented?: boolean };
 const labels: Record<Suggestion["kind"], string> = {
   merge: "Gộp ký ức trùng", update: "Cập nhật thông tin", supersede: "Thông tin mới thay thế cũ", archive: "Lưu trữ ký ức",
 };
@@ -21,11 +21,15 @@ export function MemoryReview() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const reload = useCallback(async () => {
-    const [response, statusResponse] = await Promise.all([fetch("/api/memory/review"), fetch("/api/memory/dreaming")]);
-    if (!response.ok || !statusResponse.ok) throw new Error(response.status === 401 || statusResponse.status === 401 ? "Phiên đăng nhập đã hết hạn." : "Không tải được trạng thái Dreaming.");
-    const [data, status]: [Suggestion[], WorkerStatus] = await Promise.all([response.json(), statusResponse.json()]);
-    setItems(data);
+    const statusResponse = await fetch("/api/memory/dreaming");
+    if (!statusResponse.ok) throw new Error(statusResponse.status === 401 ? "Phiên đăng nhập đã hết hạn." : "Không tải được trạng thái Dreaming.");
+    const status: WorkerStatus = await statusResponse.json();
     setWorker(status);
+    if (status.consented === false) { setItems([]); setEdits({}); return; }
+    const response = await fetch("/api/memory/review");
+    if (!response.ok) throw new Error(response.status === 401 ? "Phiên đăng nhập đã hết hạn." : "Không tải được đề xuất Dreaming.");
+    const data: Suggestion[] = await response.json();
+    setItems(data);
     setEdits(current => Object.fromEntries(data.map(item => [item.id, current[item.id] ?? item.proposedText ?? ""])));
   }, []);
   useEffect(() => { void reload().catch(cause => setError(cause instanceof Error ? cause.message : "Không tải được đề xuất.")); }, [reload]);
@@ -46,7 +50,7 @@ export function MemoryReview() {
   return <section className="transcript memory-review" aria-label="Đề xuất Dreaming">
     <div className="cloud-heading"><div><h1>Dreaming · rà soát ký ức</h1><p>Đề xuất do hệ thống tìm ứng viên bằng BGE-M3 và đánh giá bằng DeepSeek. Ký ức gốc chỉ đổi sau khi bạn duyệt.</p></div>
       <button disabled={busy !== null} onClick={() => void reload().catch(cause => setError(cause instanceof Error ? cause.message : "Không tải được đề xuất."))}>Làm mới</button></div>
-    <div className="cloud-status" aria-live="polite"><strong>Quét nền: {worker.scanned}/{worker.total}</strong><p>{worker.pending ? "Đang chờ hoặc tiếp tục phân tích theo lô." : "Đã quét hết ký ức hiện tại."}{worker.retryCount ? ` Lượt thử lại: ${worker.retryCount}${worker.retryAt ? ` · tiếp theo ${new Date(worker.retryAt).toLocaleTimeString()}` : ""}.` : ""}</p></div>
+    <div className="cloud-status" aria-live="polite"><strong>{worker.consented === false ? "Dreaming đang tắt theo quyền riêng tư" : `Quét nền: ${worker.scanned}/${worker.total}`}</strong><p>{worker.consented === false ? "Memory không được đọc hoặc gửi phân tích nền. Cấp riêng quyền Embedding local và DeepSeek trong mục Quyền riêng tư để bật." : worker.pending ? "Đang chờ hoặc tiếp tục phân tích theo lô." : "Đã quét hết ký ức hiện tại."}{worker.retryCount ? ` Lượt thử lại: ${worker.retryCount}${worker.retryAt ? ` · tiếp theo ${new Date(worker.retryAt).toLocaleTimeString()}` : ""}.` : ""}</p></div>
     {error && <p className="cloud-error" role="alert">{error}</p>}{notice && <p className="cloud-notice" role="status">{notice}</p>}
     {items.length === 0 ? <div className="cloud-status"><strong>Chưa có đề xuất cần duyệt</strong><p>Khi có ký ức mới, Dreaming sẽ kiểm tra trong nền.</p></div> : items.map(item => <article className="cloud-item memory-suggestion" key={item.id}>
       <div className="cloud-item-title"><strong>{labels[item.kind]}</strong><span>{Math.round(item.confidence * 100)}% · {new Date(item.createdAt).toLocaleString()}</span></div>

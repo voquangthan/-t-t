@@ -25,6 +25,155 @@ if (args is ["calendar"])
     return;
 }
 
+if (args is ["consent"])
+{
+    var consentRoot = Path.Combine(Path.GetTempPath(), "detot-consent-audit-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(consentRoot);
+    try
+    {
+        var protection = new EphemeralDataProtectionProvider();
+        var owner = "consent-owner-a";
+        var otherOwner = "consent-owner-b";
+        var consent = new ConsentPolicy(consentRoot, protection);
+        var dreaming = new ConsentPolicy.ConsentRequirement("memory_core", "dreaming", "local_only");
+        var external = new ConsentPolicy.ConsentRequirement("memory_core", "dreaming", "DeepSeek");
+        Require(consent.TryBegin(owner, [dreaming, external]) is null);
+        Require(consent.Get(owner).Grants.All(item => !item.Allowed));
+        Require(consent.Get(owner).Audit.Any(item => item.Decision == "denied" && item.Source == "memory_core"));
+
+        consent.Set(owner, dreaming.Source, dreaming.Purpose, dreaming.Destination, true, "owner", Guid.NewGuid());
+        Require(consent.TryBegin(owner, [dreaming, external]) is null);
+        Require(!consent.IsAllowed(otherOwner, dreaming.Source, dreaming.Purpose, dreaming.Destination));
+        var memoryLocal = new ConsentPolicy.ConsentRequirement("memory_core", "direct_request", "local_only");
+        var memoryModel = new ConsentPolicy.ConsentRequirement("memory_core", "direct_request", "DeepSeek");
+        consent.Set(owner, memoryModel.Source, memoryModel.Purpose, memoryModel.Destination, true, "owner", Guid.NewGuid());
+        Require(consent.IsAllowed(owner, memoryModel.Source, memoryModel.Purpose, memoryModel.Destination));
+        Require(!consent.IsAllowed(owner, memoryLocal.Source, memoryLocal.Purpose, memoryLocal.Destination),
+            "a model transfer grant must not imply local retrieval permission");
+        consent.Set(owner, external.Source, external.Purpose, external.Destination, true, "owner", Guid.NewGuid());
+        consent.Set(otherOwner, dreaming.Source, dreaming.Purpose, dreaming.Destination, false, "owner", Guid.NewGuid());
+        var lease = consent.TryBegin(owner, [dreaming, external]);
+        if (lease is null) throw new InvalidDataException("Granted consent did not create a worker lease.");
+        Require(consent.IsCurrent(lease));
+        var executed = false;
+        Require(consent.ExecuteIfCurrent(lease, () => { executed = true; return true; }) && executed);
+
+        consent.Set(owner, external.Source, external.Purpose, external.Destination, false, "owner", Guid.NewGuid());
+        Require(lease.CancellationToken.IsCancellationRequested);
+        Require(!consent.IsCurrent(lease));
+        executed = false;
+        Require(!consent.ExecuteIfCurrent(lease, () => { executed = true; return true; }) && !executed);
+
+        var restarted = new ConsentPolicy(consentRoot, protection);
+        Require(restarted.IsAllowed(owner, dreaming.Source, dreaming.Purpose, dreaming.Destination));
+        Require(!restarted.IsAllowed(owner, external.Source, external.Purpose, external.Destination));
+        Require(restarted.Get(owner).Audit.Any(item => item.Decision == "revoked" && item.Destination == "DeepSeek"));
+        var wrongKeyRestart = new ConsentPolicy(consentRoot, new EphemeralDataProtectionProvider());
+        Require(!wrongKeyRestart.IsAllowed(owner, dreaming.Source, dreaming.Purpose, dreaming.Destination) &&
+            wrongKeyRestart.TryBegin(owner, [dreaming]) is null,
+            "an unreadable policy after restart must fail closed");
+        var practice = new Practice(protection.CreateProtector("Detot.Practice.v1"), consentRoot);
+        practice.RecordChatLearning(owner, Guid.NewGuid(), "C#", "async", "practice", 0.9);
+        practice.RecordChatLearning(otherOwner, Guid.NewGuid(), "Python", "collections", "progress", 0.9);
+        Require(practice.ChatLearningMap(owner).Skills.Single().Topic == "C#");
+        Require(practice.ChatLearningMap(otherOwner).Skills.Single().Topic == "Python");
+        practice.ClearChatLearning(owner);
+        Require(practice.ChatLearningMap(owner).Skills.Length == 0 && practice.ChatLearningMap(otherOwner).Skills.Length == 1);
+        var firstNote = practice.ApplyMemory(owner, "save", "synthetic consent test item", "note", null,
+            Guid.NewGuid(), NullLogger.Instance).Split(' ').Last().TrimEnd('.');
+        var secondNote = practice.ApplyMemory(owner, "save", "synthetic consent test item", "note", null,
+            Guid.NewGuid(), NullLogger.Instance).Split(' ').Last().TrimEnd('.');
+        if (!Guid.TryParse(firstNote, out var firstId) || !Guid.TryParse(secondNote, out var secondId))
+            throw new InvalidDataException("Synthetic Memory IDs were not returned.");
+        Require(practice.SaveReflectionDrafts(owner, 2, [new Practice.ReflectionDraft("merge", [firstId, secondId],
+            "synthetic duplicate evidence", "synthetic consent test item", 0.9, "synthetic ids only")]));
+        Require(ReadValue(practice.ListReflectionSuggestions(owner)).GetArrayLength() == 1);
+        practice.ResetReflectionAfterConsentRevoked(owner);
+        Require(ReadValue(practice.ListReflectionSuggestions(owner)).GetArrayLength() == 0);
+        var encryptedFiles = Directory.GetFiles(consentRoot, "consent-*.bin");
+        Require(encryptedFiles.Length == 2 && encryptedFiles.All(file =>
+            !File.ReadAllText(file).Contains("consent-owner", StringComparison.Ordinal)));
+        Console.WriteLine("PASS: consent defaults deny, owner isolation, exact tuples, encrypted restart, audit metadata and mid-operation revocation cancellation.");
+    }
+    finally { try { Directory.Delete(consentRoot, recursive: true); } catch { } }
+    return;
+}
+
+if (args is ["dreaming-revoke"])
+{
+    var dreamingRoot = Path.Combine(Path.GetTempPath(), "detot-dreaming-consent-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dreamingRoot);
+    try
+    {
+        var protection = new EphemeralDataProtectionProvider();
+        var owner = "synthetic-dreaming-owner";
+        var practice = new Practice(protection.CreateProtector("Detot.Practice.v1"), dreamingRoot);
+        practice.RegisterMemoryOwner(owner);
+        practice.ApplyMemory(owner, "save", "synthetic duplicate memory item", "note", null, Guid.NewGuid(), NullLogger.Instance);
+        practice.ApplyMemory(owner, "save", "synthetic duplicate memory item", "note", null, Guid.NewGuid(), NullLogger.Instance);
+        var consent = new ConsentPolicy(Path.Combine(dreamingRoot, "consent"), protection);
+        var local = new ConsentPolicy.ConsentRequirement("memory_core", "dreaming", "local_only");
+        var model = new ConsentPolicy.ConsentRequirement("memory_core", "dreaming", "DeepSeek");
+        var gate = new BlockingDeepSeekHandler();
+        var clients = new HandlerHttpClientFactory(gate);
+        var embeddings = new MemoryEmbeddings(clients, null, null, NullLogger.Instance);
+        var worker = new MemoryDreamingWorker(practice, embeddings, clients, consent, "synthetic-provider-key",
+            NullLogger<MemoryDreamingWorker>.Instance);
+
+        using (var deniedRun = new CancellationTokenSource())
+        {
+            var task = worker.RunAsync(deniedRun.Token);
+            await Task.Delay(150);
+            Require(!gate.Started.Task.IsCompleted, "Dreaming must not call the provider with default-deny policy.");
+            deniedRun.Cancel();
+            await task.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        consent.Set(owner, local.Source, local.Purpose, local.Destination, true, "synthetic-test");
+        consent.Set(owner, model.Source, model.Purpose, model.Destination, true, "synthetic-test");
+        using (var running = new CancellationTokenSource())
+        {
+            var task = worker.RunAsync(running.Token);
+            await gate.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            consent.Set(owner, local.Source, local.Purpose, local.Destination, false, "synthetic-test");
+            await gate.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            running.Cancel();
+            await task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Require(ReadValue(practice.ListReflectionSuggestions(owner)).GetArrayLength() == 0);
+        Require(practice.GetReflectionStatus(owner).RetryCount == 0,
+            "revocation must prevent post-cancel proposal writes and retry checkpoints.");
+
+        var failureRoot = Path.Combine(dreamingRoot, "provider-failure");
+        var failingPractice = new Practice(protection.CreateProtector("Detot.Practice.v1"), failureRoot);
+        failingPractice.RegisterMemoryOwner(owner);
+        failingPractice.ApplyMemory(owner, "save", "synthetic provider failure duplicate", "note", null, Guid.NewGuid(), NullLogger.Instance);
+        failingPractice.ApplyMemory(owner, "save", "synthetic provider failure duplicate", "note", null, Guid.NewGuid(), NullLogger.Instance);
+        var failingConsent = new ConsentPolicy(Path.Combine(failureRoot, "consent"), protection);
+        failingConsent.Set(owner, local.Source, local.Purpose, local.Destination, true, "synthetic-test");
+        failingConsent.Set(owner, model.Source, model.Purpose, model.Destination, true, "synthetic-test");
+        var failureHandler = new FixedResponseHandler(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable));
+        var failureClients = new HandlerHttpClientFactory(failureHandler);
+        var failingWorker = new MemoryDreamingWorker(failingPractice,
+            new MemoryEmbeddings(failureClients, null, null, NullLogger.Instance), failureClients, failingConsent,
+            "synthetic-provider-key", NullLogger<MemoryDreamingWorker>.Instance);
+        using (var running = new CancellationTokenSource())
+        {
+            var task = failingWorker.RunAsync(running.Token);
+            var until = DateTimeOffset.UtcNow.AddSeconds(5);
+            while (failingPractice.GetReflectionStatus(owner).RetryCount == 0 && DateTimeOffset.UtcNow < until)
+                await Task.Delay(25);
+            Require(failingPractice.GetReflectionStatus(owner).RetryCount == 1,
+                "provider failure must checkpoint a bounded retry without creating a proposal.");
+            Require(ReadValue(failingPractice.ListReflectionSuggestions(owner)).GetArrayLength() == 0);
+            running.Cancel();
+            await task.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        Console.WriteLine("PASS: Dreaming default-deny prevents provider access; revocation cancels an active call without proposals/retries; provider failures checkpoint a retry.");
+    }
+    finally { try { Directory.Delete(dreamingRoot, recursive: true); } catch { } }
+    return;
+}
+
 if (args is ["agentic"])
 {
     var agenticRoot = Path.Combine(Path.GetTempPath(), "detot-agentic-memory-" + Guid.NewGuid().ToString("N"));
@@ -268,9 +417,9 @@ void Check(Guid id, string status, int count)
     Require(completed.GetProperty("requestId").GetGuid() != created.GetProperty("requestId").GetGuid());
 }
 
-static void Require(bool condition)
+static void Require(bool condition, string? message = null)
 {
-    if (!condition) throw new InvalidDataException("Memory audit assertion failed.");
+    if (!condition) throw new InvalidDataException(message ?? "Memory audit assertion failed.");
 }
 
 static JsonElement ReadValue(IResult result) => JsonSerializer.SerializeToElement(
@@ -285,4 +434,29 @@ sealed class FailingHttpMessageHandler : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         Task.FromException<HttpResponseMessage>(new HttpRequestException("Simulated embedding provider outage."));
+}
+
+sealed class HandlerHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+}
+
+sealed class BlockingDeepSeekHandler : HttpMessageHandler
+{
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Started.TrySetResult();
+        try { await Task.Delay(Timeout.Infinite, cancellationToken); }
+        catch (OperationCanceledException) { Cancelled.TrySetResult(); throw; }
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+    }
+}
+
+sealed class FixedResponseHandler(HttpResponseMessage response) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromResult(new HttpResponseMessage(response.StatusCode));
 }

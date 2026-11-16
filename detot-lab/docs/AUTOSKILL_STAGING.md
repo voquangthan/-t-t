@@ -11,7 +11,7 @@ Status: **staging only**. The real Gateway configuration is unchanged and the pl
 
 ## Learning lifecycle
 
-1. OpenClaw `agent_end` captures only sanitized messages for the configured lab owner. Review-only mode ignores sessions without tool evidence and waits for a closed session.
+1. The staged plugin is currently disabled and cannot access conversations. No `agent_end` capture, archive, or extraction runs until a future backend consent gate is implemented and explicitly enabled.
 2. AutoSkill extracts a candidate into an owner-scoped proposal file. It does not merge into the approved SkillBank, retrieve proposals into prompts, or mirror them as active skills.
 3. The pipeline accepts a replay report only when it identifies the exact candidate hash and current baseline version/hash, contains at least three unique cases, has no safety failure, has no per-case regression, and improves the aggregate score.
 4. An operator explicitly approves a passing proposal. Activation writes only into the staging workspace skills directory, records an immutable version snapshot, source proposal, evidence hash, replay summary and audit event.
@@ -21,13 +21,13 @@ Rejection reasons are restricted to a small code list so audit entries do not ca
 
 ## Privacy controls
 
-- Conversation access is explicitly granted only in the staging config (`allowConversationAccess: true`). The real config has not received this grant.
+- `prepare-staging.mjs` writes the plugin as `enabled: false`, with `allowConversationAccess: false` and `extractOnAgentEnd: false`. OAuth or a Gateway hook grant does not confer AI learning consent.
 - The lab privacy module omits messages that match sensitive topics such as health, finance, identity documents, home address or credentials. It redacts common email, phone and long-number patterns.
 - Candidates containing credential or private-topic patterns are rejected. Any resource files are rejected pending a separate review path; generated scripts are never activated.
 - Feedback text is excluded. Only the fixed owner ID is used; no frontend-provided identity is trusted.
 - Finalized, AutoSkill-owned archive files are pruned after seven days. Active session files are not pruned by this policy. Proposal and version history are retained.
 
-This is a conservative heuristic privacy gate, not a guarantee that arbitrary free text contains no personal information. It therefore remains staging-only; do not enable automatic archive capture on the primary Gateway based solely on these filters.
+This is a conservative heuristic privacy gate, not a guarantee that arbitrary free text contains no personal information. AutoSkill remains disabled while the consent foundation is enforced; do not enable automatic archive capture on the primary Gateway based solely on these filters.
 
 ## Replay report contract
 

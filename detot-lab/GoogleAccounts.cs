@@ -14,7 +14,7 @@ static class GoogleAccounts
     private const string EventsUrl = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
     public static Func<GoogleEventEdit, HttpContext, IHttpClientFactory, Task<IResult>> Map(
-        WebApplication app, string directory, string origin, bool secure)
+        WebApplication app, string directory, string origin, bool secure, ConsentPolicy? consent)
     {
         const string callbackPath = "/api/google/callback";
         var callback = origin + callbackPath;
@@ -25,6 +25,12 @@ static class GoogleAccounts
             Path = callbackPath
         };
         var group = app.MapGroup("/api/google");
+        bool CheckConsent(HttpContext context, string source, string purpose, string destination, string actor)
+        {
+            var owner = context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+            return consent?.Check(owner, [new ConsentPolicy.ConsentRequirement(source, purpose, destination)],
+                actor, null, out _) == true;
+        }
         var (clientId, secret) = GoogleOAuthClientSelection.Resolve(app.Configuration);
         var configured = (!string.IsNullOrWhiteSpace(clientId) && !string.IsNullOrWhiteSpace(secret))
             || File.Exists(Path.Combine(Path.GetDirectoryName(directory)!, "google-client.json"))
@@ -192,6 +198,7 @@ static class GoogleAccounts
 
         group.MapPost("/accounts/{id}/search", (string id, GmailQuery query, HttpContext ctx, IHttpClientFactory factory) => Run(ctx, async () =>
         {
+            if (!CheckConsent(ctx, "gmail", "direct_request", "local_only", "gmail_search")) return Results.StatusCode(403);
             if (query.Query is not { Length: <= 200 }) return Results.BadRequest();
             var account = Read().Find(item => item.Id == id && !item.Calendar);
             if (account is null) return Results.NotFound();
@@ -226,6 +233,7 @@ static class GoogleAccounts
         group.MapGet("/accounts/{id}/messages/{messageId}/preview",
             (string id, string messageId, HttpContext ctx, IHttpClientFactory factory) => Run(ctx, async () =>
         {
+            if (!CheckConsent(ctx, "gmail", "direct_request", "local_only", "gmail_preview")) return Results.StatusCode(403);
             if (messageId.Length is < 1 or > 128 || !messageId.All(char.IsAsciiLetterOrDigit))
                 return Results.BadRequest();
             var account = Read().Find(item => item.Id == id && !item.Calendar);
@@ -245,11 +253,13 @@ static class GoogleAccounts
         }));
 
         group.MapGet("/calendar/accounts", Task<IResult> (HttpContext ctx) => Run(ctx, () =>
-            Task.FromResult<IResult>(Results.Ok(Read().Where(account => account.Calendar)
-                .Select(account => new { account.Id, account.Email })))));
+            Task.FromResult<IResult>(!CheckConsent(ctx, "calendar", "direct_request", "local_only", "calendar_accounts")
+                ? Results.StatusCode(403) : Results.Ok(Read().Where(account => account.Calendar)
+                    .Select(account => new { account.Id, account.Email })))));
 
         group.MapGet("/calendar/{id}/events", (string id, HttpContext ctx, IHttpClientFactory factory) => Run(ctx, async () =>
         {
+            if (!CheckConsent(ctx, "calendar", "direct_request", "local_only", "calendar_read")) return Results.StatusCode(403);
             var now = DateTimeOffset.UtcNow;
             var query = new Dictionary<string, string?>
             {
@@ -273,14 +283,18 @@ static class GoogleAccounts
         }));
 
         group.MapPost("/calendar/{id}/events", (string id, GoogleEventEdit edit, HttpContext ctx, IHttpClientFactory factory) =>
-            Run(ctx, () => WriteEvent(id, null, edit, ctx, factory)));
+            Run(ctx, () => !CheckConsent(ctx, "calendar", "direct_request", "external_service", "calendar_write")
+                ? Task.FromResult<IResult>(Results.StatusCode(403)) : WriteEvent(id, null, edit, ctx, factory)));
         group.MapPut("/calendar/{id}/events/{eventId}", (string id, string eventId, GoogleEventEdit edit, HttpContext ctx, IHttpClientFactory factory) =>
-            Run(ctx, () => WriteEvent(id, eventId, edit, ctx, factory)));
+            Run(ctx, () => !CheckConsent(ctx, "calendar", "direct_request", "external_service", "calendar_write")
+                ? Task.FromResult<IResult>(Results.StatusCode(403)) : WriteEvent(id, eventId, edit, ctx, factory)));
         group.MapDelete("/calendar/{id}/events/{eventId}", (string id, string eventId, HttpContext ctx, IHttpClientFactory factory) =>
-            Run(ctx, () => WriteEvent(id, eventId, null, ctx, factory)));
+            Run(ctx, () => !CheckConsent(ctx, "calendar", "direct_request", "external_service", "calendar_write")
+                ? Task.FromResult<IResult>(Results.StatusCode(403)) : WriteEvent(id, eventId, null, ctx, factory)));
 
         return (edit, ctx, factory) => Run(ctx, async () =>
         {
+            if (!CheckConsent(ctx, "calendar", "direct_request", "external_service", "calendar_write")) return Results.StatusCode(403);
             var accounts = Read().Where(account => account.Calendar).ToArray();
             if (accounts.Length != 1)
                 return Results.Problem(accounts.Length == 0

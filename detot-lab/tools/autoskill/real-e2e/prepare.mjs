@@ -46,8 +46,8 @@ config.plugins.slots = { memory: "none" };
 config.plugins.load = { paths: [ADAPTER_DIR, TOOL_DIR] };
 config.plugins.entries = {
   "autoskill-openclaw-adapter": {
-    enabled: true,
-    hooks: { allowConversationAccess: true },
+    enabled: false,
+    hooks: { allowConversationAccess: false },
     config: {
       userId: "detot-synthetic-owner",
       runtimeMode: "embedded",
@@ -55,7 +55,7 @@ config.plugins.entries = {
       openclawSkillInstallMode: "openclaw_mirror",
       recallEnabled: false,
       skillRetrieval: { enabled: false },
-      extractOnAgentEnd: true,
+      extractOnAgentEnd: false,
       successOnly: false,
       includeUserFeedback: false,
       logPayload: false,

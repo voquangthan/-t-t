@@ -11,6 +11,8 @@
     <Compile Include="../../CalendarIntentParser.cs" Link="CalendarIntentParser.cs" />
     <Compile Include="../../MemoryRanking.cs" Link="MemoryRanking.cs" />
     <Compile Include="../../MemoryEmbeddings.cs" Link="MemoryEmbeddings.cs" />
+    <Compile Include="../../ConsentPolicy.cs" Link="ConsentPolicy.cs" />
+    <Compile Include="../../MemoryDreamingWorker.cs" Link="MemoryDreamingWorker.cs" />
     <Compile Include="../../Practice.cs" Link="Practice.cs" />
     <Compile Include="../../RemoteAccess.cs" Link="RemoteAccess.cs" />
   </ItemGroup>

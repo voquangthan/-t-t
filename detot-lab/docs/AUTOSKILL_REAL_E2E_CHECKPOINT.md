@@ -1,6 +1,6 @@
 # AutoSkill real E2E checkpoint
 
-Status: **BLOCKED — SELF-IMPROVEMENT NOT VERIFIED**
+Status: **DISABLED — CONSENT BACKEND GATE REQUIRED BEFORE ANY E2E**
 
 ## Starting point and safety boundary
 
@@ -10,7 +10,8 @@ Status: **BLOCKED — SELF-IMPROVEMENT NOT VERIFIED**
 - Staging uses port `19794`, config `detot-lab/.local/autoskill-staging/gateway.real-e2e.json`, state `detot-lab/.local/autoskill-staging/real-e2e-state`, synthetic owner `detot-synthetic-owner`, and synthetic ticket data only.
 - Staging config pins DeepSeek to `deepseek-flash` through the existing `DEEPSEEK_API_KEY` environment reference. The credential itself is not copied into the staging config or logs.
 - The only allowed agent tool is `detot_synthetic_case_check`; filesystem, shell, browser, network, Gateway administration, and other tool groups are denied.
-- AutoSkill remains review-only; retrieval is disabled until an evaluated proposal is approved for staging.
+- The isolated staging builder now emits `enabled: false`, `allowConversationAccess: false`, and `extractOnAgentEnd: false`; no staging or primary Gateway was started for the consent work.
+- AutoSkill remains disabled; retrieval is also disabled until an evaluated proposal is approved for staging.
 
 ## Verified
 
@@ -40,6 +41,6 @@ Status: **BLOCKED — SELF-IMPROVEMENT NOT VERIFIED**
 
 ## Next exact step
 
-Continue diagnosing why the staging OpenClaw Gateway stalls after `starting HTTP server` without altering the primary config/state. Capture the exact Gateway process exit/health result before another long start attempt. Once port `19794` reaches `/readyz`, run a baseline, create a corrected tool-backed synthetic learning session, wait for AutoSkill proposal generation, review it, replay independent cases through the same Gateway using DeepSeek, and only approve if the measured score improves. Keep the Gateway process scoped to staging and stop only its recorded PID after tests.
+Keep AutoSkill disabled until its capture/archive/extraction path can call the owner-scoped consent backend before reading conversation content. Only then resume isolated staging diagnosis and synthetic E2E; do not alter the primary Gateway config or state.
 
 Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with actual Gateway-backed DeepSeek, proposal, activation, comparative replay, and rollback results.

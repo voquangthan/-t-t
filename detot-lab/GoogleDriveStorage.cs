@@ -42,19 +42,22 @@ public sealed class GoogleDriveStorage : IStorageProvider
     private readonly IDataProtector _protector;
     private readonly IHttpClientFactory _clients;
     private readonly MemoryBackupService _backups;
+    private readonly ConsentPolicy? _consent;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _tokenGate = new(1, 1);
     private string? _accessToken;
     private DateTimeOffset _accessTokenExpires;
 
-    public static GoogleDriveStorage Map(WebApplication app, string directory, string origin, bool secure, string loginHint)
+    public static GoogleDriveStorage Map(WebApplication app, string directory, string origin, bool secure, string loginHint,
+        ConsentPolicy? consent = null)
     {
-        var storage = new GoogleDriveStorage(app, directory, origin, secure, loginHint);
+        var storage = new GoogleDriveStorage(app, directory, origin, secure, loginHint, consent);
         storage.MapRoutes(app);
         return storage;
     }
 
-    private GoogleDriveStorage(WebApplication app, string directory, string origin, bool secure, string loginHint)
+    private GoogleDriveStorage(WebApplication app, string directory, string origin, bool secure, string loginHint,
+        ConsentPolicy? consent)
     {
         _origin = origin.TrimEnd('/');
         _host = new Uri(_origin).Authority;
@@ -75,6 +78,7 @@ public sealed class GoogleDriveStorage : IStorageProvider
         _protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("Detot.GoogleDrive.v1");
         _clients = app.Services.GetRequiredService<IHttpClientFactory>();
         _backups = new MemoryBackupService(this, _directory, app.Configuration, app.Environment.ContentRootPath);
+        _consent = consent;
     }
 
     private void MapRoutes(WebApplication app)
@@ -140,20 +144,28 @@ public sealed class GoogleDriveStorage : IStorageProvider
         app.MapGet("/api/drive/history", (Delegate)((HttpContext context) => Guard(context, () =>
             Task.FromResult<IResult>(Results.Ok(ReadHistory().OrderByDescending(row => row.Utc).Take(100))))));
         app.MapGet("/api/drive/backups/sources", (Delegate)((HttpContext context) => Guard(context, () =>
-            Task.FromResult<IResult>(Results.Ok(_backups.Sources())))));
+            Task.FromResult<IResult>(!CheckConsent(context, "memory_core", "direct_request", "local_only", "memory_backup_sources")
+                ? Results.StatusCode(403) : Results.Ok(_backups.Sources())))));
         app.MapPost("/api/drive/backups", (MemoryBackupService.BackupRequest request, HttpContext context) => Guard(context, async () =>
         {
+            if (request.Sources?.Any(source => source is "memory-core" or "dreaming") == true &&
+                !CheckConsent(context, "memory_core", "direct_request", "external_service", "memory_backup"))
+                return Results.StatusCode(403);
             var result = await _backups.CreateAsync(request.Sources, request.Passphrase, context.RequestAborted);
             return Results.Ok(result);
         }));
         app.MapPost("/api/drive/backups/{id}/restore", (string id, MemoryBackupService.RestoreRequest request, HttpContext context) => Guard(context, async () =>
         {
+            if (!CheckConsent(context, "memory_core", "direct_request", "external_service", "memory_restore"))
+                return Results.StatusCode(403);
             if (id.Length is < 5 or > 256 || !Regex.IsMatch(id, "^[A-Za-z0-9_-]+$")) return Results.BadRequest();
             var ready = await _backups.RestoreToStagingAsync(id, request.Passphrase, context.RequestAborted);
             return Results.Ok(new { ready.Files, ready.Bytes, ready.Message, downloadUrl = $"/api/drive/restores/{ready.Id}/download" });
         }));
         app.MapGet("/api/drive/restores/{id:guid}/download", async (Guid id, HttpContext context) => await Guard(context, () =>
         {
+            if (!CheckConsent(context, "memory_core", "direct_request", "external_service", "memory_restore_download"))
+                return Task.FromResult<IResult>(Results.StatusCode(403));
             var archive = _backups.TakeRestore(id);
             if (!File.Exists(archive.Path)) return Task.FromResult<IResult>(Results.NotFound());
             var stream = new FileStream(archive.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920,
@@ -267,6 +279,10 @@ public sealed class GoogleDriveStorage : IStorageProvider
         }
         finally { _gate.Release(); }
     }
+
+    private bool CheckConsent(HttpContext context, string source, string purpose, string destination, string actor) =>
+        _consent?.Check(context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "",
+            [new ConsentPolicy.ConsentRequirement(source, purpose, destination)], actor, null, out _) == true;
 
     private bool ValidRequest(HttpContext context) =>
         string.Equals(context.Request.Host.Value, _host, StringComparison.OrdinalIgnoreCase) &&

@@ -26,17 +26,20 @@ public sealed class TrustedLearningSources
     private readonly UniversalFileReader _fileReader;
     private readonly UniversalUrlReader? _urlReader;
     private readonly SearchDiscoveryService _searchDiscovery;
+    private readonly ConsentPolicy? _consent;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _wakeWorker = new(0, 1);
     private readonly SemaphoreSlim _mirrorGate = new(1, 1);
     private readonly SemaphoreSlim _cloudRefreshGate = new(1, 1);
+    private readonly object _stateLoadGate = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sourceSyncGates = new();
     private DateTimeOffset _lastCloudRefresh;
     private State _state;
+    private bool _stateLoaded;
 
     public TrustedLearningSources(string directory, IDataProtectionProvider protection, IHttpClientFactory clients,
         IStorageProvider drive, ILogger<TrustedLearningSources> logger, UniversalFileReader? fileReader = null, UniversalUrlReader? urlReader = null,
-        ISearchDiscoveryProvider? searchProvider = null)
+        ISearchDiscoveryProvider? searchProvider = null, ConsentPolicy? consent = null)
     {
         _path = Path.Combine(directory, "state.bin");
         _protector = protection.CreateProtector("Detot.TrustedLearning.v1");
@@ -46,20 +49,32 @@ public sealed class TrustedLearningSources
         _fileReader = fileReader ?? new UniversalFileReader();
         _urlReader = urlReader;
         _searchDiscovery = new SearchDiscoveryService(searchProvider);
-        _state = ReadState();
+        _consent = consent;
+        _state = new State([], []);
     }
 
     public void Map(WebApplication app, Func<HttpContext, bool> isLocalMutation)
     {
         app.MapGet("/api/learning/sources", async (CancellationToken cancellationToken) =>
         {
-            await RefreshCloudSnapshotAsync(cancellationToken);
+            if (!CheckConsentForOwner("trusted_learning", "direct_request", "local_only", "learning_sources"))
+                return Results.StatusCode(403);
+            LoadStateIfAllowed();
+            if (HasConsent("trusted_learning", "skill_learning", "external_service"))
+                await RefreshCloudSnapshotAsync(cancellationToken);
             return Results.Ok(List());
         });
-        app.MapGet("/api/learning/dashboard", () => Results.Ok(Dashboard()));
-        app.MapGet("/api/learning/quarantine", () => Results.Ok(Quarantine()));
-        app.MapGet("/api/learning/audit", () =>
+        app.MapGet("/api/learning/dashboard", (HttpContext context) =>
+            !CheckConsent(context, "trusted_learning", "direct_request", "local_only", "learning_dashboard")
+                ? Results.StatusCode(403) : Results.Ok(Dashboard()));
+        app.MapGet("/api/learning/quarantine", (HttpContext context) =>
+            !CheckConsent(context, "trusted_learning", "direct_request", "local_only", "learning_quarantine")
+                ? Results.StatusCode(403) : Results.Ok(Quarantine()));
+        app.MapGet("/api/learning/audit", (HttpContext context) =>
         {
+            if (!CheckConsent(context, "trusted_learning", "direct_request", "local_only", "learning_audit"))
+                return Results.StatusCode(403);
+            LoadStateIfAllowed();
             var state = _state;
             var approved = state.Sources.Where(source => source.Status == "approved").Select(source => source.Id).ToHashSet();
             var indexed = state.Knowledge.Where(item => item.State == "indexed" && approved.Contains(item.SourceId)).ToArray();
@@ -82,6 +97,10 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/requests", async (LearningRequest request, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_request"))
+                return Results.StatusCode(403);
+            if (request.ExactUrl is null && !CheckConsent(context, "public_web", "direct_request", "external_service", "learning_discovery"))
+                return Results.StatusCode(403);
             try { return Results.Accepted(value: await QueueLearningAsync(request, context.RequestAborted)); }
             catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
             catch (Exception error) when (error is HttpRequestException or InvalidOperationException or JsonException)
@@ -90,6 +109,8 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/discovery/search", async (SearchDiscoveryRequest request, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "public_web", "direct_request", "external_service", "search_request"))
+                return Results.StatusCode(403);
             try { return Results.Ok(await _searchDiscovery.SearchAsync(request, context.RequestAborted)); }
             catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
             catch (InvalidOperationException error) { return Results.Problem(error.Message, statusCode: 503); }
@@ -97,6 +118,7 @@ public sealed class TrustedLearningSources
         });
         app.MapGet("/api/learning/drive-scopes", async (CancellationToken cancellationToken) =>
         {
+            if (!CheckConsentForOwner("google_drive", "direct_request", "local_only", "drive_scope_list")) return Results.StatusCode(403);
             try
             {
                 var items = await _drive.ListAsync("dataset", null, cancellationToken);
@@ -112,12 +134,16 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/sources", async (SourceDraft draft, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_source"))
+                return Results.StatusCode(403);
             try { var added = await AddAsync(draft, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(added); }
             catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/check", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_check"))
+                return Results.StatusCode(403);
             try { var checkedSource = await CheckAsync(id, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(checkedSource); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
@@ -127,24 +153,31 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/sources/{id:guid}/pause", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            // Pausing a source reduces access and remains available after consent is revoked.
             try { var source = await SetPausedAsync(id, true, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(source); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/resume", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_resume"))
+                return Results.StatusCode(403);
             try { var source = await SetPausedAsync(id, false, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(source); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/retry", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_retry"))
+                return Results.StatusCode(403);
             try { var source = await RetryAsync(id, context.RequestAborted); await TryPersistCloudSnapshotAsync(context.RequestAborted); return Results.Ok(source); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
         app.MapPost("/api/learning/sources/{id:guid}/approve", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_approve"))
+                return Results.StatusCode(403);
             try { return Results.Ok(await ApproveAsync(id, context.RequestAborted)); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException error) { return Results.Conflict(new { error = error.Message }); }
@@ -152,6 +185,8 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/sources/{id:guid}/sync", async (Guid id, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_sync"))
+                return Results.StatusCode(403);
             try { return Results.Ok(await SyncAsync(id, context.RequestAborted)); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException error) { return Results.Conflict(new { error = error.Message }); }
@@ -162,13 +197,17 @@ public sealed class TrustedLearningSources
             try { await RemoveAsync(id, context.RequestAborted); return Results.NoContent(); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
-        app.MapGet("/api/learning/knowledge", async (string? q, CancellationToken cancellationToken) =>
+        app.MapGet("/api/learning/knowledge", async (string? q, HttpContext context, CancellationToken cancellationToken) =>
         {
+            if (!CheckConsent(context, "trusted_learning", "direct_request", "local_only", "learning_knowledge"))
+                return Results.StatusCode(403);
             await RefreshCloudSnapshotAsync(cancellationToken);
             return Results.Ok(Search(q ?? "", 40));
         });
-        app.MapGet("/api/learning/review", async (CancellationToken cancellationToken) =>
+        app.MapGet("/api/learning/review", async (HttpContext context, CancellationToken cancellationToken) =>
         {
+            if (!CheckConsent(context, "trusted_learning", "direct_request", "local_only", "learning_review_list"))
+                return Results.StatusCode(403);
             await RefreshCloudSnapshotAsync(cancellationToken);
             return Results.Ok(_state.Knowledge.Where(item => item.State is "review" or "quarantined")
                 .Select(item => new { item.Hash, item.SourceName, item.Title, item.Text, item.Citation, item.License,
@@ -177,6 +216,8 @@ public sealed class TrustedLearningSources
         app.MapPost("/api/learning/review/{hash}/accept", async (string hash, HttpContext context) =>
         {
             if (!isLocalMutation(context)) return Results.StatusCode(403);
+            if (!CheckConsent(context, "trusted_learning", "skill_learning", "external_service", "learning_review"))
+                return Results.StatusCode(403);
             var changed = await AcceptReviewAsync(hash, context.RequestAborted);
             if (!changed) return Results.NotFound();
             await TryPersistCloudSnapshotAsync(context.RequestAborted);
@@ -184,10 +225,35 @@ public sealed class TrustedLearningSources
         });
     }
 
-    public async Task InitializeCloudSnapshotAsync(CancellationToken cancellationToken) => await RefreshCloudSnapshotAsync(cancellationToken);
+    public async Task InitializeCloudSnapshotAsync(CancellationToken cancellationToken)
+    {
+        if (!HasConsent("trusted_learning", "skill_learning", "external_service")) return;
+        await RefreshCloudSnapshotAsync(cancellationToken);
+    }
+
+    public async Task RevokeConsentAsync(CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            _state = new State([], [], DateTimeOffset.UtcNow);
+            _stateLoaded = true;
+            SaveState();
+            _lastCloudRefresh = DateTimeOffset.MinValue;
+        }
+        finally { _gate.Release(); }
+    }
 
     public async Task<IReadOnlyList<SourceView>> QueueLearningAsync(LearningRequest request, CancellationToken cancellationToken)
     {
+        var requirements = new List<ConsentPolicy.ConsentRequirement>
+        { new("trusted_learning", "skill_learning", "external_service") };
+        if (request.ExactUrl is null)
+            requirements.Add(new("public_web", "direct_request", "external_service"));
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId, requirements, "learning_queue");
+        if (lease is null) throw new InvalidOperationException("Learning consent is required before queueing a source.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         if (request.ExactUrl is not null && request.Domains is { Length: > 0 })
             throw new ArgumentException("Chọn một URL hoặc danh sách domain được phép học.");
         if (request.ExactUrl is null && request.Domains is not { Length: > 0 })
@@ -208,6 +274,7 @@ public sealed class TrustedLearningSources
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             if (_state.Sources.Length + batch.Count(entry => !_state.Sources.Any(item =>
                 item.Type == entry.Type && item.Scope.Equals(entry.Scope, StringComparison.OrdinalIgnoreCase))) > 1000)
                 throw new ArgumentException("Kho đã đạt giới hạn 1.000 nguồn.");
@@ -234,9 +301,14 @@ public sealed class TrustedLearningSources
             }
             if (batch.Length > 0)
             {
-                SaveState();
+                if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                {
+                    _state = previousState;
+                    throw new OperationCanceledException(lease.CancellationToken);
+                }
                 if (_wakeWorker.CurrentCount == 0) _wakeWorker.Release();
             }
+            else cancellationToken.ThrowIfCancellationRequested();
             return queued;
         }
         finally { _gate.Release(); }
@@ -244,6 +316,11 @@ public sealed class TrustedLearningSources
 
     public async Task<SourceView> AddAsync(SourceDraft draft, CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_source_add");
+        if (lease is null) throw new InvalidOperationException("Learning consent is required before adding a source.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await RefreshCloudSnapshotAsync(cancellationToken);
         var type = draft.Type?.Trim().ToLowerInvariant() ?? "";
         if (type is not ("website" or "github" or "drive-folder"))
@@ -266,12 +343,17 @@ public sealed class TrustedLearningSources
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             if (_state.Sources.Any(item => item.Type == type && item.Scope.Equals(scope, StringComparison.OrdinalIgnoreCase)))
                 throw new ArgumentException("Nguồn này đã được thêm.");
             var source = new Source(Guid.NewGuid(), type, draft.Name?.Trim() is { Length: > 0 and <= 120 } name ? name : DefaultName(type, scope),
                 scope, permission, license, licenseUrl, "pending", false, DateTimeOffset.UtcNow, null, null, 0, null);
             _state = _state with { Sources = [.. _state.Sources, source] };
-            SaveState();
+            if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+            {
+                _state = previousState;
+                throw new OperationCanceledException(lease.CancellationToken);
+            }
             return View(source);
         }
         finally { _gate.Release(); }
@@ -279,6 +361,11 @@ public sealed class TrustedLearningSources
 
     public async Task<SourceView> CheckAsync(Guid id, CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_check");
+        if (lease is null) throw new InvalidOperationException("Learning consent is required before checking a source.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await RefreshCloudSnapshotAsync(cancellationToken);
         var source = GetSource(id);
         var details = source.Type switch
@@ -291,6 +378,7 @@ public sealed class TrustedLearningSources
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             var updated = source with
             {
                 License = details.DetectedLicense ?? source.License,
@@ -304,7 +392,11 @@ public sealed class TrustedLearningSources
             var current = RequireSource(id);
             if (current != source) return View(current);
             ReplaceSource(updated);
-            SaveState();
+            if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+            {
+                _state = previousState;
+                throw new OperationCanceledException(lease.CancellationToken);
+            }
             return View(updated);
         }
         finally { _gate.Release(); }
@@ -312,14 +404,31 @@ public sealed class TrustedLearningSources
 
     public async Task<SourceView> SetPausedAsync(Guid id, bool paused, CancellationToken cancellationToken)
     {
+        ConsentPolicy.ConsentLease? lease = null;
+        CancellationTokenSource? linked = null;
+        if (!paused)
+        {
+            lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+                [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_resume");
+            if (lease is null) throw new InvalidOperationException("Learning consent is required before resuming a source.");
+            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+            cancellationToken = linked.Token;
+        }
+        using var linkedScope = linked;
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             var source = RequireSource(id);
             var updated = source with { Paused = paused, WorkerState = paused ? "paused" :
                 source.ProcessingFingerprint is not null ? "queued" : "idle" };
             ReplaceSource(updated);
-            SaveState();
+            if (lease is not null && _consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+            {
+                _state = previousState;
+                throw new OperationCanceledException(lease.CancellationToken);
+            }
+            if (lease is null) SaveState();
             return View(updated);
         }
         finally { _gate.Release(); }
@@ -327,23 +436,41 @@ public sealed class TrustedLearningSources
 
     public async Task<SourceView> RetryAsync(Guid id, CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_retry");
+        if (lease is null) throw new InvalidOperationException("Learning consent is required before retrying a source.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             var source = RequireSource(id);
             var updated = source with { RetryCount = 0, NextAttemptUtc = null, LastError = null, WorkerState = "queued" };
-            ReplaceSource(updated); SaveState(); return View(updated);
+            ReplaceSource(updated);
+            if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+            {
+                _state = previousState;
+                throw new OperationCanceledException(lease.CancellationToken);
+            }
+            return View(updated);
         }
         finally { _gate.Release(); }
     }
 
     public async Task<SourceView> ApproveAsync(Guid id, CancellationToken cancellationToken, bool automatic = false)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_approve");
+        if (lease is null) throw new InvalidOperationException("Learning consent is required before approving a source.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await RefreshCloudSnapshotAsync(cancellationToken);
         SourceView view;
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             var source = RequireSource(id);
             if (automatic && (source.Paused || source.AutoTopic is null)) return View(source);
             if (source.Status != "checked" || source.CheckedUtc is null || source.CheckedUtc < DateTimeOffset.UtcNow.AddHours(-24))
@@ -353,18 +480,31 @@ public sealed class TrustedLearningSources
                 NextAttemptUtc = null, RetryCount = 0,
                 CheckSummary = "Nguồn được người dùng phê duyệt trong phạm vi đã khai báo." };
             ReplaceSource(approved);
-            SaveState();
+            if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+            {
+                _state = previousState;
+                throw new OperationCanceledException(lease.CancellationToken);
+            }
             view = View(approved);
         }
         finally { _gate.Release(); }
         var mirrorError = await TryPersistCloudSnapshotAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_consent!.IsCurrent(lease)) throw new OperationCanceledException(lease.CancellationToken);
         if (mirrorError is not null)
         {
             await _gate.WaitAsync(cancellationToken);
             try
             {
                 var pending = RequireSource(id) with { LastError = "Phê duyệt đã lưu cục bộ; bản sao Drive đang chờ: " + mirrorError };
-                ReplaceSource(pending); SaveState(); view = View(pending);
+                var previousState = _state;
+                ReplaceSource(pending);
+                if (!_consent.ExecuteIfCurrent(lease, () => { SaveState(); return true; }))
+                {
+                    _state = previousState;
+                    throw new OperationCanceledException(lease.CancellationToken);
+                }
+                view = View(pending);
             }
             finally { _gate.Release(); }
         }
@@ -373,13 +513,18 @@ public sealed class TrustedLearningSources
 
     public async Task<SyncSummary> SyncAsync(Guid id, CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "trusted_learning_sync");
+        if (lease is null) throw new InvalidOperationException("Chưa được cấp quyền đồng bộ nguồn học ngoài.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         var syncGate = _sourceSyncGates.GetOrAdd(id, static _ => new SemaphoreSlim(1, 1));
         await syncGate.WaitAsync(cancellationToken);
-        try { return await SyncCoreAsync(id, cancellationToken); }
+        try { return await SyncCoreAsync(id, cancellationToken, lease); }
         finally { syncGate.Release(); }
     }
 
-    private async Task<SyncSummary> SyncCoreAsync(Guid id, CancellationToken cancellationToken)
+    private async Task<SyncSummary> SyncCoreAsync(Guid id, CancellationToken cancellationToken, ConsentPolicy.ConsentLease lease)
     {
         await RefreshCloudSnapshotAsync(cancellationToken);
         var source = GetSource(id);
@@ -391,8 +536,11 @@ public sealed class TrustedLearningSources
             await _gate.WaitAsync(cancellationToken);
             try
             {
+                var previousState = _state;
                 source = RequireSource(id) with { WorkerState = "running", LastAttemptUtc = DateTimeOffset.UtcNow };
-                ReplaceSource(source); SaveState();
+                ReplaceSource(source);
+                if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                { _state = previousState; throw new OperationCanceledException(lease.CancellationToken); }
             }
             finally { _gate.Release(); }
             IReadOnlyList<CloudArtifact>? driveArtifacts = null;
@@ -410,11 +558,14 @@ public sealed class TrustedLearningSources
                     await _gate.WaitAsync(cancellationToken);
                     try
                     {
+                        var previousState = _state;
                         var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                             RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
                             LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
                             CheckSummary = "Manifest Drive không đổi; bỏ qua tải tệp, trích xuất, quality processing và cập nhật RAG." };
-                        ReplaceSource(current); SaveState();
+                        ReplaceSource(current);
+                        if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                        { _state = previousState; throw new OperationCanceledException(lease.CancellationToken); }
                         return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
                     }
                     finally { _gate.Release(); }
@@ -451,6 +602,7 @@ public sealed class TrustedLearningSources
                 await _gate.WaitAsync(cancellationToken);
                 try
                 {
+                    var previousState = _state;
                     var metadata = documents[0];
                     var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                         RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
@@ -458,7 +610,9 @@ public sealed class TrustedLearningSources
                         LastSourceETag = metadata.ETag ?? source.LastSourceETag,
                         LastSourceModifiedUtc = metadata.LastModifiedUtc ?? source.LastSourceModifiedUtc,
                         CheckSummary = "Nguồn xác nhận không đổi qua HTTP validator; bỏ qua tải nội dung, quality processing và cập nhật RAG." };
-                    ReplaceSource(current); SaveState();
+                    ReplaceSource(current);
+                    if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                    { _state = previousState; throw new OperationCanceledException(lease.CancellationToken); }
                     return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
                 }
                 finally { _gate.Release(); }
@@ -471,6 +625,7 @@ public sealed class TrustedLearningSources
                 await _gate.WaitAsync(cancellationToken);
                 try
                 {
+                    var previousState = _state;
                     var current = RequireSource(id) with { LastSyncUtc = DateTimeOffset.UtcNow, LastError = null,
                         RetryCount = 0, NextAttemptUtc = null, WorkerState = "idle", LastSyncStatus = "unchanged",
                         LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
@@ -479,7 +634,9 @@ public sealed class TrustedLearningSources
                         LastManifestFingerprint = manifestFingerprint ?? source.LastManifestFingerprint,
                         QuarantinedDocuments = quarantinedDriveDocuments,
                         CheckSummary = "Nguồn không thay đổi; bỏ qua quality processing và cập nhật RAG." };
-                    ReplaceSource(current); SaveState();
+                    ReplaceSource(current);
+                    if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                    { _state = previousState; throw new OperationCanceledException(lease.CancellationToken); }
                     return new SyncSummary(current.Id, current.Name, 0, 0, 0, current.LastSyncUtc, current.CheckSummary, Unchanged: true);
                 }
                 finally { _gate.Release(); }
@@ -521,8 +678,10 @@ public sealed class TrustedLearningSources
                     CheckSummary = result.Complete
                         ? $"Đồng bộ xong: {acceptedTotal} đoạn lập chỉ mục, {reviewTotal} cần xem lại, {quarantinedTotal} cách ly, {duplicateTotal} trùng lặp."
                         : $"Đã xử lý {startingOffset + result.Processed} đoạn trong lô; checkpoint {nextArtifactOffset} tệp / {(result.BatchComplete ? 0 : startingOffset + result.Processed)} đoạn đã lưu." };
+                var previousState = _state;
                 ReplaceSource(updated);
-                SaveState();
+                if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                { _state = previousState; throw new OperationCanceledException(lease.CancellationToken); }
                 summary = new SyncSummary(updated.Id, updated.Name, result.Complete ? acceptedTotal : result.Accepted,
                     result.Complete ? reviewTotal : result.Review, result.Complete ? duplicateTotal : result.Duplicate,
                     updated.LastSyncUtc, updated.CheckSummary, result.Complete ? quarantinedTotal : result.Quarantined,
@@ -530,10 +689,22 @@ public sealed class TrustedLearningSources
             }
             finally { _gate.Release(); }
             var mirrorError = await TryPersistCloudSnapshotAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_consent!.IsCurrent(lease)) throw new OperationCanceledException(lease.CancellationToken);
             if (mirrorError is not null)
             {
                 await _gate.WaitAsync(cancellationToken);
-                try { var current = RequireSource(id) with { LastError = "Chỉ mục cục bộ đã cập nhật; Drive mirror đang chờ: " + mirrorError }; ReplaceSource(current); SaveState(); }
+                try
+                {
+                    var previousState = _state;
+                    var current = RequireSource(id) with { LastError = "Chỉ mục cục bộ đã cập nhật; Drive mirror đang chờ: " + mirrorError };
+                    ReplaceSource(current);
+                    if (!_consent.ExecuteIfCurrent(lease, () => { SaveState(); return true; }))
+                    {
+                        _state = previousState;
+                        throw new OperationCanceledException(lease.CancellationToken);
+                    }
+                }
                 finally { _gate.Release(); }
                 summary = summary with { Message = summary.Message + " Bản sao Drive đang chờ kết nối: " + mirrorError };
             }
@@ -545,13 +716,16 @@ public sealed class TrustedLearningSources
             await _gate.WaitAsync(cancellationToken);
             try
             {
+                var previousState = _state;
                 var currentSource = RequireSource(id);
                 var retryCount = Math.Min(currentSource.RetryCount + 1, 12);
                 var delayMinutes = Math.Min(360, Math.Pow(2, Math.Min(retryCount, 8)) * 2);
                 var current = currentSource with { LastAttemptUtc = DateTimeOffset.UtcNow, LastError = SafeError(error.Message),
                     LastDurationMilliseconds = syncTimer.ElapsedMilliseconds,
                     RetryCount = retryCount, NextAttemptUtc = DateTimeOffset.UtcNow.AddMinutes(delayMinutes), WorkerState = "retry-wait", LastSyncStatus = "failed" };
-                ReplaceSource(current); SaveState();
+                ReplaceSource(current);
+                if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+                { _state = previousState; throw new OperationCanceledException(lease.CancellationToken); }
             }
             finally { _gate.Release(); }
             _logger.LogWarning("Trusted learning source sync failed for {SourceId}: {ErrorType}", id, error.GetType().Name);
@@ -584,24 +758,39 @@ public sealed class TrustedLearningSources
 
     public async Task<bool> AcceptReviewAsync(string hash, CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_review_accept");
+        if (lease is null) throw new InvalidOperationException("Learning consent is required before accepting review content.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await RefreshCloudSnapshotAsync(cancellationToken);
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousState = _state;
             var found = _state.Knowledge.Any(item => item.Hash == hash && item.State == "review");
             if (!found) return false;
             _state = _state with { Knowledge = _state.Knowledge.Select(item => item.Hash == hash && item.State == "review"
                 ? item with { State = "indexed", UpdatedUtc = DateTimeOffset.UtcNow } : item).ToArray() };
-            SaveState();
+            if (_consent?.ExecuteIfCurrent(lease, () => { SaveState(); return true; }) != true)
+            {
+                _state = previousState;
+                throw new OperationCanceledException(lease.CancellationToken);
+            }
             return true;
         }
         finally { _gate.Release(); }
     }
 
-    public IReadOnlyList<SourceView> List() => _state.Sources.Select(View).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    public IReadOnlyList<SourceView> List()
+    {
+        LoadStateIfAllowed();
+        return _state.Sources.Select(View).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
 
     public LearningDashboard Dashboard()
     {
+        LoadStateIfAllowed();
         var sources = _state.Sources;
         return new LearningDashboard(
             sources.Length,
@@ -621,6 +810,7 @@ public sealed class TrustedLearningSources
 
     public IReadOnlyList<QuarantineView> Quarantine()
     {
+        LoadStateIfAllowed();
         var quarantinedSources = _state.Sources.Where(item => item.Status == "quarantined")
             .Select(item => new QuarantineView("source", item.Id, item.Name, item.QuarantineReason ?? item.CheckSummary ?? "Nguồn bị cách ly.",
                 item.LicenseEvidenceUrl ?? item.Scope, null, item.CheckedUtc));
@@ -633,6 +823,7 @@ public sealed class TrustedLearningSources
 
     public IReadOnlyList<KnowledgeView> Search(string query, int take = 6)
     {
+        LoadStateIfAllowed();
         var words = Tokens(query).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (words.Count == 0) return [];
         var approved = _state.Sources.Where(item => item.Status == "approved").Select(item => item.Id).ToHashSet();
@@ -647,6 +838,8 @@ public sealed class TrustedLearningSources
 
     public string? BuildContext(string query)
     {
+        if (!HasConsent("trusted_learning", "direct_request", "DeepSeek")) return null;
+        LoadStateIfAllowed();
         var references = Search(query, 4);
         if (references.Count == 0) return null;
         var text = string.Join("\n\n", references.Select((item, index) =>
@@ -657,11 +850,19 @@ public sealed class TrustedLearningSources
     public async Task<string?> BuildContextAsync(string query, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (_consent is null || !_consent.Check(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "direct_request", "DeepSeek")],
+            "trusted_learning_chat_context", null, out _)) return null;
         return BuildContext(query);
     }
 
     public async Task RunDueAsync(CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "trusted_learning_worker");
+        if (lease is null) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await RefreshCloudSnapshotAsync(cancellationToken);
         foreach (var source in _state.Sources.Where(item => item.AutoTopic is not null && !item.Paused &&
             (item.Status is "pending" or "checked" or "check-failed") &&
@@ -745,6 +946,17 @@ public sealed class TrustedLearningSources
 
     private async Task RefreshCloudSnapshotAsync(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var allowExternalRefresh = HasConsent("trusted_learning", "skill_learning", "external_service");
+        var refreshLease = allowExternalRefresh ? _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_snapshot_refresh") : null;
+        allowExternalRefresh = refreshLease is not null;
+        if (!allowExternalRefresh && !HasConsent("trusted_learning", "direct_request", "local_only") &&
+            !HasConsent("trusted_learning", "direct_request", "DeepSeek")) return;
+        LoadStateIfAllowed();
+        if (!allowExternalRefresh) return;
+        using var refreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, refreshLease!.CancellationToken);
+        cancellationToken = refreshCancellation.Token;
         await _cloudRefreshGate.WaitAsync(cancellationToken);
         try
         {
@@ -792,6 +1004,12 @@ public sealed class TrustedLearningSources
 
     private async Task<string?> TryPersistCloudSnapshotAsync(CancellationToken cancellationToken)
     {
+        var lease = _consent?.TryBegin(RemoteAccess.OwnerId,
+            [new ConsentPolicy.ConsentRequirement("trusted_learning", "skill_learning", "external_service")], "learning_snapshot_upload");
+        if (lease is null)
+            return "Chưa được cấp quyền đồng bộ Trusted Learning với Google Drive.";
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        cancellationToken = linked.Token;
         await _mirrorGate.WaitAsync(cancellationToken);
         try
         {
@@ -1330,6 +1548,40 @@ public sealed class TrustedLearningSources
     private static string Sha256(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static string SafeError(string value) => new string(value.Where(character => !char.IsControl(character)).Take(240).ToArray());
     private static string DefaultName(string type, string scope) => type == "drive-folder" ? scope.Split('/').Last() : new Uri(scope).Host + (type == "github" ? " repository" : "");
+    private bool HasConsent(string source, string purpose, string destination) =>
+        _consent?.IsAllowed(RemoteAccess.OwnerId, source, purpose, destination) == true;
+
+    private bool LoadStateIfAllowed()
+    {
+        if (_stateLoaded) return true;
+        if (!HasConsent("trusted_learning", "skill_learning", "external_service") &&
+            !HasConsent("trusted_learning", "direct_request", "local_only") &&
+            !HasConsent("trusted_learning", "direct_request", "DeepSeek")) return false;
+        lock (_stateLoadGate)
+        {
+            if (_stateLoaded) return true;
+            _state = ReadState();
+            _stateLoaded = true;
+            return true;
+        }
+    }
+
+    private bool CheckConsentForOwner(string source, string purpose, string destination, string actor)
+    {
+        var allowed = _consent?.Check(RemoteAccess.OwnerId, [new ConsentPolicy.ConsentRequirement(source, purpose, destination)],
+            actor, null, out _) == true;
+        if (allowed && source == "trusted_learning") LoadStateIfAllowed();
+        return allowed;
+    }
+
+    private bool CheckConsent(HttpContext context, string source, string purpose, string destination, string actor)
+    {
+        var allowed = _consent?.Check(context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "",
+            [new ConsentPolicy.ConsentRequirement(source, purpose, destination)], actor, null, out _) == true;
+        if (allowed && source == "trusted_learning") LoadStateIfAllowed();
+        return allowed;
+    }
+
     private static SourceView View(Source source) => new(source.Id, source.Type, source.Name, source.Scope, source.AccessPermission ?? "read", source.License, source.LicenseUrl,
         source.Status, source.CheckedUtc, source.ApprovedUtc, source.LastSyncUtc, source.FileCount, source.LastAccepted, source.LastReview,
         source.LastDuplicate, source.CheckSummary, source.LastError, source.LicenseEvidenceUrl, source.LicenseDetectionMethod, source.QuarantineReason,

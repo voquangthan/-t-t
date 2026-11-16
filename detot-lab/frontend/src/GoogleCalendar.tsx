@@ -241,6 +241,10 @@ export async function suggestFromChat(message: string, signal: AbortSignal): Pro
   if (text.includes("đang bận")) return "Để lúc khác nhé.";
   const minutes = available ? Number(available[1]) : 10;
   if (minutes < 1 || minutes > 120) return "Bạn có bao nhiêu phút trong khoảng 1 đến 120 phút?";
+  const permission = await fetch("/api/consent/check", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requirements: [{ source: "calendar", purpose: "direct_request", destination: "local_only" }], requestId: crypto.randomUUID() }), signal });
+  if (permission.status === 403) return "Mình chưa được cấp quyền đọc lịch để cá nhân hóa gợi ý. Bạn có thể cấp quyền trong mục Quyền riêng tư; hiện mình sẽ không đọc lịch.";
+  if (!permission.ok) throw new Error("Không thể kiểm tra quyền truy cập lịch.");
   const accounts = await calendarApi<Account[]>("calendar/accounts", { signal });
   if (!accounts.length) return "Bạn kết nối tài khoản trong Lịch → Google Calendar để mình xem lịch sắp tới nhé.";
   if (accounts.length > 1) return "Bạn mở Lịch → Google Calendar, chọn tài khoản rồi bấm Gợi ý một việc nhé.";

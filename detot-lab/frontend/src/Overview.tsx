@@ -109,6 +109,7 @@ export function Icon({ name }: { name: string }) {
     case "tasks": return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.5 2.5L16 9M8 7.5h2"/></svg>;
     case "calendar": return <svg {...common}><rect x="3.5" y="5" width="17" height="16" rx="2.5"/><path d="M7.5 3v4M16.5 3v4M4 9.5h16M8 13h2M14 13h2M8 16.5h2"/></svg>;
     case "notes": return <svg {...common}><path d="M6 4.5h12a2 2 0 0 1 2 2v13H6a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z"/><path d="M8 9h8M8 12.5h8M8 16h5M4 7v11"/></svg>;
+    case "privacy": return <svg {...common}><path d="M12 3 19 6v5c0 4.5-2.7 7.8-7 10-4.3-2.2-7-5.5-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg>;
     case "tools": return <svg {...common}><path d="m14 6 4 4M4 20l9.5-9.5M14.5 4.5a4 4 0 0 0 5 5L13 16l-5-5 6.5-6.5Z"/><path d="m5 14 5 5"/></svg>;
     case "cloud": return <svg {...common}><path d="M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 9a4.5 4.5 0 0 0 1 9Z"/><path d="M12 12v6m-2-2 2 2 2-2"/></svg>;
     case "book": return <svg {...common}><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21V5.5Z"/><path d="M4 17a2.5 2.5 0 0 1 2.5-2.5H20M8 7h8M8 10h6"/></svg>;

@@ -4,10 +4,15 @@ using System.Text;
 using System.Text.Json;
 
 sealed class MemoryDreamingWorker(Practice practice, MemoryEmbeddings embeddings, IHttpClientFactory clients,
-    string? deepSeekKey, ILogger<MemoryDreamingWorker> logger)
+    ConsentPolicy consent, string? deepSeekKey, ILogger<MemoryDreamingWorker> logger)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly SemaphoreSlim runGate = new(1, 1);
+    private static readonly ConsentPolicy.ConsentRequirement[] RequiredConsent =
+    [
+        new("memory_core", "dreaming", "local_only"),
+        new("memory_core", "dreaming", "DeepSeek"),
+    ];
 
     public async Task RunAsync(CancellationToken stoppingToken)
     {
@@ -19,10 +24,13 @@ sealed class MemoryDreamingWorker(Practice practice, MemoryEmbeddings embeddings
                 foreach (var owner in practice.KnownMemoryOwners().Take(100))
                 {
                     stoppingToken.ThrowIfCancellationRequested();
-                    if (!practice.ReflectionIsDue(owner, DateTimeOffset.UtcNow)) continue;
+                    var lease = consent.TryBegin(owner, RequiredConsent);
+                    if (lease is null) continue;
+                    var due = false;
+                    if (!consent.ExecuteIfCurrent(lease, () => due = practice.ReflectionIsDue(owner, DateTimeOffset.UtcNow)) || !due) continue;
                     processedOwners++;
                     await runGate.WaitAsync(stoppingToken);
-                    try { await ReflectOwnerAsync(owner, stoppingToken); }
+                    try { await ReflectOwnerAsync(owner, lease, stoppingToken); }
                     finally { runGate.Release(); }
                     if (processedOwners >= 3) break;
                 }
@@ -37,32 +45,48 @@ sealed class MemoryDreamingWorker(Practice practice, MemoryEmbeddings embeddings
         }
     }
 
-    private async Task ReflectOwnerAsync(string owner, CancellationToken cancellationToken)
+    private async Task ReflectOwnerAsync(string owner, ConsentPolicy.ConsentLease lease, CancellationToken cancellationToken)
     {
-        var batch = practice.GetReflectionBatch(owner);
+        Practice.ReflectionBatch? batch = null;
+        if (!consent.ExecuteIfCurrent(lease, () => { batch = practice.GetReflectionBatch(owner); return true; }) || batch is null) return;
         var succeeded = false;
+        using var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(lease.CancellationToken, cancellationToken);
+        var runToken = runCancellation.Token;
         try
         {
+            runToken.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(deepSeekKey))
                 throw new InvalidOperationException("Dreaming provider is not configured.");
-            var candidates = await CandidatePairsAsync(batch.Items, cancellationToken);
-            var drafts = candidates.Length == 0 ? [] : await EvaluateAsync(candidates, cancellationToken);
-            succeeded = practice.SaveReflectionDrafts(owner, batch.Generation, drafts);
+            var candidates = await CandidatePairsAsync(batch.Items, lease, runToken);
+            runToken.ThrowIfCancellationRequested();
+            if (candidates.Length > 0 && !consent.IsCurrent(lease)) return;
+            var drafts = candidates.Length == 0 ? [] : await EvaluateAsync(candidates, runToken);
+            succeeded = consent.ExecuteIfCurrent(lease,
+                () => practice.SaveReflectionDrafts(owner, batch.Generation, drafts));
             if (!succeeded) logger.LogInformation("Dreaming checkpoint deferred because owner data changed during analysis.");
             else logger.LogInformation("Dreaming owner checkpoint completed; {CandidateCount} candidates and {ProposalCount} proposals.",
                 candidates.Length, drafts.Length);
         }
+        catch (OperationCanceledException) when (lease.CancellationToken.IsCancellationRequested) { }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error)
         {
             logger.LogWarning("Dreaming owner run deferred ({ErrorType}).", error.GetType().Name);
         }
-        finally { practice.CompleteReflectionRun(owner, batch.Generation, batch.NextCursor, batch.TotalCount, succeeded); }
+        finally
+        {
+            consent.ExecuteIfCurrent(lease, () =>
+            {
+                practice.CompleteReflectionRun(owner, batch.Generation, batch.NextCursor, batch.TotalCount, succeeded);
+                return true;
+            });
+        }
     }
 
     private async Task<CandidatePair[]> CandidatePairsAsync(Practice.ReflectionMemory[] snapshot,
-        CancellationToken cancellationToken)
+        ConsentPolicy.ConsentLease lease, CancellationToken cancellationToken)
     {
+        lease.CancellationToken.ThrowIfCancellationRequested();
         var items = snapshot.Take(41).ToArray();
         if (items.Length < 2) return [];
         var vectors = new Dictionary<Guid, float[]>();
@@ -70,6 +94,7 @@ sealed class MemoryDreamingWorker(Practice practice, MemoryEmbeddings embeddings
         {
             for (var offset = 0; offset < items.Length; offset += 16)
             {
+                if (!consent.IsCurrent(lease)) throw new OperationCanceledException(lease.CancellationToken);
                 var batch = items.Skip(offset).Take(16).ToArray();
                 var output = await embeddings.EmbedAsync(batch.Select(item => item.Text).ToArray(), cancellationToken);
                 if (output is null) { vectors.Clear(); break; }

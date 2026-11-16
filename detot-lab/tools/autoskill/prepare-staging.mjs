@@ -21,8 +21,8 @@ const config = {
     load: { paths: [ADAPTER_DIR] },
     entries: {
       [pluginId]: {
-        enabled: true,
-        hooks: { allowConversationAccess: true },
+        enabled: false,
+        hooks: { allowConversationAccess: false },
         config: {
           userId: "detot-owner",
           runtimeMode: "embedded",
@@ -30,7 +30,7 @@ const config = {
           openclawSkillInstallMode: "openclaw_mirror",
           recallEnabled: false,
           skillRetrieval: { enabled: false },
-          extractOnAgentEnd: true,
+          extractOnAgentEnd: false,
           successOnly: false,
           includeUserFeedback: false,
           logPayload: false,
@@ -57,4 +57,4 @@ if (fs.existsSync(CONFIG_PATH)) {
 } else {
   fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
 }
-process.stdout.write(JSON.stringify({ ...patchResult, status: "staging_config_ready", configPath: CONFIG_PATH, pluginEnabledInStagingOnly: true, productionGatewayChanged: false }, null, 2) + "\n");
+process.stdout.write(JSON.stringify({ ...patchResult, status: "staging_config_ready", configPath: CONFIG_PATH, pluginEnabled: false, conversationAccess: false, productionGatewayChanged: false }, null, 2) + "\n");

@@ -22,15 +22,15 @@ sealed class Practice(IDataProtector protector, string directory)
     public bool HasMemoryChoice(string owner, Guid? source) => source is { } id && id != Guid.Empty &&
         File.Exists(MemoryChoicePath(owner, id));
     private string LearningPath => Path.Combine(directory, "learning.bin");
-    private string ChatLearningPath => Path.Combine(directory, "chat-learning.bin");
+    private string ChatLearningPath(string owner) => Path.Combine(directory, $"chat-learning-{StableSkillKey("owner", owner)}.bin");
     private string CasePath(Guid id) => Path.Combine(directory, $"{id:N}.bin");
 
     public string Notes => Read<string>(ProfilePath) ?? "";
     public string LearningSummary => SummarizeLearning(Read<LearningProfile>(LearningPath) ?? LearningProfile.Empty);
     public LearningSnapshot LearningMap => BuildLearningMap(Read<LearningProfile>(LearningPath) ?? LearningProfile.Empty);
-    public ChatLearningSnapshot ChatLearningMap
+    public ChatLearningSnapshot ChatLearningMap(string owner)
     {
-        get { lock (chatLearningGate) return BuildChatLearningMap(Read<ChatLearningProfile>(ChatLearningPath) ?? ChatLearningProfile.Empty); }
+        lock (chatLearningGate) return BuildChatLearningMap(Read<ChatLearningProfile>(ChatLearningPath(owner)) ?? ChatLearningProfile.Empty);
     }
     public string? Case(Guid id) => Read<string>(CasePath(id));
     public void SaveNotes(string notes) => Write(ProfilePath, notes.Trim());
@@ -255,6 +255,23 @@ sealed class Practice(IDataProtector protector, string directory)
             return new ReflectionStatus(Math.Clamp(scanned, 0, total), total,
                 generation > progress.CompletedGeneration || scanned < total,
                 retry?.Failures ?? 0, retry?.NextAttempt);
+        }
+    }
+
+    public void ResetReflectionAfterConsentRevoked(string owner)
+    {
+        lock (memoryGate)
+        {
+            var state = Read<DreamingState>(DreamingStatePath) ?? new([], []);
+            var owners = new Dictionary<string, OwnerReflectionProgress>(state.Owners, StringComparer.Ordinal)
+            { [owner] = new OwnerReflectionProgress(0, 0, 0) };
+            var retries = new Dictionary<string, RetryState>(state.Retries, StringComparer.Ordinal);
+            retries.Remove(owner);
+            Write(DreamingStatePath, JsonSerializer.Serialize(new DreamingState(owners, retries), Json));
+            var proposals = Read<List<ReflectionSuggestion>>(OwnerProposalsPath(owner)) ?? [];
+            var retained = proposals.Where(item => item.State != "pending").ToList();
+            if (retained.Count == 0) Delete(OwnerProposalsPath(owner));
+            else Write(OwnerProposalsPath(owner), JsonSerializer.Serialize(retained, Json));
         }
     }
 
@@ -652,12 +669,17 @@ sealed class Practice(IDataProtector protector, string directory)
         string? BeforeStatus = null, string? AfterStatus = null, string? OwnerId = null);
     private sealed record MemoryChoice(DateTimeOffset ExpiresAt, MemoryCandidate[] Candidates);
     private sealed record MemoryCandidate(Guid Id, int Version);
-    public void ClearChatLearning()
+    public void ClearChatLearning(string owner)
     {
-        lock (chatLearningGate) Write(ChatLearningPath, JsonSerializer.Serialize(ChatLearningProfile.Empty, Json));
+        lock (chatLearningGate)
+        {
+            Delete(ChatLearningPath(owner));
+            // Older profiles were global and cannot be safely attributed to one owner.
+            if (owner == "workspace-owner") Delete(Path.Combine(directory, "chat-learning.bin"));
+        }
     }
 
-    public void RecordChatLearning(Guid observationId, string topic, string skill, string signal, double confidence)
+    public void RecordChatLearning(string owner, Guid observationId, string topic, string skill, string signal, double confidence)
     {
         if (observationId == Guid.Empty || !double.IsFinite(confidence) || confidence < 0.7 || confidence > 1 ||
             signal is not ("progress" or "practice")) return;
@@ -667,7 +689,7 @@ sealed class Practice(IDataProtector protector, string directory)
 
         lock (chatLearningGate)
         {
-            var profile = Read<ChatLearningProfile>(ChatLearningPath) ?? ChatLearningProfile.Empty;
+            var profile = Read<ChatLearningProfile>(ChatLearningPath(owner)) ?? ChatLearningProfile.Empty;
             if (profile.ProcessedRequests.Contains(observationId)) return;
             var key = StableSkillKey(topic, skill);
             var skills = new Dictionary<string, ChatSkillProgress>(profile.Skills, StringComparer.Ordinal);
@@ -687,7 +709,7 @@ sealed class Practice(IDataProtector protector, string directory)
                 var oldest = skills.OrderBy(pair => pair.Value.LastSeen).First().Key;
                 skills.Remove(oldest);
             }
-            Write(ChatLearningPath, JsonSerializer.Serialize(new ChatLearningProfile(skills,
+            Write(ChatLearningPath(owner), JsonSerializer.Serialize(new ChatLearningProfile(skills,
                 profile.ProcessedRequests.Append(observationId).TakeLast(256).ToArray()), Json));
         }
     }
@@ -930,6 +952,11 @@ sealed class Practice(IDataProtector protector, string directory)
             File.Move(temp, path, true);
         }
         finally { File.Delete(temp); }
+    }
+
+    private static void Delete(string path)
+    {
+        if (File.Exists(path)) File.Delete(path);
     }
 
     private ScenarioState NewScenarioState(Scenario scenario)
