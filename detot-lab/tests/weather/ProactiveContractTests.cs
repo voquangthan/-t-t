@@ -62,12 +62,45 @@ static class ProactiveContractTests
             try { await inFlight; } catch (OperationCanceledException) { cancelled = true; }
             Check(cancelled && blocking.Cancelled.Task.IsCompleted,
                 "revocation during analysis must cancel the analyzer and discard the run");
+
+            const string workerOwner = "synthetic-worker-owner";
+            using var stopWorker = new CancellationTokenSource();
+            var workerRuns = 0;
+            var workerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var workerCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Func<CancellationToken, Task> operation = async token =>
+            {
+                Interlocked.Increment(ref workerRuns);
+                workerStarted.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { workerCancelled.TrySetResult(); throw; }
+            };
+            engine.StartWorker(workerOwner, provider.ProviderId, RunRequirements(), operation,
+                TimeSpan.FromHours(1), stopWorker.Token);
+            Grant(consent, workerOwner, "local_only");
+            Grant(consent, workerOwner, "external_service");
+            Grant(consent, workerOwner, "DeepSeek");
+            engine.StartWorker(workerOwner, provider.ProviderId, RunRequirements(), operation,
+                TimeSpan.FromHours(1), stopWorker.Token);
+            engine.StartWorker(workerOwner, provider.ProviderId, RunRequirements(), operation,
+                TimeSpan.FromHours(1), stopWorker.Token);
+            await workerStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            consent.Set(workerOwner, "public_weather", "proactive_analysis", "DeepSeek", false, "owner", Guid.NewGuid());
+            await workerCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(workerRuns == 1, "engine worker scheduling must be owner/provider single-flight and consent-gated");
         }
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }
 
     private static void Grant(ConsentPolicy consent, string owner, string destination) =>
         consent.Set(owner, "public_weather", "proactive_analysis", destination, true, "owner", Guid.NewGuid());
+
+    private static ConsentPolicy.ConsentRequirement[] RunRequirements() =>
+    [
+        new("public_weather", "proactive_analysis", "local_only"),
+        new("public_weather", "proactive_analysis", "external_service"),
+        new("public_weather", "proactive_analysis", "DeepSeek")
+    ];
 
     private static async Task ExpectDenied(Func<Task<ProactiveEvaluation>> action)
     {

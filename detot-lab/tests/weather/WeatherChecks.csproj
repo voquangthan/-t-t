@@ -9,6 +9,9 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../ConsentPolicy.cs" Link="ConsentPolicy.cs" />
     <Compile Include="../../ProactiveIntelligence.cs" Link="ProactiveIntelligence.cs" />
+    <Compile Include="../../OpenMeteoProvider.cs" Link="OpenMeteoProvider.cs" />
+    <Compile Include="../../WeatherSignalPolicy.cs" Link="WeatherSignalPolicy.cs" />
+    <Compile Include="../../DeepSeekProactiveAnalyzer.cs" Link="DeepSeekProactiveAnalyzer.cs" />
     <Compile Include="../../WeatherIntelligence.cs" Link="WeatherIntelligence.cs" />
     <Content Include="weather-response.golden.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -22,6 +23,15 @@ try
     Check(denied && handler.Requests == 0, "default deny must happen before geocoding or any provider request");
 
     GrantWeather(consent, ownerA);
+    var legacyOwner = "synthetic-legacy-weather-owner";
+    GrantWeather(consent, legacyOwner);
+    var legacyDirectory = Path.Combine(root, "legacy-weather");
+    WriteLegacyWeatherState(legacyDirectory, protection, consent, legacyOwner);
+    var legacySnapshot = await NewService(legacyDirectory, protection, consent, new WeatherTestHandler())
+        .GetAsync(legacyOwner, CancellationToken.None);
+    Check(legacySnapshot.Location == "Legacy Test City" && legacySnapshot.Suggestions.Single().Id == "0123456789abcdef",
+        "the pre-migration owner-encrypted weather storage schema must remain readable");
+
     var snapshot = await service.SetLocationAsync(ownerA, "Đà Nẵng", CancellationToken.None);
     AssertWeatherApiGolden(snapshot);
     Check(snapshot.Location == "Đà Nẵng, Đà Nẵng, Việt Nam" && snapshot.Suggestions.Length == 1,
@@ -152,6 +162,7 @@ try
     Check((await restarted.GetAsync(ownerA, CancellationToken.None)).Location is null &&
         Directory.GetFiles(Path.Combine(root, "weather"), "weather-*.bin").Length == 0,
         "explicit location deletion must cancel work and remove its encrypted local store");
+    if (args.Contains("--live", StringComparer.Ordinal)) await LiveWeatherSmoke.RunAsync();
     Console.WriteLine("PASS: weather default deny, owner isolation, encrypted restart, cache/dedupe, grounded AI output, stale data, network/provider/model failure, feedback consent and mid-request revocation.");
 }
 finally { try { Directory.Delete(root, recursive: true); } catch { } }
@@ -164,6 +175,45 @@ static void GrantWeather(ConsentPolicy consent, string owner)
     consent.Set(owner, "public_weather", "proactive_analysis", "local_only", true, "owner", Guid.NewGuid());
     consent.Set(owner, "public_weather", "proactive_analysis", "external_service", true, "owner", Guid.NewGuid());
     consent.Set(owner, "public_weather", "proactive_analysis", "DeepSeek", true, "owner", Guid.NewGuid());
+}
+
+static void WriteLegacyWeatherState(string directory, IDataProtectionProvider protection, ConsentPolicy consent, string owner)
+{
+    Directory.CreateDirectory(directory);
+    var now = DateTimeOffset.UtcNow;
+    var marker = string.Join("|", new[] { "local_only", "external_service", "DeepSeek" }.Select(destination =>
+        consent.GetGrantChangedAt(owner, "public_weather", "proactive_analysis", destination)!.Value.UtcDateTime.Ticks
+            .ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    var legacy = new
+    {
+        location = new { name = "Legacy Test City", latitude = 1.25, longitude = 2.5, timeZone = "UTC" },
+        cache = new
+        {
+            fetchedAt = now,
+            forecast = new
+            {
+                hours = new[] { new { time = now.AddHours(1), probability = 25d, millimeters = 0d } },
+                timeZone = "UTC", timeZoneAbbreviation = "UTC", generatedAt = now
+            }
+        },
+        suggestions = new[]
+        {
+            new
+            {
+                id = "0123456789abcdef", kind = "heavy_rain", title = "Có thể mưa lớn",
+                startsAt = now.AddHours(1), endsAt = now.AddHours(2), probability = 85d, certainty = "cao",
+                reason = "Dự báo 3 giờ có khoảng 18.0 mm mưa; xác suất theo giờ đạt đỉnh 85%.",
+                advice = "Mang áo mưa hoặc ô nếu phải ra ngoài trong khung giờ này.", source = "Open-Meteo",
+                sourceUrl = "https://open-meteo.com/en/docs", forecastIssuedAt = now
+            }
+        },
+        consentMarker = marker,
+        lastUpdated = now
+    };
+    var json = JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    var protector = protection.CreateProtector("Detot.WeatherIntelligence.v1");
+    var ownerHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(owner))).ToLowerInvariant();
+    File.WriteAllText(Path.Combine(directory, $"weather-{ownerHash}.bin"), protector.Protect(json));
 }
 
 static void AssertWeatherApiGolden(WeatherIntelligence.WeatherSnapshot snapshot)

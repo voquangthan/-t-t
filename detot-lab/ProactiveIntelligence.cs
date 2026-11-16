@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 
 public interface IProactiveProvider
 {
@@ -31,6 +33,9 @@ public interface IProactiveEngine
         IProactiveDomainPolicy policy, IProactiveAnalyzer analyzer, ProviderRequest request,
         CancellationToken cancellationToken);
     bool CommitIfCurrent(ProactiveEvaluation evaluation, Func<bool> commit);
+    void StartWorker(string ownerId, string providerId,
+        IReadOnlyList<ConsentPolicy.ConsentRequirement> requirements,
+        Func<CancellationToken, Task> operation, TimeSpan interval, CancellationToken stoppingToken);
 }
 
 public sealed record ProactiveConsentPlan(
@@ -69,10 +74,46 @@ public sealed record ProactiveSuggestion(Guid Id, string ProviderId, string Doma
 public sealed record ProactiveEvaluation(ObservationBatch Observations, IReadOnlyList<EvidenceCandidate> Candidates,
     IReadOnlyList<ProactiveSuggestion> Suggestions, ConsentPolicy.ConsentLease Lease);
 
-public sealed class ProactiveEngine(ConsentPolicy consent) : IProactiveEngine
+public sealed class ProactiveEngine(ConsentPolicy consent, ILogger? logger = null) : IProactiveEngine
 {
     private const int MaximumEvidence = 128;
     private const int MaximumCandidates = 64;
+    private readonly ConcurrentDictionary<string, byte> workers = new(StringComparer.Ordinal);
+
+    public void StartWorker(string ownerId, string providerId,
+        IReadOnlyList<ConsentPolicy.ConsentRequirement> requirements,
+        Func<CancellationToken, Task> operation, TimeSpan interval, CancellationToken stoppingToken)
+    {
+        if (string.IsNullOrWhiteSpace(ownerId) || string.IsNullOrWhiteSpace(providerId) ||
+            interval <= TimeSpan.Zero || requirements.Count == 0 ||
+            requirements.Any(item => !consent.IsAllowed(ownerId, item.Source, item.Purpose, item.Destination))) return;
+        var key = ownerId + "\0" + providerId;
+        if (!workers.TryAdd(key, 0)) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    var lease = consent.TryBegin(ownerId, requirements, "proactive_worker");
+                    if (lease is null) return;
+                    using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, lease.CancellationToken);
+                    try { await operation(linked.Token); }
+                    catch (OperationCanceledException) when (lease.CancellationToken.IsCancellationRequested) { }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+                    catch (Exception error)
+                    {
+                        logger?.LogWarning("Proactive worker deferred ({ErrorType}).", error.GetType().Name);
+                    }
+                    try { await Task.Delay(interval, linked.Token); }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+                    catch (OperationCanceledException) when (lease.CancellationToken.IsCancellationRequested) { }
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            finally { workers.TryRemove(key, out _); }
+        });
+    }
 
     public async Task<ProactiveEvaluation> RefreshAsync(string ownerId, IProactiveProvider provider,
         IProactiveDomainPolicy policy, IProactiveAnalyzer analyzer, ProviderRequest request,
