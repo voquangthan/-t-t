@@ -23,6 +23,7 @@ try
 
     GrantWeather(consent, ownerA);
     var snapshot = await service.SetLocationAsync(ownerA, "Đà Nẵng", CancellationToken.None);
+    AssertWeatherApiGolden(snapshot);
     Check(snapshot.Location == "Đà Nẵng, Đà Nẵng, Việt Nam" && snapshot.Suggestions.Length == 1,
         "qualified rain should create one sourced suggestion");
     Check(snapshot.Suggestions[0].Title == "Có thể mưa lớn" && snapshot.Suggestions[0].Probability == 85 &&
@@ -145,6 +146,8 @@ try
     try { await racing.GetAsync(ownerB, CancellationToken.None); } catch (UnauthorizedAccessException) { afterRevoke = true; }
     Check(afterRevoke, "revocation must block subsequent reads");
 
+    await ProactiveContractTests.RunAsync();
+
     await restarted.ClearLocationAsync(ownerA, CancellationToken.None);
     Check((await restarted.GetAsync(ownerA, CancellationToken.None)).Location is null &&
         Directory.GetFiles(Path.Combine(root, "weather"), "weather-*.bin").Length == 0,
@@ -161,6 +164,21 @@ static void GrantWeather(ConsentPolicy consent, string owner)
     consent.Set(owner, "public_weather", "proactive_analysis", "local_only", true, "owner", Guid.NewGuid());
     consent.Set(owner, "public_weather", "proactive_analysis", "external_service", true, "owner", Guid.NewGuid());
     consent.Set(owner, "public_weather", "proactive_analysis", "DeepSeek", true, "owner", Guid.NewGuid());
+}
+
+static void AssertWeatherApiGolden(WeatherIntelligence.WeatherSnapshot snapshot)
+{
+    var payload = JsonSerializer.SerializeToNode(snapshot, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+    payload["fetchedAt"] = "<timestamp>";
+    var suggestion = payload["suggestions"]![0]!;
+    suggestion["id"] = "<opaque-id>";
+    suggestion["startsAt"] = "<timestamp>";
+    suggestion["endsAt"] = "<timestamp>";
+    suggestion["forecastIssuedAt"] = "<timestamp>";
+    var actual = JsonNode.Parse(JsonSerializer.Serialize(payload));
+    var goldenPath = Path.Combine(AppContext.BaseDirectory, "weather-response.golden.json");
+    var expected = JsonNode.Parse(File.ReadAllText(goldenPath));
+    Check(JsonNode.DeepEquals(actual, expected), $"weather API response differs from baseline golden. Actual: {actual}");
 }
 
 static void Check(bool condition, string message)
