@@ -15,23 +15,27 @@ public sealed class WeatherIntelligence
         new("public_weather", "proactive_analysis", "DeepSeek"),
     ];
     private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan OfficialAlertCacheDuration = TimeSpan.FromMinutes(5);
     private readonly string directory;
     private readonly IDataProtector protector;
     private readonly ConsentPolicy consent;
     private readonly OpenMeteoProvider provider;
     private readonly DeepSeekProactiveAnalyzer analyzer;
+    private readonly GooglePublicWeatherAlertsProvider officialAlerts;
     private readonly IProactiveEngine engine;
     private readonly ILogger<WeatherIntelligence> logger;
     private readonly ConcurrentDictionary<string, OwnerStore> stores = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, OfficialAlertCache> officialAlertCaches = new(StringComparer.Ordinal);
 
     public WeatherIntelligence(string directory, IDataProtectionProvider protection, IHttpClientFactory clients,
-        ConsentPolicy consent, string? deepSeekKey, ILogger<WeatherIntelligence> logger)
+        ConsentPolicy consent, string? deepSeekKey, ILogger<WeatherIntelligence> logger, string? googleWeatherKey = null)
     {
         this.directory = directory;
         protector = protection.CreateProtector("Detot.WeatherIntelligence.v1");
         this.consent = consent;
         provider = new OpenMeteoProvider(clients);
         analyzer = new DeepSeekProactiveAnalyzer(clients, deepSeekKey);
+        officialAlerts = new GooglePublicWeatherAlertsProvider(clients, googleWeatherKey);
         engine = new ProactiveEngine(consent, logger);
         this.logger = logger;
     }
@@ -51,6 +55,67 @@ public sealed class WeatherIntelligence
         finally { store.Gate.Release(); }
     }
 
+    public async Task<IReadOnlyList<OfficialWeatherAlert>> GetOfficialAlertsAsync(string owner,
+        CancellationToken cancellationToken)
+    {
+        var requirements = new[]
+        {
+            new ConsentPolicy.ConsentRequirement("public_weather", "proactive_analysis", "local_only"),
+            new ConsentPolicy.ConsentRequirement("google_weather_alerts", "proactive_analysis", "external_service"),
+        };
+        var lease = consent.TryBegin(owner, requirements, "official_weather_alerts");
+        if (lease is null) throw new UnauthorizedAccessException("Official weather alerts require explicit consent.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.CancellationToken);
+        var store = Store(owner);
+        WeatherLocation? selectedLocation;
+        await store.Gate.WaitAsync(linked.Token);
+        try
+        {
+            if (!consent.ExecuteIfCurrent(lease, () => { EnsureLoaded(owner, store); return true; }))
+                throw new OperationCanceledException(lease.CancellationToken);
+            selectedLocation = store.State.Location;
+        }
+        finally { store.Gate.Release(); }
+
+        if (selectedLocation is null) return [];
+        var locationKey = AlertLocationKey(selectedLocation);
+        if (officialAlertCaches.TryGetValue(owner, out var cached) && cached.LocationKey == locationKey &&
+            cached.ExpiresAt > DateTimeOffset.UtcNow)
+        {
+            await store.Gate.WaitAsync(linked.Token);
+            try
+            {
+                if (!consent.ExecuteIfCurrent(lease, () => store.State.Location is { } current &&
+                    AlertLocationKey(current) == locationKey))
+                    throw new OperationCanceledException(lease.CancellationToken);
+                return cached.Alerts;
+            }
+            finally { store.Gate.Release(); }
+        }
+        var alerts = await officialAlerts.GetAsync(selectedLocation, linked.Token);
+        linked.Token.ThrowIfCancellationRequested();
+        await store.Gate.WaitAsync(linked.Token);
+        try
+        {
+            if (!consent.ExecuteIfCurrent(lease, () =>
+                {
+                    if (store.State.Location is not { } current || AlertLocationKey(current) != locationKey) return false;
+                    officialAlertCaches[owner] = new OfficialAlertCache(locationKey, alerts,
+                        DateTimeOffset.UtcNow.Add(OfficialAlertCacheDuration));
+                    return true;
+                }))
+                throw new OperationCanceledException(lease.CancellationToken);
+            return alerts;
+        }
+        finally { store.Gate.Release(); }
+    }
+
+    public void RevokeOfficialAlertsConsent(string owner) => officialAlertCaches.TryRemove(owner, out _);
+
+    private static string AlertLocationKey(WeatherLocation location) => string.Join("|",
+        location.Latitude.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+        location.Longitude.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+
     public async Task<WeatherSnapshot> SetLocationAsync(string owner, string query, CancellationToken cancellationToken)
     {
         if (query is not { Length: > 1 and <= 100 } || string.IsNullOrWhiteSpace(query))
@@ -69,6 +134,7 @@ public sealed class WeatherIntelligence
             store.LastError = null;
             if (!consent.ExecuteIfCurrent(lease, () => { Save(owner, store); return true; }))
             { store.State = previous; throw new OperationCanceledException(lease.CancellationToken); }
+            officialAlertCaches.TryRemove(owner, out _);
         }
         finally { store.Gate.Release(); }
         return await RefreshAsync(owner, true, cancellationToken);
@@ -178,6 +244,7 @@ public sealed class WeatherIntelligence
         try
         {
             store.State = EmptyState();
+            officialAlertCaches.TryRemove(owner, out _);
             store.Feedback = EmptyFeedback();
             store.FeedbackLoaded = false;
             store.FeedbackError = null;
@@ -199,6 +266,7 @@ public sealed class WeatherIntelligence
         try
         {
             store.State = EmptyState();
+            officialAlertCaches.TryRemove(owner, out _);
             store.Feedback = EmptyFeedback();
             store.FeedbackLoaded = false;
             store.FeedbackError = null;
@@ -431,6 +499,8 @@ public sealed class WeatherIntelligence
     private sealed record WeatherState(WeatherLocation? Location, ForecastCache? Cache, WeatherSuggestion[] Suggestions,
         string? ConsentMarker, DateTimeOffset LastUpdated);
     private sealed record FeedbackState(Dictionary<string, FeedbackCounts> Counts, string[] DismissedIds, string? ConsentMarker);
+    private sealed record OfficialAlertCache(string LocationKey, IReadOnlyList<OfficialWeatherAlert> Alerts,
+        DateTimeOffset ExpiresAt);
     private sealed record ForecastCache(DateTimeOffset FetchedAt, WeatherForecastData Forecast);
     private sealed record FeedbackCounts(int Interested = 0, int Dismissed = 0);
     public sealed record WeatherSuggestion(string Id, string Kind, string Title, DateTimeOffset StartsAt, DateTimeOffset EndsAt,

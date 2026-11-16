@@ -68,6 +68,8 @@ builder.Services.AddHttpClient("weather", client => client.Timeout = TimeSpan.Fr
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
 builder.Services.AddHttpClient("weather-deepseek", client => client.Timeout = TimeSpan.FromSeconds(25))
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
+builder.Services.AddHttpClient("weather-alerts", client => client.Timeout = TimeSpan.FromSeconds(12))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
 builder.Services.AddSingleton<UniversalFileReader>();
 builder.Services.AddSingleton<UniversalUrlReader>();
 builder.WebHost.UseUrls(address);
@@ -114,7 +116,7 @@ var weatherIntelligence = practice is null || consentPolicy is null ? null : new
     builder.Configuration["DETOT_WEATHER_DIRECTORY"] ?? Path.Combine(builder.Environment.ContentRootPath, ".local", "weather"),
     app.Services.GetRequiredService<IDataProtectionProvider>(), app.Services.GetRequiredService<IHttpClientFactory>(),
     consentPolicy, builder.Configuration["DETOT_WEATHER_DEEPSEEK_KEY"] ?? builder.Configuration["DETOT_MEMORY_DEEPSEEK_KEY"],
-    app.Services.GetRequiredService<ILogger<WeatherIntelligence>>());
+    app.Services.GetRequiredService<ILogger<WeatherIntelligence>>(), builder.Configuration["DETOT_GOOGLE_WEATHER_KEY"]);
 var dreamingWorker = practice is null ? null : new MemoryDreamingWorker(practice, memoryEmbeddings,
     app.Services.GetRequiredService<IHttpClientFactory>(), consentPolicy!, builder.Configuration["DETOT_MEMORY_DEEPSEEK_KEY"],
     app.Services.GetRequiredService<ILogger<MemoryDreamingWorker>>());
@@ -199,6 +201,17 @@ app.MapGet("/api/weather", async (HttpContext context, CancellationToken cancell
     catch (InvalidOperationException error) { return Results.Conflict(new { error = error.Message }); }
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Results.StatusCode(403); }
 }).RequireRateLimiting("weather");
+app.MapGet("/api/weather/official-alerts", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    if (weatherIntelligence is null) return Results.StatusCode(503);
+    try { return Results.Ok(await weatherIntelligence.GetOfficialAlertsAsync(MemoryOwner(context), cancellationToken)); }
+    catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+    catch (InvalidOperationException) { return Results.Problem("Google Public Alerts chưa được cấu hình.", statusCode: 503); }
+    catch (HttpRequestException) { return Results.Problem("Nguồn cảnh báo chính thức chưa phản hồi.", statusCode: 503); }
+    catch (InvalidDataException) { return Results.Problem("Nguồn cảnh báo trả dữ liệu không hợp lệ.", statusCode: 502); }
+    catch (JsonException) { return Results.Problem("Nguồn cảnh báo trả dữ liệu không hợp lệ.", statusCode: 502); }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Results.StatusCode(403); }
+}).RequireRateLimiting("weather");
 app.MapPost("/api/weather/location", async (HttpContext context, WeatherLocationEdit edit, CancellationToken cancellationToken) =>
 {
     if (!IsLocalMutation(context)) return Results.StatusCode(403);
@@ -264,6 +277,8 @@ app.MapPost("/api/consent", async (HttpContext context, ConsentEdit edit) =>
                 await trustedLearning.RevokeConsentAsync(context.RequestAborted);
             if (source == "public_weather" && purpose == "proactive_analysis" && weatherIntelligence is not null)
                 await weatherIntelligence.RevokeWeatherConsentAsync(owner, context.RequestAborted);
+            if (source == "google_weather_alerts" && weatherIntelligence is not null)
+                weatherIntelligence.RevokeOfficialAlertsConsent(owner);
             if (source == "proactive_feedback" && weatherIntelligence is not null)
                 await weatherIntelligence.RevokeFeedbackConsentAsync(owner, context.RequestAborted);
         }

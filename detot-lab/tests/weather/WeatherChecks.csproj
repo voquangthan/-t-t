@@ -12,6 +12,7 @@
     <Compile Include="../../OpenMeteoProvider.cs" Link="OpenMeteoProvider.cs" />
     <Compile Include="../../WeatherSignalPolicy.cs" Link="WeatherSignalPolicy.cs" />
     <Compile Include="../../DeepSeekProactiveAnalyzer.cs" Link="DeepSeekProactiveAnalyzer.cs" />
+    <Compile Include="../../GooglePublicWeatherAlertsProvider.cs" Link="GooglePublicWeatherAlertsProvider.cs" />
     <Compile Include="../../WeatherIntelligence.cs" Link="WeatherIntelligence.cs" />
     <Content Include="weather-response.golden.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

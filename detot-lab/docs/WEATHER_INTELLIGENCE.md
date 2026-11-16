@@ -34,6 +34,14 @@ This repository describes a single-user local lab (`README.md`); it has no subsc
 
 Each displayed alert carries `Weather data by Open-Meteo.com`, links to the CC BY 4.0 license, and states that Đệ Tốt filters the forecast and turns it into a suggestion. See the current [Open-Meteo terms](https://open-meteo.com/en/terms), [pricing and API plans](https://open-meteo.com/en/pricing), and [license requirements](https://open-meteo.com/en/license).
 
+## Official alerts for a selected place
+
+The Weather screen can separately query Google Public Alerts for the manually selected place. This requires the new `google_weather_alerts / proactive_analysis / external_service` grant and `DETOT_GOOGLE_WEATHER_KEY`; the prior Open-Meteo grant does not imply it. The Backend sends only the geocoded coordinates of that selected place to Google, never device GPS or owner ID. The weather-local grant is also required before reading the encrypted saved location. No alert text is sent to DeepSeek.
+
+Google's Vietnam public-alert feed identifies the National Center for Hydrometeorological Forecasting (NCHMF) as its provider. The Backend returns the source's alert text, severity, urgency, affected area and official attribution without model rewriting. Results are cached in process memory for at most five minutes, cleared on location changes and consent revocation, and never written to the encrypted weather file. The Weather page can check on demand or poll every five minutes and show browser notifications while that page is visible and browser notification permission is enabled. It cannot notify after the page is closed; no Web Push subscription or server push delivery is implemented.
+
+This is an official active-alert feed, not a minute-by-minute rain nowcast. Google documents that alert content and update timing depend on the authority and are not guaranteed. Google Android Earthquake Alerts are a separate operating-system service; Đệ Tốt does not read or intercept Android notifications and does not predict earthquakes. A live Google alert request has not been validated because this environment has no Google Weather API key; mocked consent, payload parsing, caching and revoke tests cover the integration contract.
+
 ## Provider terms
 
 The implementation uses Open-Meteo's Geocoding API and Forecast API. Its free/open-access API is limited to non-commercial use and requires attribution under CC BY 4.0. Review the current [terms](https://open-meteo.com/en/terms), [geocoding documentation](https://open-meteo.com/en/docs/geocoding-api), [forecast documentation](https://open-meteo.com/en/docs), and [license](https://open-meteo.com/en/license) before any commercial deployment.

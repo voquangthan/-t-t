@@ -42,6 +42,34 @@ try
     Check(handler.DeepSeekCalls == 1 && !handler.DeepSeekPayload.Contains("Đà Nẵng", StringComparison.Ordinal) &&
         !handler.DeepSeekPayload.Contains("16.05", StringComparison.Ordinal) && !handler.DeepSeekPayload.Contains("108.2", StringComparison.Ordinal),
         "DeepSeek must receive forecast fields without city name or coordinates");
+    var officialDenied = false;
+    try { await service.GetOfficialAlertsAsync(ownerA, CancellationToken.None); }
+    catch (UnauthorizedAccessException) { officialDenied = true; }
+    Check(officialDenied && handler.OfficialAlertCalls == 0,
+        "official alert lookup must default-deny before sending the selected location to Google");
+    consent.Set(ownerA, "google_weather_alerts", "proactive_analysis", "external_service", true, "owner", Guid.NewGuid());
+    var officialAlerts = await service.GetOfficialAlertsAsync(ownerA, CancellationToken.None);
+    Check(handler.OfficialAlertCalls == 1 && officialAlerts.Count == 1 &&
+        officialAlerts[0].EventType == "RAIN" &&
+        officialAlerts[0].AuthorityName == "National Center for Hydrometeorological Forecasting" &&
+        officialAlerts[0].AreaName.Contains("Nha Trang", StringComparison.Ordinal),
+        "Google Public Alerts must return sanitized active NCHMF alerts for the selected place");
+    Check(handler.OfficialAlertRequestUri?.Query.Contains("location.latitude=16.05", StringComparison.Ordinal) == true &&
+        handler.OfficialAlertRequestUri.Query.Contains("location.longitude=108.2", StringComparison.Ordinal) &&
+        !handler.OfficialAlertRequestUri.Query.Contains(ownerA, StringComparison.Ordinal),
+        "only the manually selected place coordinate, never owner identity or device GPS, may be sent to Google");
+    _ = await service.GetOfficialAlertsAsync(ownerA, CancellationToken.None);
+    Check(handler.OfficialAlertCalls == 1, "official alert polling must use a short volatile cache instead of repeated billable requests");
+    consent.Set(ownerA, "google_weather_alerts", "proactive_analysis", "external_service", false, "owner", Guid.NewGuid());
+    service.RevokeOfficialAlertsConsent(ownerA);
+    var revokedAlertDenied = false;
+    try { await service.GetOfficialAlertsAsync(ownerA, CancellationToken.None); }
+    catch (UnauthorizedAccessException) { revokedAlertDenied = true; }
+    Check(revokedAlertDenied && handler.OfficialAlertCalls == 1,
+        "revoked alert consent must prevent both provider access and reuse of the volatile cache");
+    consent.Set(ownerA, "google_weather_alerts", "proactive_analysis", "external_service", true, "owner", Guid.NewGuid());
+    _ = await service.GetOfficialAlertsAsync(ownerA, CancellationToken.None);
+    Check(handler.OfficialAlertCalls == 2, "regrant must perform a fresh source request rather than resurrect revoked cache");
     var encryptedWeather = File.ReadAllText(Directory.GetFiles(Path.Combine(root, "weather"), "weather-*.bin").Single());
     Check(!encryptedWeather.Contains("Đà Nẵng", StringComparison.Ordinal) && !encryptedWeather.Contains("16.05", StringComparison.Ordinal),
         "local weather location/cache must be encrypted at rest");
@@ -156,6 +184,16 @@ try
     try { await racing.GetAsync(ownerB, CancellationToken.None); } catch (UnauthorizedAccessException) { afterRevoke = true; }
     Check(afterRevoke, "revocation must block subsequent reads");
 
+    service.RevokeOfficialAlertsConsent(ownerA);
+    handler.BlockOfficialAlerts = true;
+    var alertsInFlight = service.GetOfficialAlertsAsync(ownerA, CancellationToken.None);
+    await handler.OfficialAlertStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    consent.Set(ownerA, "google_weather_alerts", "proactive_analysis", "external_service", false, "owner", Guid.NewGuid());
+    var alertCancelled = false;
+    try { await alertsInFlight; } catch (OperationCanceledException) { alertCancelled = true; }
+    Check(alertCancelled && handler.OfficialAlertCancelled.Task.IsCompleted,
+        "revoking Google alert consent must cancel an in-flight location request before returning data");
+
     await ProactiveContractTests.RunAsync();
 
     await restarted.ClearLocationAsync(ownerA, CancellationToken.None);
@@ -168,7 +206,8 @@ try
 finally { try { Directory.Delete(root, recursive: true); } catch { } }
 
 static WeatherIntelligence NewService(string path, IDataProtectionProvider protection, ConsentPolicy consent, HttpMessageHandler handler) =>
-    new(path, protection, new WeatherTestClientFactory(handler), consent, "synthetic-deepseek-key", NullLogger<WeatherIntelligence>.Instance);
+    new(path, protection, new WeatherTestClientFactory(handler), consent, "synthetic-deepseek-key",
+        NullLogger<WeatherIntelligence>.Instance, "synthetic-google-weather-key");
 
 static void GrantWeather(ConsentPolicy consent, string owner)
 {
@@ -246,6 +285,9 @@ sealed class WeatherTestHandler : HttpMessageHandler
     public int Requests { get; private set; }
     public int ForecastCalls { get; private set; }
     public int DeepSeekCalls { get; private set; }
+    public int OfficialAlertCalls { get; private set; }
+    public Uri? OfficialAlertRequestUri { get; private set; }
+    public bool BlockOfficialAlerts { get; set; }
     public bool FailForecast { get; init; }
     public bool FailForecastNetwork { get; init; }
     public bool FailDeepSeek { get; init; }
@@ -255,11 +297,42 @@ sealed class WeatherTestHandler : HttpMessageHandler
     public string DeepSeekPayload { get; private set; } = "";
     public TaskCompletionSource DeepSeekStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource DeepSeekCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource OfficialAlertStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource OfficialAlertCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Requests++;
         var url = request.RequestUri?.ToString() ?? "";
+        if (url.Contains("weather.googleapis.com/v1/publicAlerts:lookup", StringComparison.Ordinal))
+        {
+            OfficialAlertCalls++;
+            OfficialAlertRequestUri = request.RequestUri;
+            if (BlockOfficialAlerts)
+            {
+                OfficialAlertStarted.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, cancellationToken); }
+                catch (OperationCanceledException) { OfficialAlertCancelled.TrySetResult(); throw; }
+            }
+            var now = DateTimeOffset.UtcNow;
+            var response = JsonSerializer.Serialize(new
+            {
+                weatherAlerts = new[]
+                {
+                    new
+                    {
+                        alertId = "synthetic-nchmf-alert-1",
+                        alertTitle = new { text = "Cảnh báo mưa lớn tổng hợp", languageCode = "vi-VN" },
+                        eventType = "RAIN", areaName = "Nha Trang, Khánh Hòa", description = "Thông tin cảnh báo tổng hợp.",
+                        severity = "MODERATE", certainty = "LIKELY", urgency = "EXPECTED",
+                        startTime = now.AddMinutes(-5), expirationTime = now.AddHours(2),
+                        instruction = new[] { "Theo dõi bản tin chính thức." },
+                        dataSource = new { name = "National Center for Hydrometeorological Forecasting", authorityUri = "https://www.nchmf.gov.vn/kttvSiteE/" }
+                    }
+                }
+            });
+            return JsonResponse(response);
+        }
         if (url.Contains("geocoding-api.open-meteo.com", StringComparison.Ordinal))
             return JsonResponse("""{"results":[{"name":"Đà Nẵng","admin1":"Đà Nẵng","country":"Việt Nam","latitude":16.05,"longitude":108.2,"timezone":"Asia/Ho_Chi_Minh"}]}""");
         if (url.Contains("api.open-meteo.com", StringComparison.Ordinal))

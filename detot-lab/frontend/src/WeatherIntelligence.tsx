@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 type Suggestion = {
   id: string; kind: string; title: string; startsAt: string; endsAt: string;
@@ -7,6 +7,11 @@ type Suggestion = {
 type Snapshot = {
   location: string | null; fetchedAt: string | null; suggestions: Suggestion[];
   forecastCurrent: boolean; error: string | null; feedbackAllowed: boolean;
+};
+type OfficialAlert = {
+  id: string; title: string; eventType: string; areaName: string; description: string;
+  severity: string; certainty: string; urgency: string; startsAt: string | null; expiresAt: string | null;
+  authorityName: string; authorityUri: string; instructions: string; safetyRecommendations: string;
 };
 
 export function WeatherIntelligence({ compact = false, onNavigate }: {
@@ -18,6 +23,12 @@ export function WeatherIntelligence({ compact = false, onNavigate }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [officialAlerts, setOfficialAlerts] = useState<OfficialAlert[]>([]);
+  const [officialAlertsChecked, setOfficialAlertsChecked] = useState(false);
+  const [officialAlertError, setOfficialAlertError] = useState("");
+  const [officialAlertBusy, setOfficialAlertBusy] = useState(false);
+  const [browserAlertsEnabled, setBrowserAlertsEnabled] = useState(false);
+  const seenOfficialAlertIds = useRef(new Set<string>());
 
   const reload = useCallback(async (force = false) => {
     const response = force
@@ -67,6 +78,46 @@ export function WeatherIntelligence({ compact = false, onNavigate }: {
     finally { setBusy(false); }
   }
 
+  const checkOfficialAlerts = useCallback(async (notifyNew = false) => {
+    setOfficialAlertBusy(true); setOfficialAlertError(""); setOfficialAlerts([]); setOfficialAlertsChecked(false);
+    try {
+      const response = await fetch("/api/weather/official-alerts", { cache: "no-store" });
+      const data = await response.json().catch(() => null);
+      if (response.status === 403) {
+        setOfficialAlerts([]); setOfficialAlertsChecked(false); setBrowserAlertsEnabled(false);
+        throw new Error("Cảnh báo chính thức đang tắt. Hãy cấp quyền riêng “Tra cứu cảnh báo theo địa điểm đã chọn” trong Quyền riêng tư.");
+      }
+      if (!response.ok) throw new Error(data?.detail ?? "Chưa lấy được cảnh báo chính thức. Kiểm tra cấu hình Google Weather API hoặc thử lại sau.");
+      setOfficialAlerts(data as OfficialAlert[]);
+      setOfficialAlertsChecked(true);
+      for (const alert of data as OfficialAlert[]) {
+        if (notifyNew && !seenOfficialAlertIds.current.has(alert.id) && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          new Notification(alert.title, { body: `${alert.areaName} · ${alert.severity || "Cảnh báo chính thức"}` });
+        }
+        seenOfficialAlertIds.current.add(alert.id);
+      }
+    } catch (cause) { setOfficialAlertError(cause instanceof Error ? cause.message : "Chưa tải được cảnh báo chính thức."); }
+    finally { setOfficialAlertBusy(false); }
+  }, []);
+
+  async function enableBrowserAlerts() {
+    if (typeof Notification === "undefined") { setOfficialAlertError("Trình duyệt này không hỗ trợ thông báo hệ thống."); return; }
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") { setOfficialAlertError("Thông báo trình duyệt chưa được cấp quyền."); return; }
+      setBrowserAlertsEnabled(true);
+      await checkOfficialAlerts(true);
+    } catch { setOfficialAlertError("Trình duyệt không thể bật thông báo hệ thống trong phiên này."); }
+  }
+
+  useEffect(() => {
+    if (compact || !browserAlertsEnabled || !snapshot?.location) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void checkOfficialAlerts(true);
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [browserAlertsEnabled, checkOfficialAlerts, compact, snapshot?.location]);
+
   async function clearLocation() {
     setBusy(true); setError(""); setNotice("");
     try {
@@ -100,20 +151,43 @@ export function WeatherIntelligence({ compact = false, onNavigate }: {
   return <section className={"weather-intelligence " + (compact ? "weather-compact" : "weather-full")} aria-label="Weather Intelligence">
     <div className="weather-heading">
       <div><span className="eyebrow">NGUỒN CHỦ ĐỘNG ĐẦU TIÊN</span><h2>{compact ? "Cảnh báo thời tiết" : "Weather Intelligence"}</h2>
-        {!compact && <p>Chỉ quan sát thành phố bạn tự nhập. Khi lưu, tên thành phố và tọa độ sẽ tới Open-Meteo; DeepSeek chỉ nhận các chỉ số dự báo, không nhận tên hay tọa độ.</p>}</div>
+        {!compact && <p>Chỉ dùng địa điểm bạn tự nhập, không lấy GPS. Open-Meteo nhận tên và tọa độ địa điểm đó; DeepSeek chỉ nhận chỉ số dự báo. Tra cứu cảnh báo NCHMF qua Google là quyền riêng và gửi tọa độ Open-Meteo đã trả về cho địa điểm ấy, không gửi cho DeepSeek.</p>}</div>
       {compact && <button className="text-link" type="button" onClick={() => onNavigate?.("weather")}>Mở →</button>}
     </div>
     {error && <p className="weather-message weather-error" role="alert">{error}{onNavigate && error.includes("cấp đủ ba quyền") && <> <button type="button" onClick={() => onNavigate("privacy")}>Mở Quyền riêng tư</button></>}</p>}
     {notice && <p className="weather-message weather-notice" role="status">{notice}</p>}
     {loading ? <p className="overview-muted" role="status">Đang kiểm tra dự báo…</p> : <>
       {!compact && <form className="weather-location" onSubmit={saveLocation}>
-        <label>Thành phố hoặc khu vực đã chọn<input maxLength={100} value={city} onChange={event => setCity(event.target.value)} placeholder="Ví dụ: Đà Nẵng, Việt Nam" /></label>
+        <label>Thành phố hoặc khu vực theo dõi<input maxLength={100} value={city} onChange={event => setCity(event.target.value)} placeholder="Ví dụ: Nha Trang, Khánh Hòa" /></label>
         <button className="primary" type="submit" disabled={busy || !city.trim()}>{busy ? "Đang kiểm tra…" : "Lưu và lấy dự báo"}</button>
         {snapshot?.location && <button type="button" disabled={busy} onClick={() => void clearLocation()}>Xóa địa điểm</button>}
       </form>}
       {snapshot?.location && <p className="weather-meta">Địa điểm: <strong>{snapshot.location}</strong>
         {snapshot.fetchedAt && <> · Lấy lúc {new Date(snapshot.fetchedAt).toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" })}</>}
         {!snapshot.forecastCurrent && " · Dữ liệu có thể đã cũ"}</p>}
+      {!compact && <section className="official-weather-alerts" aria-label="Cảnh báo chính thức">
+        <div className="weather-actions"><strong>Cảnh báo chính thức NCHMF</strong>
+          <button disabled={officialAlertBusy || !snapshot?.location} onClick={() => void checkOfficialAlerts()}>
+            {officialAlertBusy ? "Đang kiểm tra…" : "Kiểm tra cảnh báo"}
+          </button>
+          {snapshot?.location && (browserAlertsEnabled
+            ? <button disabled={officialAlertBusy} onClick={() => setBrowserAlertsEnabled(false)}>Tắt thông báo của Đệ Tốt</button>
+            : <button disabled={officialAlertBusy} onClick={() => void enableBrowserAlerts()}>Bật thông báo khi trang mở</button>)}
+          {officialAlertError.includes("Quyền riêng tư") && onNavigate && <button className="text-link" onClick={() => onNavigate("privacy")}>Mở Quyền riêng tư</button>}
+        </div>
+        <p className="weather-attribution">Google Public Alerts tra cứu cảnh báo do NCHMF phát hành cho địa điểm đã chọn. Kết quả chỉ cache RAM tối đa 5 phút, không ghi vào file. Thông báo tự kiểm tra mỗi 5 phút khi trang Weather đang hiển thị; không hoạt động khi đóng trang. Đây là bản tin chính thức theo vùng, không phải dự báo mưa từng phút.</p>
+        {officialAlertError && <p className="weather-message weather-error" role="alert">{officialAlertError}</p>}
+        {officialAlerts.length > 0 ? <div className="weather-alerts">{officialAlerts.map(alert => <article className="weather-alert official-alert" key={alert.id}>
+          <div className="weather-alert-heading"><strong>{alert.title}</strong><span>{alert.severity || "Mức độ chưa rõ"} · {alert.urgency || "Thời điểm chưa rõ"}</span></div>
+          <p><strong>Khu vực:</strong> {alert.areaName} · <strong>Loại:</strong> {alert.eventType}</p>
+          {alert.description && <p>{alert.description}</p>}
+          {alert.instructions && <p><strong>Hướng dẫn của cơ quan:</strong> {alert.instructions}</p>}
+          {alert.safetyRecommendations && <p><strong>Khuyến nghị an toàn:</strong> {alert.safetyRecommendations}</p>}
+          <p className="weather-source">Nguồn: <a href={alert.authorityUri} target="_blank" rel="noreferrer">{alert.authorityName || "NCHMF"}</a>
+            {alert.startsAt && <> · Bắt đầu {new Date(alert.startsAt).toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" })}</>}
+            {alert.expiresAt && <> · Hết hạn {new Date(alert.expiresAt).toLocaleString("vi-VN", { timeZone: "Asia/Bangkok" })}</>}</p>
+        </article>)}</div> : officialAlertsChecked && officialAlertError === "" ? <p className="weather-quiet">Hiện không có cảnh báo chính thức cho địa điểm đã chọn.</p> : officialAlertBusy ? <p className="weather-quiet">Đang lấy bản tin…</p> : null}
+      </section>}
       {alertList.length > 0 ? <div className="weather-alerts">{alertList.slice(0, compact ? 1 : 2).map(item => <article className="weather-alert" key={item.id}>
         <div className="weather-alert-heading"><strong>{item.title}</strong><span>Xác suất mưa {item.probability}% · tín hiệu {item.certainty}</span></div>
         <p><strong>Thời gian:</strong> {time(item.startsAt)}–{time(item.endsAt)}</p>
