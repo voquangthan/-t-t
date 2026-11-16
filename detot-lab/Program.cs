@@ -64,6 +64,10 @@ builder.Services.AddHttpClient("learning-searxng", client =>
     client.Timeout = TimeSpan.FromSeconds(15);
     client.MaxResponseContentBufferSize = 1024 * 1024;
 }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
+builder.Services.AddHttpClient("weather", client => client.Timeout = TimeSpan.FromSeconds(12))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
+builder.Services.AddHttpClient("weather-deepseek", client => client.Timeout = TimeSpan.FromSeconds(25))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
 builder.Services.AddSingleton<UniversalFileReader>();
 builder.Services.AddSingleton<UniversalUrlReader>();
 builder.WebHost.UseUrls(address);
@@ -86,6 +90,12 @@ builder.Services.AddRateLimiter(options =>
         limiter.PermitLimit = 1;
         limiter.QueueLimit = 0;
     });
+    options.AddConcurrencyLimiter("weather", limiter =>
+    {
+        limiter.PermitLimit = 1;
+        limiter.QueueLimit = 1;
+        limiter.QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst;
+    });
 });
 
 var app = builder.Build();
@@ -100,6 +110,11 @@ var practice = OperatingSystem.IsWindows()
 practice?.RegisterMemoryOwner(RemoteAccess.OwnerId);
 var consentPolicy = practice is null ? null : new ConsentPolicy(Path.Combine(practiceDirectory, "consent"),
     app.Services.GetRequiredService<IDataProtectionProvider>());
+var weatherIntelligence = practice is null || consentPolicy is null ? null : new WeatherIntelligence(
+    builder.Configuration["DETOT_WEATHER_DIRECTORY"] ?? Path.Combine(builder.Environment.ContentRootPath, ".local", "weather"),
+    app.Services.GetRequiredService<IDataProtectionProvider>(), app.Services.GetRequiredService<IHttpClientFactory>(),
+    consentPolicy, builder.Configuration["DETOT_WEATHER_DEEPSEEK_KEY"] ?? builder.Configuration["DETOT_MEMORY_DEEPSEEK_KEY"],
+    app.Services.GetRequiredService<ILogger<WeatherIntelligence>>());
 var dreamingWorker = practice is null ? null : new MemoryDreamingWorker(practice, memoryEmbeddings,
     app.Services.GetRequiredService<IHttpClientFactory>(), consentPolicy!, builder.Configuration["DETOT_MEMORY_DEEPSEEK_KEY"],
     app.Services.GetRequiredService<ILogger<MemoryDreamingWorker>>());
@@ -123,6 +138,7 @@ var trustedLearning = new TrustedLearningSources(builder.Configuration["DETOT_LE
     app.Services.GetRequiredService<UniversalFileReader>(), app.Services.GetRequiredService<UniversalUrlReader>(),
     SearchDiscoveryProviderFactory.Create(builder.Configuration, app.Services.GetRequiredService<IHttpClientFactory>()), consentPolicy);
 trustedLearning.Map(app, IsLocalMutation);
+app.Lifetime.ApplicationStarted.Register(() => weatherIntelligence?.StartWorker(RemoteAccess.OwnerId, app.Lifetime.ApplicationStopping));
 app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
 {
     await trustedLearning.InitializeCloudSnapshotAsync(app.Lifetime.ApplicationStopping);
@@ -173,6 +189,60 @@ app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
 var memory = app.MapGroup("/api/memory");
 app.MapGet("/api/consent", (HttpContext context) => consentPolicy is null
     ? Results.StatusCode(503) : Results.Ok(consentPolicy.Get(MemoryOwner(context))));
+app.MapGet("/api/weather", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    if (weatherIntelligence is null) return Results.StatusCode(503);
+    var owner = MemoryOwner(context);
+    weatherIntelligence.StartWorker(owner, app.Lifetime.ApplicationStopping);
+    try { return Results.Ok(await weatherIntelligence.RefreshAsync(owner, false, cancellationToken)); }
+    catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+    catch (InvalidOperationException error) { return Results.Conflict(new { error = error.Message }); }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Results.StatusCode(403); }
+}).RequireRateLimiting("weather");
+app.MapPost("/api/weather/location", async (HttpContext context, WeatherLocationEdit edit, CancellationToken cancellationToken) =>
+{
+    if (!IsLocalMutation(context)) return Results.StatusCode(403);
+    if (weatherIntelligence is null) return Results.StatusCode(503);
+    var owner = MemoryOwner(context);
+    weatherIntelligence.StartWorker(owner, app.Lifetime.ApplicationStopping);
+    try { return Results.Ok(await weatherIntelligence.SetLocationAsync(owner, edit.City ?? "", cancellationToken)); }
+    catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+    catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
+    catch (InvalidDataException error) { return Results.BadRequest(new { error = error.Message }); }
+    catch (HttpRequestException) { return Results.Problem("Nhà cung cấp thời tiết chưa phản hồi. Chưa lưu gợi ý mới.", statusCode: 503); }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Results.StatusCode(403); }
+}).RequireRateLimiting("weather");
+app.MapDelete("/api/weather/location", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    if (!IsLocalMutation(context)) return Results.StatusCode(403);
+    if (weatherIntelligence is null) return Results.StatusCode(503);
+    await weatherIntelligence.ClearLocationAsync(MemoryOwner(context), cancellationToken);
+    return Results.NoContent();
+}).RequireRateLimiting("weather");
+app.MapPost("/api/weather/refresh", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    if (!IsLocalMutation(context)) return Results.StatusCode(403);
+    if (weatherIntelligence is null) return Results.StatusCode(503);
+    var owner = MemoryOwner(context);
+    try { return Results.Ok(await weatherIntelligence.RefreshAsync(owner, true, cancellationToken)); }
+    catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+    catch (InvalidOperationException error) { return Results.Conflict(new { error = error.Message }); }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Results.StatusCode(403); }
+}).RequireRateLimiting("weather");
+app.MapPost("/api/weather/suggestions/{id}/feedback", async (HttpContext context, string id, WeatherFeedbackEdit edit,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsLocalMutation(context)) return Results.StatusCode(403);
+    if (weatherIntelligence is null) return Results.StatusCode(503);
+    try
+    {
+        var recorded = await weatherIntelligence.RecordFeedbackAsync(MemoryOwner(context), id, edit.Decision ?? "", cancellationToken);
+        return recorded ? Results.NoContent() : Results.NotFound();
+    }
+    catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+    catch (ArgumentException) { return Results.BadRequest(); }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Results.StatusCode(403); }
+});
 app.MapPost("/api/consent", async (HttpContext context, ConsentEdit edit) =>
 {
     if (!IsLocalMutation(context)) return Results.StatusCode(403);
@@ -192,6 +262,10 @@ app.MapPost("/api/consent", async (HttpContext context, ConsentEdit edit) =>
                 practice.ClearChatLearning(owner);
             if (source == "trusted_learning")
                 await trustedLearning.RevokeConsentAsync(context.RequestAborted);
+            if (source == "public_weather" && purpose == "proactive_analysis" && weatherIntelligence is not null)
+                await weatherIntelligence.RevokeWeatherConsentAsync(owner, context.RequestAborted);
+            if (source == "proactive_feedback" && weatherIntelligence is not null)
+                await weatherIntelligence.RevokeFeedbackConsentAsync(owner, context.RequestAborted);
         }
         app.Logger.LogInformation("Consent policy changed for {Source}/{Purpose}/{Destination}: {Decision}.",
             source, purpose, destination, edit.Allowed ? "granted" : "revoked");
@@ -1253,5 +1327,7 @@ record MemoryEdit(string? Text, string? Category, Guid RequestId, int Version);
 record MemoryReview(string Action, string? Text);
 record ConsentEdit(string? Source, string? Purpose, string? Destination, bool Allowed, Guid RequestId);
 record ConsentCheck(ConsentPolicy.ConsentRequirement[]? Requirements, Guid RequestId);
+record WeatherLocationEdit(string? City);
+record WeatherFeedbackEdit(string? Decision);
 record MemoryCalendarReminder(int Version, Guid RequestId, DateTimeOffset Start, DateTimeOffset End,
     int[]? ReminderMinutes);

@@ -16,13 +16,14 @@ The implementation does not label persisted data as “M1–M4”. The concrete 
 | Google Calendar | Google OAuth account token and event APIs | Event list is returned to the local UI; direct chat context requires a separate DeepSeek grant; event writes go to Google | Read requires `calendar / direct_request / local_only`; Chat context requires `DeepSeek`; create/edit/delete requires `external_service` |
 | Google Drive and trusted learning | OAuth Drive storage, local encrypted source index/snapshot | User-directed Drive UI operations stay in Drive/local UI. Approved learning collection and sync use external sources; selected Memory backups upload encrypted archives | Drive scopes require `google_drive / direct_request / local_only`; background learning requires `trusted_learning / skill_learning / external_service`; Memory backup has its own external grant |
 | Search and Reader | `SearchDiscoveryService`, `UniversalUrlReader` | Search query goes to the selected search provider; fetched public URL text can be included in a direct DeepSeek request | Search request requires `public_web / direct_request / external_service`; Reader text requires `public_web / direct_request / DeepSeek` |
-| Weather and device status | No collection worker or connector exists | Not read or transmitted | Catalog entries are explicitly marked inactive; granting them does not activate collection |
+| Weather | `WeatherIntelligence` reads only a city the owner enters; sends that city to Open-Meteo geocoding and forecast APIs; sends forecast candidate metrics to DeepSeek only with separate grants | Owner-scoped encrypted local cache, up to two sourced suggestions, local feedback counters | Active only with weather local, Open-Meteo and DeepSeek grants; see `WEATHER_INTELLIGENCE.md` |
+| Device status | No collection worker or connector exists | Not read or transmitted | Catalog entry is explicitly marked inactive; granting it does not activate collection |
 
 ## Policy semantics
 
 Consent is keyed by the authenticated owner ID and the exact `(source, purpose, destination)` tuple. A missing, unreadable, corrupt, or unsupported policy entry is denied. OAuth credentials only authorize access to the provider; they never create an AI consent grant. The policy file is owner-hashed and protected with the app's persistent Data Protection keys. Audit rows contain source, purpose, destination, decision, timestamp, actor, request ID and revision only.
 
-Background purposes (`dreaming`, `skill_learning`, `proactive_analysis`) default to deny. No proactive collector is implemented. Dreaming and chat skill learning start only after backend policy checks; the AutoSkill Gateway hook is disabled in staging. Direct Chat send remains an explicit user action and is logged; optional data sources and derived context each need separate grants.
+Background purposes (`dreaming`, `skill_learning`, `proactive_analysis`) default to deny. Weather is the first bounded proactive collector. Dreaming and chat skill learning start only after backend policy checks; the AutoSkill Gateway hook remains disabled in staging and has not passed end-to-end acceptance. Direct Chat send remains an explicit user action and is logged; optional data sources and derived context each need separate grants.
 
 ## Revocation behavior
 

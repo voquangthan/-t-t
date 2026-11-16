@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { WeatherIntelligence } from "./WeatherIntelligence";
 
-type View = "overview" | "chat" | "tasks" | "calendar" | "notes" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
+type View = "overview" | "chat" | "tasks" | "calendar" | "notes" | "weather" | "privacy" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
 type Task = { id: string; text: string; status: string; calendarReminderAt?: string | null };
 type Note = { id: string; text: string; status?: string; createdAt?: string | null };
 type CalendarAccount = { id: string; email?: string };
@@ -83,6 +84,7 @@ export function Overview({ onNavigate, onChat }: { onNavigate: (view: View) => v
       <Icon name="spark"/><textarea aria-label="Chat nhanh" rows={2} maxLength={1500} placeholder="Bạn muốn lên kế hoạch, ghi chú điều gì hay hỏi Đệ Tốt?" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (draft.trim()) { onChat(draft.trim()); setDraft(""); } } }} />
       <button className="primary" disabled={!draft.trim()} aria-label="Gửi tin nhắn">Gửi</button>
     </form>
+    <WeatherIntelligence compact onNavigate={onNavigate}/>
     <div className="overview-grid">
       <section className="overview-card overview-tasks">
         <div className="overview-card-head"><div><span className="overview-icon"><Icon name="tasks"/></span><h2>Việc hôm nay</h2></div><button className="text-link" type="button" onClick={() => onNavigate("tasks")}>Tất cả <Icon name="arrow"/></button></div>
@@ -108,6 +110,7 @@ export function Icon({ name }: { name: string }) {
     case "chat": return <svg {...common}><path d="M20 11.2a7.8 7.8 0 0 1-8 7.7 8.5 8.5 0 0 1-3.2-.6L4 20l1.5-4A7.4 7.4 0 0 1 4 11.2a7.8 7.8 0 0 1 8-7.7 7.8 7.8 0 0 1 8 7.7Z"/><path d="M8 11h8M8 14h5"/></svg>;
     case "tasks": return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.5 2.5L16 9M8 7.5h2"/></svg>;
     case "calendar": return <svg {...common}><rect x="3.5" y="5" width="17" height="16" rx="2.5"/><path d="M7.5 3v4M16.5 3v4M4 9.5h16M8 13h2M14 13h2M8 16.5h2"/></svg>;
+    case "weather": return <svg {...common}><path d="M7 16.5a4.5 4.5 0 1 1 .8-8.9 5.7 5.7 0 0 1 10.7 2.1A3.5 3.5 0 0 1 18 16.5H7Z"/><path d="m9 19-1 2m5-2-1 2m5-2-1 2"/></svg>;
     case "notes": return <svg {...common}><path d="M6 4.5h12a2 2 0 0 1 2 2v13H6a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z"/><path d="M8 9h8M8 12.5h8M8 16h5M4 7v11"/></svg>;
     case "privacy": return <svg {...common}><path d="M12 3 19 6v5c0 4.5-2.7 7.8-7 10-4.3-2.2-7-5.5-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg>;
     case "tools": return <svg {...common}><path d="m14 6 4 4M4 20l9.5-9.5M14.5 4.5a4 4 0 0 0 5 5L13 16l-5-5 6.5-6.5Z"/><path d="m5 14 5 5"/></svg>;

@@ -8,6 +8,7 @@ import { MemoryReview } from "./MemoryReview";
 import { AgenticTasks } from "./AgenticTasks";
 import { PersonalNotes } from "./PersonalNotes";
 import { ConsentSettings } from "./ConsentSettings";
+import { WeatherIntelligence } from "./WeatherIntelligence";
 import { Icon, Overview } from "./Overview";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
@@ -112,7 +113,7 @@ function AttachmentChip({ file, onRemove }: { file: File; onRemove: () => void }
 }
 
 function App() {
-  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "privacy" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
+  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "weather" | "privacy" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
   const [view, setView] = useState<AppView>(() => {
     const params = new URLSearchParams(location.search);
     return params.has("calendar") ? "calendar" : params.has("drive") ? "cloud" : "overview";
@@ -437,9 +438,9 @@ function App() {
   }
 
   const last = conversation?.messages.at(-1);
-  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", privacy:"Quyền riêng tư", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập" };
+  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", weather:"Thời tiết", privacy:"Quyền riêng tư", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập" };
   const navItems: Array<{id:AppView;label:string;icon:string}> = [
-    {id:"overview",label:"Tổng quan",icon:"overview"},{id:"chat",label:"Trò chuyện",icon:"chat"},{id:"tasks",label:"Công việc",icon:"tasks"},{id:"calendar",label:"Lịch",icon:"calendar"},{id:"notes",label:"Ghi chú",icon:"notes"},{id:"privacy",label:"Quyền riêng tư",icon:"privacy"}
+    {id:"overview",label:"Tổng quan",icon:"overview"},{id:"chat",label:"Trò chuyện",icon:"chat"},{id:"tasks",label:"Công việc",icon:"tasks"},{id:"calendar",label:"Lịch",icon:"calendar"},{id:"notes",label:"Ghi chú",icon:"notes"},{id:"weather",label:"Thời tiết",icon:"weather"},{id:"privacy",label:"Quyền riêng tư",icon:"privacy"}
   ];
   const toolItems: Array<{id:AppView;label:string;icon:string}> = [
     {id:"cloud",label:"Cloud Storage",icon:"cloud"},{id:"learning",label:"Nguồn học",icon:"book"},{id:"dreaming",label:"Dreaming",icon:"dream"},{id:"practice",label:"Ca trực giả lập",icon:"practice"},{id:"skills",label:"Bản đồ học tập",icon:"skills"}
@@ -497,6 +498,7 @@ function App() {
       <div className={"view-content "+(view==="chat"?"chat-content":"")}>
         {view==="overview"&&<Overview onNavigate={navigate} onChat={startChat}/>}
         {view==="tasks"&&<AgenticTasks/>}{view==="calendar"&&<Calendar/>}{view==="notes"&&<PersonalNotes/>}
+        {view==="weather"&&<WeatherIntelligence onNavigate={navigate}/>}
         {view==="privacy"&&<ConsentSettings/>}
         {view==="cloud"&&<CloudStorage/>}{view==="learning"&&<TrustedLearning initialRequest={learningIntent}/>}
         {view==="dreaming"&&<MemoryReview/>}

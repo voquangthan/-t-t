@@ -35,6 +35,24 @@ apiTest("backend denies Memory reads until the exact owner/source/purpose/destin
   assert.equal(dreaming.data.consented, false);
   const reviews = await request("/api/memory/review");
   assert.equal(reviews.response.status, 403);
+  assert.equal((await request("/api/weather")).response.status, 403,
+    "weather worker API must deny access before any source or model grant");
+  assert.equal((await request("/api/weather/location", "POST", { city: "Synthetic Test City" })).response.status, 403,
+    "city geocoding must be denied until local, provider and DeepSeek grants exist");
+  assert.equal((await request("/api/weather/location", "DELETE")).response.status, 204,
+    "local privacy deletion must remain available without provider consent");
+  assert.equal((await request(`/api/weather/suggestions/${"a".repeat(16)}/feedback`, "POST", { decision: "dismissed" })).response.status, 403,
+    "weather feedback must remain off without its separate skill_learning grant");
+  await setConsent("public_weather", "proactive_analysis", "local_only", true);
+  assert.equal((await request("/api/weather")).response.status, 403,
+    "local weather storage alone must not enable provider or model access");
+  await setConsent("public_weather", "proactive_analysis", "external_service", true);
+  assert.equal((await request("/api/weather")).response.status, 403,
+    "Open-Meteo permission must not imply permission to send forecast data to DeepSeek");
+  await setConsent("proactive_feedback", "skill_learning", "local_only", true);
+  await setConsent("public_weather", "proactive_analysis", "local_only", false);
+  assert.equal((await request(`/api/weather/suggestions/${"a".repeat(16)}/feedback`, "POST", { decision: "dismissed" })).response.status, 403,
+    "feedback consent must not imply permission to read stored weather suggestions");
 
   await setConsent("personal_notes", "direct_request", "DeepSeek", true);
   assert.equal((await request("/api/memory?category=note")).response.status, 403,

@@ -49,7 +49,10 @@ public sealed class ConsentPolicy
         new("trusted_learning", "Nguồn học đã duyệt", "skill_learning", "Học kỹ năng", "external_service", "Đồng bộ nguồn học nền", "Cho phép worker đồng bộ đúng nguồn học đã được duyệt."),
         new("trusted_learning", "Nguồn học đã duyệt", "direct_request", "Yêu cầu trực tiếp", "DeepSeek", "Dùng nguồn học trong Chat", "Cho phép đưa trích đoạn từ nguồn học đã duyệt vào câu trả lời Chat."),
         new("trusted_learning", "Nguồn học đã duyệt", "direct_request", "Yêu cầu trực tiếp", "local_only", "Xem nội dung nguồn học cục bộ", "Cho phép tìm và xem nội dung đã lưu trên thiết bị."),
-        new("public_weather", "Thời tiết", "proactive_analysis", "Phân tích chủ động", "external_service", "Dự báo thời tiết", "Chưa kết nối nguồn thời tiết; cấp quyền này chưa kích hoạt việc thu thập."),
+        new("public_weather", "Thời tiết", "proactive_analysis", "Phân tích chủ động", "local_only", "Lưu vị trí và dự báo trên máy", "Cho phép lưu thành phố đã chọn, dự báo đã lấy và tối đa hai gợi ý thời tiết trong kho mã hóa cục bộ."),
+        new("public_weather", "Thời tiết", "proactive_analysis", "Phân tích chủ động", "external_service", "Gửi thành phố tới Open-Meteo", "Cho phép gửi thành phố đã nhập tới Open-Meteo để tìm tọa độ và lấy dự báo. Tọa độ không được gửi tới DeepSeek."),
+        new("public_weather", "Thời tiết", "proactive_analysis", "Phân tích chủ động", "DeepSeek", "Phân tích dự báo bằng DeepSeek", "Cho phép gửi chỉ số dự báo theo giờ (không có tọa độ hoặc tên thành phố) tới DeepSeek để chọn tối đa hai gợi ý."),
+        new("proactive_feedback", "Phản hồi gợi ý", "skill_learning", "Học từ phản hồi", "local_only", "Lưu phản hồi thời tiết cục bộ", "Cho phép đếm phản hồi hữu ích/bỏ qua và lưu gợi ý đã bỏ qua trên máy. Dữ liệu không gửi tới DeepSeek."),
         new("device_status", "Trạng thái thiết bị", "proactive_analysis", "Phân tích chủ động", "local_only", "Kiểm tra thiết bị cục bộ", "Chưa có bộ quan sát thiết bị; cấp quyền này chưa kích hoạt việc quét máy."),
     ];
 
@@ -76,6 +79,16 @@ public sealed class ConsentPolicy
                     current?.Allowed ?? false, current?.ChangedAt);
             }).ToArray();
             return new ConsentSnapshot(SupportedOptions, grants, state.Audit.TakeLast(200).Reverse().ToArray());
+        }
+    }
+
+    public DateTimeOffset? GetGrantChangedAt(string owner, string source, string purpose, string destination)
+    {
+        lock (gate)
+        {
+            var state = GetState(owner);
+            return state.Grants.FirstOrDefault(grant => grant.Source == source && grant.Purpose == purpose &&
+                grant.Destination == destination)?.ChangedAt;
         }
     }
 
