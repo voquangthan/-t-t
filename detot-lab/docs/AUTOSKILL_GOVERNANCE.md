@@ -1,6 +1,6 @@
 # AutoSkill Intelligent Governance
 
-Status: **PARTIAL — provenance barriers and deterministic staging policy implemented; Backend consent integration and revocation executor remain disabled/blocking.**
+Status: **PARTIAL — provenance governance and a staging-only revocation executor are implemented; trusted Backend/Gateway consent integration, full-store cleanup and safe rebuild remain incomplete.**
 
 ## Data lineage contract
 
@@ -51,4 +51,4 @@ This executor is not connected to the live Backend consent lease or Gateway adap
 - Legacy archive test verifies no JSONL content read without a valid manifest.
 - No user conversation, real AutoSkill archive, primary Gateway or provider was used.
 
-Before enabling AutoSkill, implement the trusted Backend lease bridge and idempotent owner-scoped deletion workflow; then test revoke during extraction/promotion, restart recovery, retry, cache/mirror/version invalidation, and backup restoration. Until then, keep the feature disabled and treat this checkpoint as partial.
+Before enabling AutoSkill, implement the trusted Backend lease bridge and connect revocation to archives, proposals, versions, runtime caches/mirrors and restore paths; then test revoke during extraction/promotion, stale workers, restart recovery, retries, and backup restoration. Until then, keep the feature disabled and treat this checkpoint as partial.
