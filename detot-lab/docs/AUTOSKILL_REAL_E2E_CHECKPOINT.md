@@ -118,3 +118,10 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Active pointers and managed runtime mirror markers now carry opaque artifact IDs, source/dependency links, consent scope/revision, validation/activation/retention state, and hashes for their content segments.
 - Staging checks active pointer/version consistency and managed mirror lineage before using or updating them; forged pointer or mirror lineage is rejected before rollback/promotion. Synthetic suite: **36/36 PASS**.
 - Revocation still does not delete or sweep active pointers and mirror copies; this metadata closes traceability gaps only and is not a runtime revoke signal.
+
+### Mixed artifact runtime deny gate — 17/11/2026
+
+- Audit found that the shared usability assertion could accept a MIXED artifact after the planner identified safe-looking independent segments. Since no verified splitter materializes a segment-only artifact, this could expose the full mixed body.
+- Updated the shared gate to deny MIXED and every non-retain policy action, and to honor top-level as well as nested activation/retention state. The artifact remains quarantined until a separately validated rebuild/split exists.
+- Synthetic governance, pipeline, owner-lock, revocation-store, provenance, migration and integration tests: **38/38 PASS**; `git diff --check` PASS. Adapter suite SKIP because the pinned upstream checkout is absent from this workspace.
+- Local commit: `a6a5f42`. No real owner data, provider, Gateway or AutoSkill capture was used; AutoSkill remains disabled. Backend consent lease binding and full-store revocation remain blockers.
