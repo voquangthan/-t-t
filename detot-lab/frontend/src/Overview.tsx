@@ -118,6 +118,7 @@ export function Icon({ name }: { name: string }) {
     case "book": return <svg {...common}><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21V5.5Z"/><path d="M4 17a2.5 2.5 0 0 1 2.5-2.5H20M8 7h8M8 10h6"/></svg>;
     case "dream": return <svg {...common}><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></svg>;
     case "practice": return <svg {...common}><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 2.5 2.5L7 14M12 15h5"/></svg>;
+    case "computer": return <svg {...common}><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M7 8h10m-10 4h6"/></svg>;
     case "skills": return <svg {...common}><path d="M4 19.5h16M6 16v-4M11 16V7M16 16V4M20 16v-7"/></svg>;
     case "spark": return <svg {...common}><path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3Z"/></svg>;
     case "arrow": return <svg {...common} width="16" height="16"><path d="M4 12h15M13 6l6 6-6 6"/></svg>;

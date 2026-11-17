@@ -106,6 +106,11 @@ var memoryEmbeddings = new MemoryEmbeddings(app.Services.GetRequiredService<IHtt
     builder.Configuration["DETOT_MEMORY_EMBED_MODEL"], builder.Configuration["DETOT_MEMORY_EMBED_REVISION"], app.Logger);
 var practiceDirectory = builder.Configuration["DETOT_PRACTICE_DIRECTORY"] ??
     Path.Combine(builder.Environment.ContentRootPath, ".local", "practice");
+var desktopRepositoryRoot = DesktopOperator.FindRepositoryRoot(builder.Environment.ContentRootPath);
+var desktopEdge = new PlaywrightEdgeAdapter(builder.Configuration["DETOT_NODE_EXECUTABLE"],
+    Path.Combine(builder.Environment.ContentRootPath, "tools", "computer-use", "edge-reader.mjs"),
+    builder.Configuration["DETOT_DESKTOP_EDGE_PROFILE"] ?? Path.Combine(builder.Environment.ContentRootPath, ".local", "computer-use", "edge-profile"),
+    builder.Configuration["DETOT_PLAYWRIGHT_CORE"]);
 var practice = OperatingSystem.IsWindows()
     ? new Practice(app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("Detot.Practice.v1"),
         practiceDirectory)
@@ -152,6 +157,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     if (dreamingWorker is not null)
         _ = Task.Run(() => dreamingWorker.RunAsync(app.Lifetime.ApplicationStopping));
 });
+app.Lifetime.ApplicationStopping.Register(() => desktopEdge.DisposeAsync().AsTask().GetAwaiter().GetResult());
 var trialCalendar = new ConcurrentDictionary<Guid, TrialEvent>();
 var calendarReceipts = new ConcurrentDictionary<Guid, TrialEvent>();
 var deletedCalendarRequests = new HashSet<Guid>();
@@ -199,6 +205,49 @@ app.UseStaticFiles();
 app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
+app.MapGet("/api/desktop/status", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress)) return Results.NotFound();
+    return Results.Ok(await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken));
+});
+app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionRequest request,
+    CancellationToken cancellationToken) =>
+{
+    if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
+    if (request.Action is not ("open-workspace" or "open-github" or "open-edge" or "open-vscode"))
+        return Results.BadRequest(new { error = "Hành động không được hỗ trợ." });
+
+    DesktopOperator.ActionResult result;
+    switch (request.Action)
+    {
+        case "open-workspace": result = DesktopOperator.OpenWorkspace(desktopRepositoryRoot); break;
+        case "open-edge":
+            return BrowserActionResult(await desktopEdge.ExecuteAsync("open-edge", null, cancellationToken));
+        case "open-vscode": result = DesktopOperator.OpenKnownApplication("vscode"); break;
+        default:
+            var status = await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken);
+            if (status.Repository is null) return Results.BadRequest(new { error = "Không có remote GitHub hợp lệ." });
+            return BrowserActionResult(await desktopEdge.ExecuteAsync("open-github", status.Repository, cancellationToken));
+    }
+    return result.Succeeded ? Results.Ok(result) : Results.Problem(result.Message, statusCode: 503);
+}).RequireRateLimiting("chat");
+app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRequest request,
+    CancellationToken cancellationToken) =>
+{
+    if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
+    if (request.Target is not ("github-account" or "github-pull-requests"))
+        return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
+    var repository = request.Target == "github-pull-requests"
+        ? (await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken)).Repository
+        : null;
+    if (request.Target == "github-pull-requests" && repository is null)
+        return Results.BadRequest(new { error = "Không có remote GitHub hợp lệ." });
+    var action = request.Target == "github-account" ? "read-account" : "read-github";
+    return BrowserActionResult(await desktopEdge.ExecuteAsync(action, repository, cancellationToken));
+}).RequireRateLimiting("chat");
 var memory = app.MapGroup("/api/memory");
 app.MapGet("/api/consent", (HttpContext context) => consentPolicy is null
     ? Results.StatusCode(503) : Results.Ok(consentPolicy.Get(MemoryOwner(context))));
@@ -1366,6 +1415,25 @@ static bool IsGoogleCalendarCommand(string message) =>
         @"^\s*(?:(?:hãy|giúp mình|giúp tôi)\s+)?(?:đặt|tạo|thêm|lên)\s+(?:lịch|sự kiện)\b[^\r\n]*\bGoogle Calendar\b",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
+static IResult BrowserActionResult(JsonElement result)
+{
+    if (result.TryGetProperty("error", out var error))
+    {
+        var reason = error.GetString() ?? "browser_operation_failed";
+        var status = reason switch
+        {
+            "playwright_unavailable" => 503,
+            "browser_timeout" => 504,
+            _ when reason.StartsWith("github_http_", StringComparison.Ordinal) &&
+                   int.TryParse(reason.AsSpan("github_http_".Length), out var httpStatus) &&
+                   httpStatus is >= 400 and <= 599 => httpStatus,
+            _ => 502
+        };
+        return Results.Json(new { error = reason }, statusCode: status);
+    }
+    return Results.Ok(result);
+}
+
 record ChatTurn(string Role, string Text);
 record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History, Guid? ConversationId,
     bool StartPractice = false, string? DocumentContext = null, string[]? VisionImages = null,
@@ -1382,3 +1450,5 @@ record WeatherLocationEdit(string? City);
 record WeatherFeedbackEdit(string? Decision);
 record MemoryCalendarReminder(int Version, Guid RequestId, DateTimeOffset Start, DateTimeOffset End,
     int[]? ReminderMinutes);
+record DesktopActionRequest(string? Action);
+record DesktopObserveRequest(string? Target);

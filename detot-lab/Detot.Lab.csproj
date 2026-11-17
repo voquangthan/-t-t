@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework Condition="'$(OS)' == 'Windows_NT'">net10.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(OS)' != 'Windows_NT'">net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
@@ -8,9 +9,11 @@
     <Compile Remove="tests/cloud-storage/**/*.cs" />
     <Compile Remove="tests/memory-audit/**/*.cs" />
     <Compile Remove="tests/weather/**/*.cs" />
+    <Compile Remove="tests/desktop-operator/**/*.cs" />
     <Content Remove="tests/**" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" Condition="'$(OS)' == 'Windows_NT'" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageReference Include="Parquet.Net" Version="6.1.0" />
     <PackageReference Include="PdfPig" Version="0.1.16" />
