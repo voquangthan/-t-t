@@ -78,3 +78,9 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Runtime cache snapshots carry provenance, source/dependency IDs, consent revision and content-segment hashes. `agent_end` drops stale or malformed cache evidence and only forwards skill IDs backed by that validated cache.
 - Unknown and forged independence metadata tests pass. Synthetic verification: pinned adapter **82/82 PASS**; project governance/provenance/pipeline/integration **18/18 PASS**.
 - Revocation is still not immediate across Gateway caches because there is no authenticated Backend-to-Gateway lease/revoke channel. No primary Gateway or real user data used.
+
+### Legacy artifact migration — 17/11/2026
+
+- Added a staging-only, owner-scoped migration command. Dry-run is the default; explicit apply annotates legacy proposals and version snapshots as UNKNOWN/quarantined, preserves candidate/history bytes semantically, and blocks activation.
+- The migrator does not touch archives, active pointers, mirrors, backup data, or real owner storage. It refuses to apply when an artifact is unreadable or the embedded owner ID does not match.
+- Synthetic migration/restart-idempotence/owner-isolation tests pass; project governance/provenance/pipeline/integration/migration suite is **22/22 PASS**. Migration was not run against the existing `.local` tree.

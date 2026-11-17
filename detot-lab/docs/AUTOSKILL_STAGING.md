@@ -59,9 +59,13 @@ node tools\autoskill\pipeline.mjs list
 node tools\autoskill\pipeline.mjs evaluate --proposal <id> --report <report.json>
 node tools\autoskill\pipeline.mjs approve --proposal <id>
 node tools\autoskill\pipeline.mjs rollback --skill <skill-id> --version <version>
+node tools\autoskill\pipeline.mjs migrate-legacy
+node tools\autoskill\pipeline.mjs migrate-legacy --apply true
 ```
 
 The default data root is `.local/autoskill-staging`. The CLI refuses a different root. `approve` only writes the staging workspace. Primary activation is intentionally not part of these commands.
+
+`migrate-legacy` defaults to a dry run and reports opaque artifact IDs and actions only. `--apply true` adds UNKNOWN/quarantined provenance to legacy proposal and skill-version JSON for the selected staging owner; it preserves candidate and version content, blocks activation, and is safe to rerun after interruption. It does not migrate archives, runtime mirrors, or backups. Test only with synthetic staging data; do not point it at real owner storage.
 
 ## Verification boundary
 

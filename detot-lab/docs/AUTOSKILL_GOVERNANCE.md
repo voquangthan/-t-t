@@ -16,6 +16,8 @@ Each provenance-bearing object uses opaque artifact IDs and records `source_ids`
 
 Missing/corrupt legacy session manifests are treated as UNKNOWN. Recovery checks the manifest before reading JSONL content and skips an archive if lineage is absent or the owner consent generation changed. Legacy proposals and versions without provenance are denied evaluation, approval and rollback. No automatic migration reads old content or infers independence.
 
+The staging pipeline has an owner-scoped legacy migration command. It scans only that staging owner's proposal and skill-version records, defaults to dry-run, and on explicit `--apply true` adds UNKNOWN/quarantined provenance while preserving candidate/version content and history. It refuses to apply if records are unreadable or owner IDs do not match. It does not touch archives, active pointers, runtime mirrors, backups, or any real owner data.
+
 ## Deterministic policy
 
 `tools/autoskill/governance.mjs` implements the policy used by the staging proposal/version pipeline:

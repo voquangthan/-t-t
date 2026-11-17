@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { sanitizeSkillCandidate } from "./privacy.mjs";
 import { assertArtifactUsable } from "./governance.mjs";
 import { stableArtifactId } from "./provenance.mjs";
+import { migrateLegacyArtifact } from "./migration.mjs";
 
 const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/u;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -338,6 +339,75 @@ export function rollbackSkill({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
   return { skill_id: skill, version: targetVersion, skill_hash: target.skill_hash, rolled_back: true };
 }
 
+function collectLegacyArtifactPaths(root, ownerId) {
+  const proposals = ensureInside(root, path.join(root, "state", "autoskill", "proposals", "Users", ownerId));
+  const versions = ensureInside(root, path.join(root, "state", "autoskill", "SkillBank", "Users", ownerId));
+  const found = [];
+  const walk = (directory, kind) => {
+    if (!fs.existsSync(directory)) return;
+    const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const target = ensureInside(root, path.join(directory, entry.name));
+      if (entry.isSymbolicLink()) throw new Error("symlink_not_allowed");
+      if (entry.isDirectory()) walk(target, kind);
+      else if (entry.isFile() && entry.name.endsWith(".json")) found.push({ path: target, kind });
+    }
+  };
+  walk(proposals, "proposal");
+  if (fs.existsSync(versions)) {
+    for (const entry of fs.readdirSync(versions, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory()) continue;
+      const skillDir = ensureInside(root, path.join(versions, entry.name));
+      if (entry.isSymbolicLink()) throw new Error("symlink_not_allowed");
+      walk(ensureInside(root, path.join(skillDir, "versions")), "skill_version");
+    }
+  }
+  return found;
+}
+
+/** Dry-runs by default; apply only adds UNKNOWN/quarantine provenance to known owner-scoped records. */
+export function migrateLegacyArtifacts({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", apply = false } = {}) {
+  const stagingRoot = path.resolve(root);
+  const owner = requireId(ownerId, "owner_id");
+  const files = collectLegacyArtifactPaths(stagingRoot, owner);
+  const plan = [];
+  for (const file of files) {
+    try {
+      const artifact = readJson(file.path);
+      if (artifact.owner_id !== owner) {
+        plan.push({ artifact_id: stableArtifactId("untrusted_legacy_artifact", owner, path.relative(stagingRoot, file.path)), action: "quarantine", reason: "owner_mismatch" });
+        continue;
+      }
+      if (artifact.provenance && typeof artifact.provenance === "object") {
+        plan.push({ artifact_id: String(artifact.provenance.artifact_id || stableArtifactId("classified_artifact", owner, path.relative(stagingRoot, file.path))), action: "retain_metadata", reason: "provenance_present" });
+        continue;
+      }
+      const key = file.kind === "proposal"
+        ? artifact.proposal_id || path.basename(file.path, ".json")
+        : `${artifact.skill_id || "unknown"}:${artifact.version || path.basename(file.path, ".json")}`;
+      const migrated = migrateLegacyArtifact({ artifact, ownerId: owner, artifactType: file.kind, artifactKey: key });
+      plan.push({ artifact_id: migrated.artifact.provenance.artifact_id, action: "quarantine", reason: migrated.reason, path: file.path, migrated });
+    } catch (error) {
+      plan.push({ artifact_id: stableArtifactId("unreadable_legacy_artifact", owner, path.relative(stagingRoot, file.path)), action: "quarantine", reason: "record_unreadable" });
+    }
+  }
+  const blocked = plan.some((item) => item.reason === "owner_mismatch" || item.reason === "record_unreadable");
+  const eligible = plan.filter((item) => item.reason === "legacy_provenance_quarantined");
+  if (apply && !blocked) {
+    for (const item of eligible) writeJsonAtomic(item.path, item.migrated.artifact);
+    appendAudit(stagingRoot, owner, { action: "legacy_artifacts_quarantined", artifact_count: eligible.length });
+  }
+  return {
+    mode: apply ? "apply" : "dry_run",
+    scanned: files.length,
+    quarantined: eligible.length,
+    already_classified: plan.filter((item) => item.reason === "provenance_present").length,
+    blocked,
+    artifacts: plan.map(({ artifact_id, action, reason }) => ({ artifact_id, action, reason })),
+    changed: apply && !blocked ? eligible.length : 0,
+  };
+}
+
 function parseArgs(args) {
   const out = { _: [] };
   for (let i = 0; i < args.length; i += 1) {
@@ -361,7 +431,8 @@ async function main() {
   else if (command === "approve") result = approveProposal({ root, ownerId, proposalId: args.proposal });
   else if (command === "reject") result = rejectProposal({ root, ownerId, proposalId: args.proposal, reason: args.reason || "review_rejected" });
   else if (command === "rollback") result = rollbackSkill({ root, ownerId, skillId: args.skill, version: args.version });
-  else throw new Error("usage: node pipeline.mjs <list|evaluate|approve|reject|rollback> [options]");
+  else if (command === "migrate-legacy") result = migrateLegacyArtifacts({ root, ownerId, apply: String(args.apply || "").toLowerCase() === "true" });
+  else throw new Error("usage: node pipeline.mjs <list|evaluate|approve|reject|rollback|migrate-legacy> [options]");
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
