@@ -1,0 +1,9 @@
+{
+  "repository": "voquangthan/-t-t",
+  "reviewer_login": "",
+  "reviewer_id": null,
+  "reviewer_type": "",
+  "base_branch": "main",
+  "poll_seconds": 20,
+  "timeout_minutes": 30
+}
