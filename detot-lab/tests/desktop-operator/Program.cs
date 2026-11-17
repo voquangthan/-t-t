@@ -227,6 +227,13 @@ if (args.Contains("--edge-open-smoke", StringComparer.Ordinal))
     }
 }
 
+if (args.Contains("--vscode-open-smoke", StringComparer.Ordinal))
+{
+    var result = DesktopOperator.OpenKnownApplication("vscode");
+    if (!result.Succeeded) throw new InvalidOperationException("VS Code launch smoke failed.");
+    Check(result.WindowVerified == true, "Windows UI Automation confirms the allowlisted VS Code window");
+}
+
 static void RunGit(string directory, params string[] arguments)
 {
     var start = new ProcessStartInfo("git") { WorkingDirectory = directory, UseShellExecute = false,
