@@ -11,6 +11,7 @@ type WorkspaceStatus = {
 type ComputerUsePermissions = {
   observe: string[];
   navigate: string[];
+  accountSelection: string[];
   write: string[];
   codeExecution: boolean;
 };
@@ -48,6 +49,7 @@ const permissionLabels: Record<string, string> = {
   "open-github": "mở trang PR GitHub",
   "open-edge": "mở Edge",
   "open-vscode": "mở VS Code",
+  "explicitly-requested-listed-github-account": "chọn tài khoản GitHub được nêu rõ trong hộp thoại GCM đang mở",
 };
 
 const displayPermissions = (values: string[] | undefined) =>
@@ -154,7 +156,7 @@ export function DesktopActions() {
       <button type="button" disabled={loading || !!busy} onClick={() => void reload()}>Kiểm tra lại</button>
     </div>
     <div className="desktop-safety-note" role="note">
-      <strong>Quyền hiện tại:</strong> Quan sát: {permissions ? displayPermissions(permissions.observe) : "đang tải"}. Điều hướng: {permissions ? displayPermissions(permissions.navigate) : "đang tải"}. Ghi: {permissions ? displayPermissions(permissions.write) : "đang tải"}. Chạy mã: {permissions?.codeExecution ? "được bật" : permissions ? "đang bị khóa" : "đang tải"}. Đăng nhập/chọn tài khoản không được tự động hóa.
+      <strong>Quyền hiện tại:</strong> Quan sát: {permissions ? displayPermissions(permissions.observe) : "đang tải"}. Điều hướng: {permissions ? displayPermissions(permissions.navigate) : "đang tải"}. Chọn tài khoản: {permissions ? displayPermissions(permissions.accountSelection) : "đang tải"}. Ghi: {permissions ? displayPermissions(permissions.write) : "đang tải"}. Chạy mã: {permissions?.codeExecution ? "được bật" : permissions ? "đang bị khóa" : "đang tải"}. Chọn tài khoản chỉ khi được yêu cầu rõ và tài khoản đang hiện trong hộp thoại; không tự nhập credential hoặc chấp nhận quyền mới.
     </div>
     {loading && <p role="status">Đang kiểm tra workspace…</p>}
     {error && <p className="desktop-message desktop-error" role="alert">{error}</p>}
