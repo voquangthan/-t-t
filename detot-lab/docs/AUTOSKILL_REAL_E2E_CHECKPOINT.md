@@ -55,3 +55,13 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - No live provider, personal data or Gateway was used. Google Public Alerts live smoke remains unavailable without a configured key.
 - Frontend build reports existing non-failing warnings: `canonical-host.js` is not bundled because it is a classic script, and the JavaScript chunk is about 553 kB minified.
 - Before enabling capture, define and test revocation cleanup for source archives and derived proposals. Current AutoSkill policy retains proposals/version history, while the consent UI promises removal of worker-owned derived data where possible; implementation must not silently choose one retention semantics over the other.
+
+## Intelligent Governance checkpoint — 17/11/2026
+
+- Added provenance metadata helpers, content-segment hashes, and deterministic `INDEPENDENT` / `DERIVED` / `MIXED` / `UNKNOWN` policy evaluation.
+- The staging pipeline now blocks evaluation, approval, and rollback for missing/unknown provenance; approved versions carry a new version artifact ID and dependency link to their proposal.
+- The pinned adapter patch now writes conversation provenance sidecars, checks owner consent generation before reading session content, rejects stale capture generations, and records proposal/version lineage. Legacy archives without a valid manifest are skipped before JSONL read; this is a read barrier, not a completed persistent quarantine migration.
+- A pure revocation planner computes dependency closure and per-artifact actions. It does not execute deletions. No personal data was read or changed.
+- Synthetic verification: project governance/provenance/pipeline/integration tests **17/17 PASS**; pinned upstream adapter tests **79/79 PASS**.
+- Still blocked from full integration: the adapter has no trusted Backend consent lease callback bound to the authenticated owner, and there is no crash-safe deletion executor covering all managed copies. AutoSkill remains disabled. Do not claim governance or AutoSkill E2E PASS until those pieces and their revoke/restart/restore tests are implemented.
+- See `AUTOSKILL_GOVERNANCE.md` for architecture, boundaries, and required next work.

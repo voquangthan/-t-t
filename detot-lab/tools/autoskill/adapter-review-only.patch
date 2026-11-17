@@ -1,18 +1,19 @@
 diff --git a/AutoSkill4OpenClaw/adapter/embedded_runtime.js b/AutoSkill4OpenClaw/adapter/embedded_runtime.js
-index a313474..96e7c16 100644
+index a313474b..d9e51187 100644
 --- a/AutoSkill4OpenClaw/adapter/embedded_runtime.js
 +++ b/AutoSkill4OpenClaw/adapter/embedded_runtime.js
-@@ -1,7 +1,9 @@
+@@ -1,7 +1,10 @@
  import fs from "node:fs";
  import os from "node:os";
  import path from "node:path";
 +import crypto from "node:crypto";
  import { fileURLToPath } from "node:url";
 +import { sanitizeExperienceText, sanitizeSkillCandidate } from "./detot-privacy.mjs";
++import { createArtifactProvenance, createContentSegments, normalizeConsentGrant, stableArtifactId } from "./detot-provenance.mjs";
  
  function asString(v) {
    if (v == null) return "";
-@@ -890,11 +892,49 @@ function sanitizeMessage(item) {
+@@ -890,11 +893,74 @@ function sanitizeMessage(item) {
    if (!item || typeof item !== "object") return null;
    const role = trimmed(item.role).toLowerCase();
    if (!["system", "user", "assistant", "tool"].includes(role)) return null;
@@ -37,6 +38,12 @@ index a313474..96e7c16 100644
 +  const privacy = sanitizeSkillCandidate(candidate);
 +  if (!privacy.safe) return { status: "skipped", reason: `privacy_gate_${privacy.reasons[0] || "rejected"}` };
 +  const safeCandidate = privacy.candidate;
++  const sourceProvenance = evidence?.provenance;
++  const artifactId = stableArtifactId("proposal", uid, id);
++  const sourceIds = Array.isArray(sourceProvenance?.source_ids) ? sourceProvenance.source_ids : [];
++  const dependencyIds = sourceProvenance?.artifact_id ? [sourceProvenance.artifact_id] : [];
++  const provenanceType = ["independent", "conversation", "mixed", "unknown"].includes(sourceProvenance?.provenance_type)
++    ? sourceProvenance.provenance_type : "unknown";
 +  const proposal = {
 +    proposal_id: id,
 +    owner_id: uid,
@@ -51,6 +58,25 @@ index a313474..96e7c16 100644
 +      successful_main_turn: Boolean(evidence?.has_successful_main_turn),
 +      source_hash: crypto.createHash("sha256").update(JSON.stringify(evidence || {})).digest("hex"),
 +    },
++    provenance: createArtifactProvenance({
++      artifactId,
++      artifactType: "proposal",
++      sourceIds,
++      dependencyIds,
++      provenanceType,
++      consent: evidence?.analysis_consent,
++      validationStatus: "pending_review",
++      activationStatus: "inactive",
++      retentionState: sourceProvenance?.retention_state === "retained" ? "retained" : "quarantined",
++    }),
++    content_segments: createContentSegments({
++      artifactId,
++      values: safeCandidate,
++      sourceIds,
++      dependencyIds,
++      provenanceType,
++      consent: evidence?.analysis_consent,
++    }),
 +    candidate: safeCandidate,
 +    history: [{ version: "0.1.0", action: "proposed", at: new Date().toISOString() }],
 +  };
@@ -63,12 +89,175 @@ index a313474..96e7c16 100644
  function sanitizeMessages(list) {
    if (!Array.isArray(list)) return [];
    const out = [];
-@@ -2137,7 +2177,17 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -950,6 +1016,17 @@ function writeJson(filePath, obj) {
+   fs.writeFileSync(filePath, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
+ }
+ 
++function writeJsonAtomic(filePath, obj) {
++  ensureDir(path.dirname(filePath));
++  const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(5).toString("hex")}.tmp`;
++  fs.writeFileSync(temporary, `${JSON.stringify(obj, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
++  fs.renameSync(temporary, filePath);
++}
++
++function readJsonMetadata(filePath) {
++  try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch (_) { return null; }
++}
++
+ function readJsonl(filePath) {
+   if (!fs.existsSync(filePath)) return [];
+   const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+@@ -973,6 +1050,9 @@ function finalizeSessionFile(filePath, reason) {
+   const dst = path.join(parsed.dir, `${parsed.name}.${nowMs()}.${slug(reason, "closed")}${parsed.ext}`);
+   try {
+     fs.renameSync(filePath, dst);
++    const sourceManifest = `${filePath}.provenance.json`;
++    const targetManifest = `${dst}.provenance.json`;
++    if (fs.existsSync(sourceManifest)) fs.renameSync(sourceManifest, targetManifest);
+     return dst;
+   } catch (_) {
+     return filePath;
+@@ -1785,6 +1865,12 @@ function isDuplicateCandidate(existing, candidate) {
+ }
+ 
+ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
++  const consentCheck = typeof deps.authorizeConsent === "function" ? deps.authorizeConsent : null;
++  const consentGrant = async (stage) => {
++    if (!consentCheck) return null;
++    try { return normalizeConsentGrant(await consentCheck(stage), stage); } catch (_) { return null; }
++  };
++  const consentAllows = async (stage) => (await consentGrant(stage)) !== null;
+   const state = {
+     activeSessionByUser: new Map(),
+     liveSessionByKey: new Map(),
+@@ -1796,8 +1882,15 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     processedLedgerLoaded: false,
+     recoveryStarted: false,
+   };
+-  const invokeModel =
+-    typeof deps.invokeModel === "function" ? deps.invokeModel : createDefaultModelInvoker(cfg, api, log, deps);
++  const rawInvokeModel = typeof deps.invokeModel === "function"
++    ? deps.invokeModel : createDefaultModelInvoker(cfg, api, log, deps);
++  let activeAnalysisRevision = null;
++  const invokeModel = async (request) => {
++    const grant = await consentGrant("analysis");
++    if (!grant || (activeAnalysisRevision !== null && grant.revision !== activeAnalysisRevision))
++      throw new Error("autoskill_consent_denied");
++    return rawInvokeModel(request);
++  };
+   const promptPack = loadPromptPack(cfg, log);
+   const renderSharedPrompt = (key, fallback, vars = {}) => sharedPrompt(promptPack, key, fallback, vars);
+ 
+@@ -1811,6 +1904,17 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     return path.join(root, slug(userId || "default", "default"), `${slug(sessionId, "session")}.latest.json`);
+   }
+ 
++  function sessionManifestPath(filePath) { return `${filePath}.provenance.json`; }
++
++  function readSessionManifest(filePath) {
++    const manifest = readJsonMetadata(sessionManifestPath(filePath));
++    if (!manifest || manifest.schema_version !== 1 || manifest.provenance?.provenance_type !== "conversation" ||
++        manifest.provenance?.retention_state !== "retained" || !manifest.provenance?.artifact_id ||
++        !Array.isArray(manifest.provenance?.source_ids) || !manifest.provenance.source_ids.length ||
++        !Number.isSafeInteger(manifest.provenance?.consent_revision)) return null;
++    return manifest;
++  }
++
+   function sessionKey(userId, sessionId) {
+     return `${userId}::${sessionId}`;
+   }
+@@ -1966,7 +2070,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     return out.sort((a, b) => String(a.path).localeCompare(String(b.path)));
+   }
+ 
+-  function appendSession(payload) {
++  function appendSession(payload, captureGrant) {
+     const uid = slug(payload.user || "default", "default");
+     const sid = trimmed(payload.session_id);
+     if (!sid) {
+@@ -1997,6 +2101,36 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     }
+     const currentPath = sessionFilePath(uid, sid);
+     const currentSnapshotPath = sessionSnapshotPath(uid, sid);
++    const manifestPath = sessionManifestPath(currentPath);
++    let manifest = null;
++    if (fs.existsSync(currentPath)) {
++      manifest = readSessionManifest(currentPath);
++      if (!manifest || manifest.provenance.consent_revision !== captureGrant.revision) {
++        return { ended, reason: "session_provenance_unknown_or_stale", path: "", snapshot_path: "" };
++      }
++    }
++    const conversationId = stableArtifactId("conversation", uid, sid);
++    const captureConsent = { stage: "capture", revision: captureGrant.revision, requirements: captureGrant.requirements };
++    const conversationProvenance = createArtifactProvenance({
++      artifactId: conversationId,
++      artifactType: "conversation",
++      sourceIds: [conversationId],
++      dependencyIds: [],
++      provenanceType: "conversation",
++      consent: captureConsent,
++      validationStatus: "captured",
++      activationStatus: "not_applicable",
++      retentionState: "retained",
++    });
++    const segments = createContentSegments({ artifactId: conversationId, values: incomingMessages,
++      sourceIds: [conversationId], dependencyIds: [], provenanceType: "conversation", consent: captureConsent });
++    manifest = {
++      schema_version: 1,
++      provenance: conversationProvenance,
++      content_segments: [...(manifest?.content_segments || []), ...segments],
++      record_count: Number(manifest?.record_count || 0) + 1,
++      updated_at: new Date(now).toISOString(),
++    };
+     appendJsonl(currentPath, {
+       event_time: now,
+       user_id: uid,
+@@ -2005,7 +2139,10 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+       session_done: Boolean(payload.session_done),
+       success,
+       messages: incomingMessages,
++      provenance: conversationProvenance,
++      content_segments: segments,
+     });
++    writeJsonAtomic(manifestPath, manifest);
+ 
+     const key = sessionKey(uid, sid);
+     const live =
+@@ -2030,6 +2167,8 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+       if (success) live.has_main_success = true;
+     }
+     live.messages = mergeMessagesWithOverlap(live.messages, incomingMessages);
++    live.provenance = conversationProvenance;
++    live.content_segments = manifest.content_segments;
+     state.liveSessionByKey.set(key, live);
+     writeJson(currentSnapshotPath, live);
+ 
+@@ -2081,6 +2220,9 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+   }
+ 
+   function loadClosedSession(item) {
++    const manifest = readSessionManifest(item.path);
++    if (!manifest) return { ...item, session_id: trimmed(item.session_id), records: [], messages: [], hasMain: false,
++      hasMainSuccess: false, evidence: { session_id: trimmed(item.session_id), provenance: null } };
+     const records = readJsonl(item.path);
+     let hasMain = false;
+     let hasMainSuccess = false;
+@@ -2130,6 +2272,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+         live_checkpoint: Number(item.checkpoint || 0) || 0,
+         is_live_session: trimmed(item.reason) === "live_turn_checkpoint",
+         turn_count: records.length,
++        provenance: manifest.provenance,
+         has_main_turn: hasMain,
+         has_successful_main_turn: hasMainSuccess,
+         turns: turnSummaries,
+@@ -2137,7 +2280,19 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
      };
    }
  
 -  async function maintainSkill({ userId, candidate, modelHint }) {
 +  async function maintainSkill({ userId, candidate, modelHint, sessionEvidence }) {
++    const grant = await consentGrant("analysis");
++    if (!grant || (activeAnalysisRevision !== null && grant.revision !== activeAnalysisRevision)) return { status: "skipped", reason: "consent_denied" };
 +    if (cfg.reviewOnly === true) {
 +      const proposal = writeReviewProposal({
 +        reviewQueueDir: cfg.embedded.reviewQueueDir,
@@ -82,7 +271,29 @@ index a313474..96e7c16 100644
      const skillBankDir = path.resolve(cfg.embedded.skillBankDir);
      const openclawSkillsDir = path.resolve(cfg.embedded.openclawSkillsDir);
      const mirrorEnabled = isMirrorInstallEnabled(cfg);
-@@ -2253,6 +2303,10 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -2234,7 +2389,21 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+   async function processEndedSessions(endedItems, payloadUser, modelHint) {
+     const results = [];
+     for (const ended of endedItems) {
++      const grant = await consentGrant("analysis");
++      if (!grant) {
++        results.push({ session_id: trimmed(ended?.session_id), status: "skipped", reason: "consent_denied" });
++        continue;
++      }
++      const manifest = readSessionManifest(ended.path);
++      if (!manifest || manifest.provenance.consent_revision !== grant.revision) {
++        results.push({ session_id: trimmed(ended?.session_id), status: "skipped", reason: "provenance_unknown_or_consent_stale" });
++        continue;
++      }
+       const session = loadClosedSession(ended);
++      if (!session.evidence.provenance) {
++        results.push({ session_id: trimmed(ended?.session_id), status: "skipped", reason: "provenance_unknown_or_consent_stale" });
++        continue;
++      }
+       if (!session.hasMain || !session.hasMainSuccess) {
+         results.push({ session_id: session.session_id, status: "skipped", reason: "no_successful_main_turn" });
+         if (log?.info) {
+@@ -2253,7 +2422,13 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
          }
          continue;
        }
@@ -91,9 +302,12 @@ index a313474..96e7c16 100644
 +        continue;
 +      }
        try {
++        activeAnalysisRevision = grant.revision;
++        session.evidence.analysis_consent = grant;
          const candidate = await extractCandidate({
            invokeModel,
-@@ -2275,6 +2329,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+           sessionMessages: session.messages,
+@@ -2275,6 +2450,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
            userId: payloadUser || ended.user,
            candidate,
            modelHint,
@@ -101,7 +315,15 @@ index a313474..96e7c16 100644
          });
          results.push({ session_id: session.session_id, ...maintain });
          if (log?.info) {
-@@ -2297,6 +2352,14 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -2291,14 +2467,29 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+             `[autoskill-openclaw-adapter] embedded closed session failed session=${session.session_id} error=${sanitizeModelCallError(err)}`,
+           );
+         }
++      } finally {
++        activeAnalysisRevision = null;
+       }
+     }
+     return results;
    }
  
    async function processLiveCheckpointSessions(items, payloadUser, modelHint) {
@@ -115,8 +337,15 @@ index a313474..96e7c16 100644
 +    }
      const results = [];
      for (const item of items) {
++      if (!(await consentAllows("analysis"))) {
++        results.push({ session_id: trimmed(item?.session_id), status: "skipped", reason: "consent_denied",
++          checkpoint: Math.max(0, Number(item?.checkpoint || 0) || 0) });
++        continue;
++      }
        const session = loadClosedSession(item);
-@@ -2351,6 +2414,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+       const checkpoint = Math.max(0, Number(item.checkpoint || session?.evidence?.live_checkpoint || 0) || 0);
+       if (!session.hasMain || !session.hasMainSuccess) {
+@@ -2351,6 +2542,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
            userId: payloadUser || item.user,
            candidate,
            modelHint,
@@ -124,7 +353,7 @@ index a313474..96e7c16 100644
          });
          results.push({ session_id: session.session_id, checkpoint, ...maintain });
          if (log?.info) {
-@@ -2374,7 +2438,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -2374,7 +2566,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
  
    function summarizeEndedSessionResults(results) {
      const items = Array.isArray(results) ? results : [];
@@ -133,7 +362,7 @@ index a313474..96e7c16 100644
      return {
        status: changed.length ? "scheduled" : "skipped",
        reason: changed.length ? "" : "session_not_extractable",
-@@ -2401,7 +2465,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -2401,7 +2593,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
          }
        }
        if (log?.info) {
@@ -142,7 +371,7 @@ index a313474..96e7c16 100644
          const failedCount = results.filter((x) => x.status === "failed").length;
          log.info(
            `[autoskill-openclaw-adapter] embedded closed sessions processed source=${source} total=${results.length} changed=${changedCount} failed=${failedCount}`,
-@@ -2444,7 +2508,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -2444,7 +2636,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
          }
        }
        if (log?.info) {
@@ -151,15 +380,52 @@ index a313474..96e7c16 100644
          const failedCount = results.filter((x) => x.status === "failed").length;
          log.info(
            `[autoskill-openclaw-adapter] embedded live checkpoints processed source=${source} total=${results.length} changed=${changedCount} failed=${failedCount}`,
-@@ -2526,6 +2590,7 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
-   function scheduleStartupRecovery() {
+@@ -2473,10 +2665,14 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     if (!payload || typeof payload !== "object") {
+       return { status: "skipped", reason: "empty_payload" };
+     }
++    const captureGrant = await consentGrant("capture");
++    if (!captureGrant) return { status: "skipped", reason: "consent_denied" };
+     if (isInternalEvent(event, ctx)) {
+       return { status: "skipped", reason: "internal_extraction_event" };
+     }
+-    const staged = appendSession(payload);
++    const currentGrant = await consentGrant("capture");
++    if (!currentGrant || currentGrant.revision !== captureGrant.revision) return { status: "skipped", reason: "consent_denied" };
++    const staged = appendSession(payload, currentGrant);
+     if (!staged.ended.length) {
+       return {
+         status: "skipped",
+@@ -2501,10 +2697,14 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     if (!payload || typeof payload !== "object") {
+       return { status: "skipped", reason: "empty_payload" };
+     }
++    const captureGrant = await consentGrant("capture");
++    if (!captureGrant) return { status: "skipped", reason: "consent_denied" };
+     if (isInternalEvent(event, ctx)) {
+       return { status: "skipped", reason: "internal_extraction_event" };
+     }
+-    const staged = appendSession(payload);
++    const currentGrant = await consentGrant("capture");
++    if (!currentGrant || currentGrant.revision !== captureGrant.revision) return { status: "skipped", reason: "consent_denied" };
++    const staged = appendSession(payload, currentGrant);
+     const modelHint = detectModelHint(event, ctx);
+     if (staged.ended.length) {
+       queueEndedSessionProcessing(staged.ended, payload.user, modelHint, "before_prompt_build", false);
+@@ -2523,9 +2723,11 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+     };
+   }
+ 
+-  function scheduleStartupRecovery() {
++  async function scheduleStartupRecovery() {
++    if (!(await consentAllows("analysis"))) return;
      if (state.recoveryStarted) return;
      state.recoveryStarted = true;
 +    pruneExpiredFinalizedArchives();
      const recoverable = listRecoverableClosedSessions();
      if (!recoverable.length) return;
      if (log?.info) {
-@@ -2536,6 +2601,35 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
+@@ -2536,6 +2738,37 @@ export function createEmbeddedProcessor(cfg, api, log, deps = {}) {
      queueEndedSessionProcessing(recoverable, "", "", "startup_recovery", false);
    }
  
@@ -180,6 +446,8 @@ index a313474..96e7c16 100644
 +          const stat = fs.statSync(abs);
 +          if (stat.mtimeMs >= cutoff) continue;
 +          fs.unlinkSync(abs);
++          const manifestPath = `${abs}.provenance.json`;
++          if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
 +          removed += 1;
 +        } catch (_) {
 +          // Retention is best-effort and never broadens beyond finalized files.
@@ -196,10 +464,31 @@ index a313474..96e7c16 100644
      const timer = setTimeout(() => {
        scheduleStartupRecovery();
 diff --git a/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs b/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs
-index 04b7593..c4c161d 100644
+index 04b75931..ed82e5b0 100644
 --- a/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs
 +++ b/AutoSkill4OpenClaw/adapter/embedded_runtime.test.mjs
-@@ -23,11 +23,12 @@ function makeSandbox() {
+@@ -4,7 +4,19 @@ import os from "node:os";
+ import path from "node:path";
+ import test from "node:test";
+ 
+-import { createEmbeddedProcessor } from "./embedded_runtime.js";
++import { createEmbeddedProcessor as createRawEmbeddedProcessor } from "./embedded_runtime.js";
++import { CONSENT_REQUIREMENTS } from "./detot-provenance.mjs";
++
++function consentGrant(stage, revision = 1) {
++  return { allowed: true, stage, revision, requirements: CONSENT_REQUIREMENTS[stage] };
++}
++
++function createEmbeddedProcessor(cfg, api, log, deps = {}) {
++  return createRawEmbeddedProcessor(cfg, api, log, {
++    async authorizeConsent(stage) { return consentGrant(stage); },
++    ...deps,
++  });
++}
+ 
+ function makeLogger() {
+   const entries = [];
+@@ -23,11 +35,12 @@ function makeSandbox() {
    const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoskill-embedded-"));
    const sessionArchiveDir = path.join(root, "sessions");
    const skillBankDir = path.join(root, "SkillBank");
@@ -213,7 +502,126 @@ index 04b7593..c4c161d 100644
  }
  
  async function waitFor(check, timeoutMs = 1500) {
-@@ -50,6 +51,7 @@ function makeConfig(paths, overrides = {}) {
+@@ -40,6 +53,118 @@ async function waitFor(check, timeoutMs = 1500) {
+   return null;
+ }
+ 
++test("embedded processor fails closed before reading or writing session data without consent callback", async () => {
++  const paths = makeSandbox();
++  const processor = createRawEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async invokeModel() { throw new Error("model must not be called"); },
++  });
++  const payload = {
++    user: "synthetic-owner", session_id: "denied-session", turn_type: "main", session_done: true,
++    messages: [{ role: "user", content: "synthetic private text" }],
++  };
++  assert.equal((await processor.stageLive(payload, {}, {})).reason, "consent_denied");
++  assert.equal((await processor.handle(payload, {}, {})).reason, "consent_denied");
++  assert.equal(fs.readdirSync(paths.sessionArchiveDir).length, 0);
++  assert.equal(fs.existsSync(path.join(paths.reviewQueueDir, "Users", "synthetic-owner")), false);
++});
++
++test("analysis denial prevents reading an authorized local archive or calling the model", async () => {
++  const paths = makeSandbox();
++  let modelCalls = 0;
++  let archiveReads = 0;
++  const originalReadFileSync = fs.readFileSync;
++  fs.readFileSync = function (target, ...args) {
++    if (String(target).startsWith(paths.sessionArchiveDir)) archiveReads += 1;
++    return originalReadFileSync.call(this, target, ...args);
++  };
++  try {
++    const processor = createRawEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++      async authorizeConsent(stage) { return stage === "capture" ? consentGrant(stage) : null; },
++      async invokeModel() { modelCalls += 1; return "{}"; },
++    });
++    const result = await processor.handle({
++      user: "synthetic-owner", session_id: "analysis-denied", turn_type: "main", session_done: true, success: true,
++      messages: [
++        { role: "user", content: "synthetic repeatable checklist" },
++        { role: "assistant", content: "completed checklist" },
++        { role: "tool", content: "synthetic verification" },
++      ],
++    }, {}, {});
++    assert.equal(result.jobs[0].reason, "consent_denied");
++  } finally {
++    fs.readFileSync = originalReadFileSync;
++  }
++  assert.equal(archiveReads, 0);
++  assert.equal(modelCalls, 0);
++  assert.ok(fs.readdirSync(path.join(paths.sessionArchiveDir, "synthetic-owner")).some((name) => name.endsWith(".jsonl")));
++  assert.equal(fs.existsSync(path.join(paths.reviewQueueDir, "Users", "synthetic-owner")), false);
++});
++
++test("analysis revocation after model response prevents saving a derived proposal", async () => {
++  const paths = makeSandbox();
++  let analysisChecks = 0;
++  let modelCalls = 0;
++  const processor = createRawEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async authorizeConsent(stage) {
++      if (stage === "capture") return consentGrant(stage);
++      analysisChecks += 1;
++      return analysisChecks <= 2 ? consentGrant(stage) : false;
++    },
++    async invokeModel() {
++      modelCalls += 1;
++      return JSON.stringify({ skills: [{ name: "Synthetic process", description: "repeatable", prompt: "verify safely", confidence: 0.9 }] });
++    },
++  });
++  const result = await processor.handle({
++    user: "synthetic-owner", session_id: "revoked-mid-job", turn_type: "main", session_done: true, success: true,
++    messages: [
++      { role: "user", content: "synthetic repeatable checklist" },
++      { role: "assistant", content: "completed checklist" },
++      { role: "tool", content: "synthetic verification" },
++    ],
++  }, {}, {});
++  assert.equal(modelCalls, 1);
++  assert.equal(result.jobs[0].reason, "consent_denied");
++  assert.equal(fs.existsSync(path.join(paths.reviewQueueDir, "Users", "synthetic-owner")), false);
++});
++
++test("stale capture grant is rejected before writing a session archive", async () => {
++  const paths = makeSandbox();
++  let captureChecks = 0;
++  const processor = createRawEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async authorizeConsent(stage) {
++      if (stage !== "capture") return null;
++      captureChecks += 1;
++      return consentGrant(stage, captureChecks === 1 ? 4 : 5);
++    },
++  });
++  const result = await processor.handle({
++    user: "synthetic-owner", session_id: "stale-capture", turn_type: "main", session_done: true,
++    messages: [{ role: "user", content: "synthetic checklist" }],
++  }, {}, {});
++  assert.equal(result.reason, "consent_denied");
++  assert.equal(fs.readdirSync(paths.sessionArchiveDir).length, 0);
++});
++
++test("analysis grant from a newer owner generation cannot process an older archive", async () => {
++  const paths = makeSandbox();
++  let modelCalls = 0;
++  const processor = createRawEmbeddedProcessor(makeConfig(paths, { reviewOnly: true }), {}, makeLogger(), {
++    async authorizeConsent(stage) { return consentGrant(stage, stage === "capture" ? 4 : 5); },
++    async invokeModel() { modelCalls += 1; return "{}"; },
++  });
++  const result = await processor.handle({
++    user: "synthetic-owner", session_id: "generation-changed", turn_type: "main", session_done: true, success: true,
++    messages: [
++      { role: "user", content: "synthetic repeatable checklist" },
++      { role: "assistant", content: "completed checklist" },
++      { role: "tool", content: "synthetic verification" },
++    ],
++  }, {}, {});
++  assert.equal(result.jobs[0].reason, "provenance_unknown_or_consent_stale");
++  assert.equal(modelCalls, 0);
++});
++
+ function makeConfig(paths, overrides = {}) {
+   const embeddedOverride = overrides.embedded || {};
+   const base = { ...overrides };
+@@ -50,6 +175,7 @@ function makeConfig(paths, overrides = {}) {
      embedded: {
        sessionArchiveDir: paths.sessionArchiveDir,
        skillBankDir: paths.skillBankDir,
@@ -221,7 +629,7 @@ index 04b7593..c4c161d 100644
        openclawSkillsDir: paths.openclawSkillsDir,
        bm25TopK: 8,
        ...embeddedOverride,
-@@ -57,6 +59,94 @@ function makeConfig(paths, overrides = {}) {
+@@ -57,6 +183,94 @@ function makeConfig(paths, overrides = {}) {
    };
  }
  
@@ -316,11 +724,70 @@ index 04b7593..c4c161d 100644
  function listSkillDirs(skillBankDir, userId = "user1") {
    const userRoot = path.join(skillBankDir, "Users", userId);
    if (!fs.existsSync(userRoot)) return [];
+@@ -566,7 +780,7 @@ test("embedded runtime processes turn-limit closures triggered during stageLive"
+   assert.equal(dirs.length, 1);
+ });
+ 
+-test("embedded runtime recovers previously closed session files on startup", async () => {
++test("embedded runtime quarantines legacy closed session files without a provenance manifest", async () => {
+   const paths = makeSandbox();
+   const closedDir = path.join(paths.sessionArchiveDir, "user1");
+   fs.mkdirSync(closedDir, { recursive: true });
+@@ -591,23 +805,24 @@ test("embedded runtime recovers previously closed session files on startup", asy
+   );
+ 
+   const logger = makeLogger();
+-  createEmbeddedProcessor(makeConfig(paths), {}, logger, {
+-    invokeModel: makeInvokeModelForAdd(),
+-  });
+-
+-  const dirs = await waitFor(() => {
+-    const entries = listSkillDirs(paths.skillBankDir, "user1");
+-    return entries.length ? entries : null;
+-  });
+-  assert.ok(dirs);
+-  assert.equal(dirs.length, 1);
+-  assert(
+-    logger.entries.some(
+-      (entry) =>
+-        entry.level === "info" &&
+-        /embedded startup recovery discovered closed_sessions=1/.test(String(entry.message || "")),
+-    ),
+-  );
++  let modelCalls = 0;
++  let archiveContentReads = 0;
++  const originalReadFileSync = fs.readFileSync;
++  fs.readFileSync = function (target, ...args) {
++    if (String(target).endsWith(".jsonl")) archiveContentReads += 1;
++    return originalReadFileSync.call(this, target, ...args);
++  };
++  try {
++    createEmbeddedProcessor(makeConfig(paths), {}, logger, {
++      async invokeModel() { modelCalls += 1; return makeInvokeModelForAdd()(); },
++    });
++    await new Promise((resolve) => setTimeout(resolve, 40));
++  } finally {
++    fs.readFileSync = originalReadFileSync;
++  }
++  assert.equal(modelCalls, 0);
++  assert.equal(archiveContentReads, 0);
++  assert.deepEqual(listSkillDirs(paths.skillBankDir, "user1"), []);
+ });
+ 
+ test("embedded runtime reads shared prompt pack templates for extraction and maintenance", async () => {
 diff --git a/AutoSkill4OpenClaw/adapter/index.js b/AutoSkill4OpenClaw/adapter/index.js
-index 478b036..32195e4 100644
+index 478b036e..249f726c 100644
 --- a/AutoSkill4OpenClaw/adapter/index.js
 +++ b/AutoSkill4OpenClaw/adapter/index.js
-@@ -19,6 +19,7 @@ const DEFAULTS = {
+@@ -2,6 +2,7 @@ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+ import { createEmbeddedProcessor } from "./embedded_runtime.js";
++import { normalizeConsentGrant } from "./detot-provenance.mjs";
+ 
+ const PLUGIN_ID = "autoskill-openclaw-adapter";
+ const BEFORE_PROMPT_BUILD_HOOK_NAMES = ["before_prompt_build"];
+@@ -19,6 +20,7 @@ const DEFAULTS = {
    extractOnAgentEnd: true,
    successOnly: true,
    includeUserFeedback: true,
@@ -328,7 +795,7 @@ index 478b036..32195e4 100644
    timeoutMs: 5000,
    retries: 1,
    logPayload: false,
-@@ -33,8 +34,10 @@ const DEFAULTS = {
+@@ -33,8 +35,10 @@ const DEFAULTS = {
    embedded: {
      sessionArchiveDir: "",
      sessionMaxTurns: 20,
@@ -339,7 +806,7 @@ index 478b036..32195e4 100644
      openclawSkillsDir: "",
      promptPackPath: "",
      bm25TopK: 8,
-@@ -716,6 +719,10 @@ function normalizeConfig(raw) {
+@@ -716,6 +720,10 @@ function normalizeConfig(raw) {
      rawEmbeddedCfg.modelModes ??
      env.AUTOSKILL_OPENCLAW_EMBEDDED_MODEL_MODES ??
      DEFAULTS.embedded.modelInvocation.modes;
@@ -350,7 +817,7 @@ index 478b036..32195e4 100644
    cfg.embedded = {
      sessionArchiveDir: resolvePathInput(
        rawEmbeddedCfg.sessionArchiveDir || env.AUTOSKILL_OPENCLAW_EMBEDDED_SESSION_DIR,
-@@ -732,21 +739,27 @@ function normalizeConfig(raw) {
+@@ -732,21 +740,27 @@ function normalizeConfig(raw) {
          ) || DEFAULTS.embedded.sessionMaxTurns,
        ),
      ),
@@ -383,7 +850,7 @@ index 478b036..32195e4 100644
      openclawSkillsDir: resolvePathInput(
        rawEmbeddedCfg.openclawSkillsDir || env.AUTOSKILL_OPENCLAW_SKILLS_DIR || env.OPENCLAW_SKILLS_DIR,
        defaultOpenclawSkillsDir,
-@@ -825,6 +838,7 @@ function normalizeConfig(raw) {
+@@ -825,6 +839,7 @@ function normalizeConfig(raw) {
      DEFAULTS.extractOnAgentEnd,
    );
    cfg.successOnly = asBool(cfg.successOnly, DEFAULTS.successOnly);
@@ -391,11 +858,203 @@ index 478b036..32195e4 100644
    cfg.includeUserFeedback = asBool(cfg.includeUserFeedback, DEFAULTS.includeUserFeedback);
    cfg.logPayload = asBool(cfg.logPayload, DEFAULTS.logPayload);
    return cfg;
+@@ -1348,10 +1363,20 @@ function buildInjectionResult(cfg, text) {
+   return { appendSystemContext: content };
+ }
+ 
++async function consentAllows(authorizeConsent, stage) {
++  if (typeof authorizeConsent !== "function") return false;
++  try {
++    return normalizeConsentGrant(await authorizeConsent(stage), stage) !== null;
++  } catch (_) {
++    return false;
++  }
++}
++
+ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+   const requestFn = typeof deps.postJson === "function" ? deps.postJson : postJson;
+   const onRetrieval = typeof deps.onRetrieval === "function" ? deps.onRetrieval : null;
+   const embeddedProcessor = deps.embeddedProcessor;
++  const authorizeConsent = deps.authorizeConsent;
+ 
+   const stageEmbeddedLiveSnapshot = async (event, ctx) => {
+     if (cfg.runtimeMode !== "embedded") return;
+@@ -1369,6 +1394,10 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+ 
+   return async (event, ctx) => {
+     if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build invoked`);
++    if (!(await consentAllows(authorizeConsent, "capture"))) {
++      if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build skipped reason=consent_denied`);
++      return;
++    }
+     await stageEmbeddedLiveSnapshot(event, ctx);
+     if (!cfg.skillRetrieval.enabled) {
+       if (log?.info) {
+@@ -1388,6 +1417,10 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+       if (log?.info) log.info(`[${PLUGIN_ID}] retrieval skipped no prompt or messages`);
+       return;
+     }
++    if (!(await consentAllows(authorizeConsent, "analysis"))) {
++      if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build skipped reason=analysis_consent_denied`);
++      return;
++    }
+     try {
+       const out = await requestFn(
+         cfg,
+@@ -1505,8 +1538,13 @@ function createAgentEndHandler(cfg, log, deps = {}) {
+   const embeddedProcessor = deps.embeddedProcessor;
+   const consumeRetrieval = typeof deps.consumeRetrieval === "function" ? deps.consumeRetrieval : null;
+   const clearRetrieval = typeof deps.clearRetrieval === "function" ? deps.clearRetrieval : null;
++  const authorizeConsent = deps.authorizeConsent;
+   return async (event, ctx) => {
+     if (!cfg.extractOnAgentEnd) return;
++    if (!(await consentAllows(authorizeConsent, "capture"))) {
++      if (log?.info) log.info(`[${PLUGIN_ID}] agent_end skipped reason=consent_denied`);
++      return;
++    }
+     const status = resolveSuccess(event);
+     if (cfg.successOnly && status.hasSignal && !status.value) return;
+     const sessionIdHint = resolveSessionId(event, ctx, pickMessages(event, ctx));
+@@ -1554,6 +1592,10 @@ function createAgentEndHandler(cfg, log, deps = {}) {
+       return;
+     }
+     try {
++      if (!(await consentAllows(authorizeConsent, "analysis"))) {
++        if (log?.info) log.info(`[${PLUGIN_ID}] agent_end skipped reason=analysis_consent_denied`);
++        return;
++      }
+       await requestFn(cfg, "/autoskill/openclaw/hooks/agent_end", payload, log);
+     } catch (_) {
+       return;
+@@ -1627,7 +1669,7 @@ export default {
+         log.info(`[${PLUGIN_ID}] hook first invocation name=message_received`);
+       }
+       if (log?.info) {
+-        const sessionId = resolveSessionId(event, ctx, pickMessages(event, ctx));
++        const sessionId = resolveSessionId(event, ctx, []);
+         const channel = asString(event?.channel || event?.provider || ctx?.channel || ctx?.provider).trim();
+         log.info(
+           `[${PLUGIN_ID}] message_received invoked session=${sessionId || "<missing>"} channel=${channel || "<empty>"}`,
 diff --git a/AutoSkill4OpenClaw/adapter/index.test.mjs b/AutoSkill4OpenClaw/adapter/index.test.mjs
-index 5c78bff..51a94e8 100644
+index 5c78bff3..e9e4b7e2 100644
 --- a/AutoSkill4OpenClaw/adapter/index.test.mjs
 +++ b/AutoSkill4OpenClaw/adapter/index.test.mjs
-@@ -700,7 +700,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
+@@ -5,10 +5,23 @@ import test from "node:test";
+ import plugin, {
+   buildEndPayload,
+   createSessionRetrievalCache,
+-  createAgentEndHandler,
+-  createBeforePromptBuildHandler,
++  createAgentEndHandler as createRawAgentEndHandler,
++  createBeforePromptBuildHandler as createRawBeforePromptBuildHandler,
+   normalizeConfig,
+ } from "./index.js";
++import { CONSENT_REQUIREMENTS } from "./detot-provenance.mjs";
++
++function consentGrant(stage, revision = 1) {
++  return { allowed: true, stage, revision, requirements: CONSENT_REQUIREMENTS[stage] };
++}
++
++function createAgentEndHandler(cfg, log, deps = {}) {
++  return createRawAgentEndHandler(cfg, log, { async authorizeConsent(stage) { return consentGrant(stage); }, ...deps });
++}
++
++function createBeforePromptBuildHandler(cfg, log, deps = {}) {
++  return createRawBeforePromptBuildHandler(cfg, log, { async authorizeConsent(stage) { return consentGrant(stage); }, ...deps });
++}
+ 
+ function makeLogger() {
+   const entries = [];
+@@ -99,6 +112,58 @@ test("before_prompt_build returns no-op when skill retrieval is disabled", async
+   assert(logger.entries.some((entry) => entry.message.includes("retrieval disabled")));
+ });
+ 
++test("conversation hooks fail closed before reading messages when consent callback is absent or denies", async () => {
++  for (const authorizeConsent of [undefined, async () => false, async () => { throw new Error("offline"); }]) {
++    let messageReads = 0;
++    const event = Object.defineProperty({}, "messages", {
++      get() { messageReads += 1; return [{ role: "user", content: "synthetic private text" }]; },
++    });
++    let staged = 0;
++    let processed = 0;
++    const deps = {
++      embeddedProcessor: {
++        async stageLive() { staged += 1; },
++        async handle() { processed += 1; },
++      },
++    };
++    if (authorizeConsent) deps.authorizeConsent = authorizeConsent;
++    const before = createRawBeforePromptBuildHandler(
++      makeConfig({ runtimeMode: "embedded" }), makeLogger(), deps);
++    await before(event, {});
++    const end = createRawAgentEndHandler(
++      makeConfig({ extractOnAgentEnd: true, runtimeMode: "embedded" }), makeLogger(), deps);
++    await end(event, {});
++    assert.equal(messageReads, 0);
++    assert.equal(staged, 0);
++    assert.equal(processed, 0);
++  }
++});
++
++test("conversation hooks only read messages after explicit capture consent", async () => {
++  let messageReads = 0;
++  const event = Object.defineProperty({}, "messages", {
++    get() { messageReads += 1; return [{ role: "user", content: "synthetic text" }]; },
++  });
++  let stages = 0;
++  let processed = 0;
++  const deps = {
++    async authorizeConsent(stage) { assert.equal(stage, "capture"); return consentGrant(stage); },
++    embeddedProcessor: {
++      async stageLive() { stages += 1; },
++      async handle() { processed += 1; },
++    },
++  };
++  const before = createRawBeforePromptBuildHandler(
++    makeConfig({ runtimeMode: "embedded" }), makeLogger(), deps);
++  await before(event, {});
++  const end = createRawAgentEndHandler(
++    makeConfig({ extractOnAgentEnd: true, runtimeMode: "embedded" }), makeLogger(), deps);
++  await end(event, {});
++  assert.ok(messageReads > 0);
++  assert.equal(stages, 1);
++  assert.equal(processed, 1);
++});
++
+ test("before_prompt_build skips external retrieval in embedded mirror mode", async () => {
+   await withEnv(
+     {
+@@ -574,14 +639,13 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
+   assert.equal(typeof before, "function");
+   assert.equal(typeof end, "function");
+ 
+-  await received(
+-    {
+-      sessionId: "sess-msg",
+-      channel: "feishu",
+-      messages: [{ role: "user", content: "hello" }],
+-    },
+-    {},
+-  );
++  let messageReads = 0;
++  const receivedEvent = Object.defineProperties({}, {
++    sessionId: { value: "sess-msg" },
++    channel: { value: "feishu" },
++    messages: { get() { messageReads += 1; return [{ role: "user", content: "synthetic private text" }]; } },
++  });
++  await received(receivedEvent, {});
+   await before(
+     { messages: [{ role: "user", content: "hello" }] },
+     {},
+@@ -590,6 +654,7 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
+     { messages: [{ role: "user", content: "hello" }] },
+     {},
+   );
++  assert.equal(messageReads, 0, "metadata-only hook must not inspect conversation content");
+ 
+   assert(
+     logger.entries.some((entry) => entry.message.includes("hook first invocation name=message_received")),
+@@ -700,7 +765,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
          extractOnAgentEnd: true,
        });
        assert.equal(cfg.runtimeMode, "embedded");
@@ -404,7 +1063,7 @@ index 5c78bff..51a94e8 100644
        assert.equal(cfg.embedded.sessionMaxTurns, 20);
        assert.equal(cfg.embedded.bm25TopK, 8);
        assert.deepEqual(cfg.embedded.modelInvocation.modes, [
-@@ -728,6 +728,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
+@@ -728,6 +793,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
    );
  });
  
@@ -439,7 +1098,7 @@ index 5c78bff..51a94e8 100644
  test("normalizeConfig supports embedded session max turns override", async () => {
    await withEnv(
      {
-@@ -784,7 +812,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
+@@ -784,7 +877,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
        ]);
        assert.equal(cfg.embedded.modelInvocation.timeoutMs, 35000);
        assert.equal(cfg.embedded.modelInvocation.retries, 2);
@@ -448,7 +1107,7 @@ index 5c78bff..51a94e8 100644
        assert.equal(cfg.embedded.modelInvocation.manualBaseUrl, "http://127.0.0.1:8999/v1");
        assert.equal(cfg.embedded.modelInvocation.manualApiKey, "k-test");
        assert.equal(cfg.embedded.modelInvocation.manualModel, "m-test");
-@@ -825,7 +853,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
+@@ -825,7 +918,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
          extractOnAgentEnd: true,
        });
        assert.equal(cfg.runtimeMode, "embedded");
@@ -458,7 +1117,7 @@ index 5c78bff..51a94e8 100644
    );
  });
 diff --git a/AutoSkill4OpenClaw/adapter/openclaw.plugin.json b/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
-index 44bdf9d..03bcf5c 100644
+index 44bdf9d5..03bcf5c2 100644
 --- a/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
 +++ b/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
 @@ -4,6 +4,9 @@

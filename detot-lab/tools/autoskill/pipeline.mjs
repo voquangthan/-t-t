@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeSkillCandidate } from "./privacy.mjs";
+import { assertArtifactUsable } from "./governance.mjs";
+import { stableArtifactId } from "./provenance.mjs";
 
 const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/u;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -51,6 +53,20 @@ function appendAudit(root, ownerId, event) {
   const auditPath = ensureInside(root, path.join(root, "state", "autoskill", "audit", `${ownerId}.jsonl`));
   fs.mkdirSync(path.dirname(auditPath), { recursive: true });
   fs.appendFileSync(auditPath, `${JSON.stringify({ at: new Date().toISOString(), owner_id: ownerId, ...event })}\n`, "utf8");
+}
+
+function assertArtifactUsableForPipeline(root, ownerId, artifact, operation) {
+  try { return assertArtifactUsable(artifact); }
+  catch (error) {
+    appendAudit(root, ownerId, {
+      action: "artifact_policy_denied",
+      artifact_id: String(artifact?.provenance?.artifact_id || artifact?.artifact_id || ""),
+      proposal_id: String(artifact?.proposal_id || artifact?.source_proposal_id || ""),
+      operation,
+      reason: String(error?.message || "artifact_not_usable").slice(0, 120),
+    });
+    throw error;
+  }
 }
 
 function proposalPath(root, ownerId, proposalId) {
@@ -177,6 +193,7 @@ export function evaluateProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot
   const filePath = proposalPath(stagingRoot, owner, id);
   const proposal = readJson(filePath);
   if (proposal.owner_id !== owner || proposal.proposal_id !== id) throw new Error("proposal_owner_or_id_mismatch");
+  assertArtifactUsableForPipeline(stagingRoot, owner, proposal, "evaluate_proposal");
   if (!["pending_review", "evaluated"].includes(proposal.status)) throw new Error("proposal_not_evaluable");
   const sanitized = sanitizeSkillCandidate(proposal.candidate);
   if (!sanitized.safe) throw new Error(`unsafe_candidate:${sanitized.reasons.join(",")}`);
@@ -230,6 +247,7 @@ export function approveProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-
   const filePath = proposalPath(stagingRoot, owner, id);
   const proposal = readJson(filePath);
   if (proposal.owner_id !== owner || proposal.proposal_id !== id) throw new Error("proposal_owner_or_id_mismatch");
+  assertArtifactUsableForPipeline(stagingRoot, owner, proposal, "approve_proposal");
   if (proposal.status !== "evaluated" || proposal.evaluation?.outcome !== "pass") throw new Error("passing_replay_required");
   const safe = sanitizeSkillCandidate(proposal.candidate);
   if (!safe.safe || hash(safe.candidate) !== proposal.evaluation.candidate_hash) throw new Error("candidate_changed_after_replay");
@@ -243,6 +261,8 @@ export function approveProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-
   const version = nextVersion(currentVersion);
   assertMirrorWritable(stagingRoot, owner, skillId);
   const markdown = buildSkillMarkdown(safe.candidate, skillId, version);
+  const versionArtifactId = stableArtifactId("skill_version", owner, skillId, version);
+  const sourceProvenance = proposal.provenance;
   const snapshot = {
     owner_id: owner,
     skill_id: skillId,
@@ -251,6 +271,22 @@ export function approveProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-
     skill_markdown: markdown,
     source: proposal.source || "autoskill-openclaw-adapter",
     source_proposal_id: id,
+    provenance: {
+      ...sourceProvenance,
+      artifact_id: versionArtifactId,
+      artifact_type: "skill_version",
+      dependency_ids: [...new Set([...(sourceProvenance.dependency_ids || []), sourceProvenance.artifact_id].filter(Boolean))],
+      validation_status: "replay_passed",
+      activation_status: "active",
+    },
+    content_segments: (proposal.content_segments || []).map((segment) => ({
+      ...segment,
+      segment_id: stableArtifactId("segment", versionArtifactId, segment.segment_id || ""),
+      artifact_id: versionArtifactId,
+      dependency_ids: [...new Set([...(segment.dependency_ids || []), sourceProvenance.artifact_id].filter(Boolean))],
+      validation_status: "replay_passed",
+      activation_status: "active",
+    })),
     evidence: proposal.evidence || {},
     evaluation: proposal.evaluation,
     activated_at: new Date().toISOString(),
@@ -293,6 +329,7 @@ export function rollbackSkill({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
   const targetVersion = requireId(version, "version");
   const target = readJson(versionPath(stagingRoot, owner, skill, targetVersion));
   if (target.owner_id !== owner || target.skill_id !== skill || target.version !== targetVersion) throw new Error("rollback_target_mismatch");
+  assertArtifactUsableForPipeline(stagingRoot, owner, target, "rollback_skill");
   assertMirrorWritable(stagingRoot, owner, skill);
   const at = new Date().toISOString();
   writeJsonAtomic(activePath(stagingRoot, owner, skill), { owner_id: owner, skill_id: skill, version: targetVersion, skill_hash: target.skill_hash, updated_at: at, rollback: true });

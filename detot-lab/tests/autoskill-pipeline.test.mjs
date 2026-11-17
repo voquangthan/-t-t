@@ -23,6 +23,19 @@ function addProposal(stage, { proposalId, skillId, prompt, name = skillId }) {
     created_at: new Date().toISOString(),
     source: "autoskill-openclaw-adapter",
     evidence: { session_id: `session-${proposalId}`, turn_count: 3, successful_main_turn: true, source_hash: "evidence-hash" },
+    provenance: {
+      artifact_id: `proposal:${proposalId}`,
+      artifact_type: "proposal",
+      source_ids: [`conversation:${proposalId}`],
+      dependency_ids: [`conversation:${proposalId}`],
+      provenance_type: "conversation",
+      consent_scope: { revision: 1, requirements: [{ source: "chat_history", purpose: "skill_learning", destination: "local_only" }, { source: "chat_history", purpose: "skill_learning", destination: "DeepSeek" }] },
+      consent_revision: 1,
+      validation_status: "pending_review",
+      activation_status: "inactive",
+      retention_state: "retained",
+    },
+    content_segments: [],
     candidate: { skill_id: skillId, name, description: "Validated file workflow", prompt, files: {} },
     history: [{ action: "proposed", version: "0.1.0" }],
   };
@@ -138,4 +151,18 @@ test("rejection is auditable without exposing candidate text", () => {
   const audit = fs.readFileSync(path.join(stage.root, "state", "autoskill", "audit", `${stage.owner}.jsonl`), "utf8");
   assert.match(audit, /proposal_rejected/);
   assert.doesNotMatch(audit, /Sensitive text never belongs/);
+});
+
+test("legacy proposals without lineage remain quarantined and cannot be evaluated or activated", () => {
+  const stage = makeStage();
+  addProposal(stage, { proposalId: "proposal-legacy", skillId: "safe-file-workflow", prompt: "A legacy candidate with no source trail." });
+  const proposalPath = path.join(stage.root, "state", "autoskill", "proposals", "Users", stage.owner, "proposal-legacy.json");
+  const proposal = JSON.parse(fs.readFileSync(proposalPath, "utf8"));
+  delete proposal.provenance;
+  fs.writeFileSync(proposalPath, JSON.stringify(proposal));
+  assert.throws(() => evaluateProposal({ root: stage.root, ownerId: stage.owner, proposalId: "proposal-legacy", report: replayReport(stage, "proposal-legacy", [1, 1, 1], [0, 0, 0]) }), /artifact_not_usable:provenance_missing_or_unknown/);
+  assert.equal(fs.existsSync(path.join(stage.root, "state", "autoskill", "active", stage.owner, "safe-file-workflow.json")), false);
+  const audit = fs.readFileSync(path.join(stage.root, "state", "autoskill", "audit", `${stage.owner}.jsonl`), "utf8");
+  assert.match(audit, /artifact_policy_denied/);
+  assert.doesNotMatch(audit, /A legacy candidate with no source trail/);
 });
