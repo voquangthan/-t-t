@@ -136,3 +136,8 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 
 - Revocation tombstone reads now validate every artifact ID, duplicate entries, owner-scoped normalized paths, and revocation revision records before answering whether an artifact/path is revoked. Malformed metadata throws and blocks the pipeline instead of being interpreted as an empty tombstone set.
 - Added synthetic tests for malformed IDs and out-of-scope paths. AutoSkill suite: **39/39 PASS**; syntax and diff checks PASS. No existing `.local` state was read or modified.
+
+### A–F acceptance audit — 17/11/2026
+
+- Added a phase-by-phase evidence matrix to `AUTOSKILL_GOVERNANCE.md`. All six phases remain marked PARTIAL: current controls are staging/synthetic, not Backend/Gateway end-to-end.
+- Explicit acceptance result: **NOT PASS** until trusted owner-bound consent enforcement and full-store revocation/restore barriers are integrated and runtime-tested. Adapter regression remains unavailable because the pinned source checkout is absent.
