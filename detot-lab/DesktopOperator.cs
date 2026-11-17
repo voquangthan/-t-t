@@ -12,6 +12,11 @@ public static class DesktopOperator
         bool? HasTrackedChanges, string? Message);
 
     public sealed record ActionResult(bool Succeeded, string Message, bool? WindowVerified = null);
+    public sealed record ChatActionResponse(string Reply, bool ToolUsed, string ComputerUseAction,
+        bool? WindowVerified);
+
+    public static ChatActionResponse ToChatActionResponse(ActionResult result, string action) =>
+        new(result.Message, true, action, result.WindowVerified);
 
     public static bool IsAvailable(bool isWindows, bool hasPublicOrigin, IPAddress? remoteAddress) =>
         isWindows && !hasPublicOrigin && remoteAddress is not null && IPAddress.IsLoopback(remoteAddress);

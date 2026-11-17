@@ -1486,7 +1486,7 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
             ? DesktopOperator.OpenKnownApplication("vscode")
             : DesktopOperator.OpenWorkspace(repositoryRoot);
         return opened.Succeeded
-            ? Results.Ok(new { reply = opened.Message, toolUsed = true, computerUseAction = action })
+            ? Results.Ok(DesktopOperator.ToChatActionResponse(opened, action))
             : Results.Problem(opened.Message, statusCode: 503);
     }
 

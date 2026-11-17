@@ -15,6 +15,19 @@ Check(!DesktopOperator.IsAvailable(true, true, IPAddress.Loopback), "public-orig
 Check(!DesktopOperator.IsAvailable(true, false, IPAddress.Parse("192.0.2.2")), "non-loopback caller is denied");
 Check(!DesktopOperator.IsAvailable(false, false, IPAddress.Loopback), "non-Windows host is denied");
 Check(!DesktopOperator.OpenKnownApplication("arbitrary" ).Succeeded, "unlisted applications are denied");
+var verifiedOpenResponse = DesktopOperator.ToChatActionResponse(
+    new DesktopOperator.ActionResult(true, "Opened and verified.", true), "open-vscode");
+Check(verifiedOpenResponse.WindowVerified == true && verifiedOpenResponse.ToolUsed &&
+      verifiedOpenResponse.ComputerUseAction == "open-vscode",
+    "chat response preserves verified application-window status");
+var unverifiedOpenResponse = DesktopOperator.ToChatActionResponse(
+    new DesktopOperator.ActionResult(true, "Launch accepted; window not verified.", false), "open-vscode");
+Check(unverifiedOpenResponse.WindowVerified == false,
+    "chat response distinguishes an accepted launch from an unverified window");
+var nonWindowActionResponse = DesktopOperator.ToChatActionResponse(
+    new DesktopOperator.ActionResult(true, "Read complete."), "read-workspace");
+Check(nonWindowActionResponse.WindowVerified is null,
+    "chat response preserves unavailable window-verification status for other actions");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
