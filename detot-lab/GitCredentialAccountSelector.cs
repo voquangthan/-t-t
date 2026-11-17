@@ -31,6 +31,10 @@ public static class GitCredentialAccountSelector
         };
     }
 
+    public static bool CanUseChooserSnapshot(bool enumerationComplete, int totalCredentialManagerWindows,
+        int matchingAccountPickers) => enumerationComplete && totalCredentialManagerWindows == 1 &&
+        matchingAccountPickers == 1;
+
     public static DesktopOperator.ActionResult SelectAccount(string? target)
     {
 #if !WINDOWS
@@ -46,6 +50,8 @@ public static class GitCredentialAccountSelector
             var desktop = automation.GetDesktop();
             var dialogs = new List<(FlaUI.Core.AutomationElements.AutomationElement Window,
                 FlaUI.Core.AutomationElements.AutomationElement[] Items, string[] Logins)>();
+            var totalCredentialManagerWindows = 0;
+            var enumerationComplete = true;
 
             foreach (var process in System.Diagnostics.Process.GetProcessesByName("git-credential-manager"))
             {
@@ -55,6 +61,7 @@ public static class GitCredentialAccountSelector
                     {
                         var windows = desktop.FindAllChildren(cf =>
                             cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
+                        totalCredentialManagerWindows += windows.Length;
                         foreach (var window in windows)
                         {
                             if (!string.Equals(window.Properties.Name.Value, "Select an account", StringComparison.Ordinal))
@@ -73,18 +80,18 @@ public static class GitCredentialAccountSelector
                                 items.Add(row);
                                 logins.Add(login);
                             }
-                            if (items.Count > 0) dialogs.Add((window, items.ToArray(), logins.ToArray()));
+                            dialogs.Add((window, items.ToArray(), logins.ToArray()));
                         }
                     }
                     catch (Exception)
                     {
-                        // Ignore a GCM process that exits while its chooser is being enumerated.
+                        enumerationComplete = false;
                     }
                 }
             }
 
-            if (dialogs.Count == 0) return new(false, "Không thấy hộp thoại chọn tài khoản GitHub đang mở.");
-            if (dialogs.Count != 1) return new(false, "Có nhiều hộp thoại chọn tài khoản; mình không chọn hộp thoại nào.");
+            if (!CanUseChooserSnapshot(enumerationComplete, totalCredentialManagerWindows, dialogs.Count))
+                return new(false, "Không thể xác minh một hộp thoại chọn tài khoản GCM duy nhất; mình không thao tác.");
 
             var dialog = dialogs[0];
             var decision = ResolveTarget(dialog.Logins, target);

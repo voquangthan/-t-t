@@ -71,6 +71,14 @@ Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:voquangth
     "account-selection targets cannot carry extra commands");
 Check(!ComputerUsePolicy.CanWrite("select-github-account:voquangthan"),
     "GitHub account selection does not grant write or code-execution permission");
+Check(GitCredentialAccountSelector.CanUseChooserSnapshot(true, 1, 1),
+    "account selection requires a complete snapshot with exactly one GCM picker");
+Check(!GitCredentialAccountSelector.CanUseChooserSnapshot(true, 4, 1),
+    "multiple Git Credential Manager windows fail closed even if one is a matching picker");
+Check(!GitCredentialAccountSelector.CanUseChooserSnapshot(false, 1, 1),
+    "partial GCM window enumeration cannot authorize account selection");
+Check(!GitCredentialAccountSelector.CanUseChooserSnapshot(true, 1, 0),
+    "a non-picker GCM dialog cannot authorize account selection");
 var exactAccountRequest = ComputerUseChatIntent.DetectDirectRequest("Chọn tài khoản GitHub voquangthan");
 Check(exactAccountRequest == "select-github-account:voquangthan" && ComputerUsePolicy.CanSelectGitHubAccount(exactAccountRequest),
     "a direct request for a named GitHub account is recognized and authorized separately");
