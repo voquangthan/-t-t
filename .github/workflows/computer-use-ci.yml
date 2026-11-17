@@ -41,7 +41,8 @@ jobs:
         run: dotnet run --project detot-lab/tests/desktop-operator/DesktopOperator.Tests.csproj -p:NuGetAudit=false
 
       - name: Run Cloud Storage regression
-        run: dotnet run --project detot-lab/tests/cloud-storage/CloudStorageChecks.csproj -p:NuGetAudit=false
+        working-directory: detot-lab
+        run: dotnet run --project tests/cloud-storage/CloudStorageChecks.csproj -p:NuGetAudit=false
 
       - name: Run GitHub reader tests
         run: node --test detot-lab/tests/desktop-operator/github-checks.test.mjs
