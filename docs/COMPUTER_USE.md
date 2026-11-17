@@ -27,6 +27,8 @@ From `detot-lab`, run:
 ```powershell
 dotnet build Detot.Lab.csproj
 dotnet run --project tests/desktop-operator/DesktopOperator.Tests.csproj
+node --test tests/desktop-operator/github-checks.test.mjs
+dotnet run --project tests/cloud-storage/CloudStorageChecks.csproj
 ```
 
-The optional `--github-read-smoke` test calls the public GitHub API for `voquangthan/-t-t`; it reads PR title/state/SHA and check-run summaries only.
+The optional `--github-read-smoke` test calls the public GitHub API for `voquangthan/-t-t`; it reads PR title/state/SHA and check-run summaries only. The Cloud Storage regression locates Node from `PATH`; set `DETOT_TEST_NODE` only when the test runner needs an explicit executable path.

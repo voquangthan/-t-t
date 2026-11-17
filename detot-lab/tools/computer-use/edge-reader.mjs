@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import readline from "node:readline";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { summarizeCheckRuns } from "./github-checks.mjs";
 
 const require = createRequire(import.meta.url);
 const moduleRoot = process.env.DETOT_PLAYWRIGHT_CORE;
@@ -38,26 +39,32 @@ async function requestJson(url) {
     timeout: 10000,
     headers: { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
   });
-  if (!response.ok()) return { error: `github_http_${response.status()}` };
+  if (!response.ok()) return {
+    error: `github_http_${response.status()}`,
+    rateLimited: response.status() === 403 && response.headers().get("x-ratelimit-remaining") === "0",
+  };
   return response.json();
 }
 
-async function processRequest(request) {
+async function processRequest(request, phase) {
   if (request?.action === "shutdown") {
     await context?.close();
     context = undefined;
     return { stopped: true };
   }
   if (!allowedActions.has(request?.action)) return { error: "action_not_allowed" };
+  phase.current = "edge_launch";
   await ensureEdge();
 
   if (request.action === "open-edge") {
     if (page.url() === "about:blank") return { opened: true, message: "Edge đã mở ở profile riêng của Đệ Tốt." };
+    phase.current = "browser_navigation";
     await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 10000 });
     return { opened: true, message: "Edge đã mở ở profile riêng của Đệ Tốt." };
   }
 
   if (request.action === "read-account") {
+    phase.current = "browser_navigation";
     await page.goto("https://github.com/settings/profile", { waitUntil: "domcontentloaded", timeout: 15000 });
     const login = await page.locator('meta[name="user-login"]').getAttribute("content").catch(() => null);
     return login ? { authenticated: true, login } : { authenticated: false, login: null, needsUserLogin: true };
@@ -67,17 +74,18 @@ async function processRequest(request) {
     return { error: "repository_not_allowed" };
   const apiRoot = `https://api.github.com/repos/${request.repository}`;
   if (request.action === "open-github") {
+    phase.current = "browser_navigation";
     await page.goto(`https://github.com/${request.repository}/pulls`, { waitUntil: "domcontentloaded", timeout: 15000 });
     return { opened: true, message: "Đã mở danh sách Pull Request trong Edge." };
   }
 
+  phase.current = "github_api";
   const pulls = await requestJson(`${apiRoot}/pulls?state=all&per_page=3`);
   if (!Array.isArray(pulls)) return { error: pulls.error ?? "pull_request_unavailable" };
   const results = [];
   for (const pull of pulls) {
     if (!Number.isInteger(pull.number) || typeof pull.title !== "string" || typeof pull.head?.sha !== "string") continue;
     const checks = await requestJson(`${apiRoot}/commits/${encodeURIComponent(pull.head.sha)}/check-runs?per_page=30`);
-    const runs = Array.isArray(checks.check_runs) ? checks.check_runs : [];
     results.push({
       number: pull.number,
       title: pull.title.slice(0, 180),
@@ -86,13 +94,10 @@ async function processRequest(request) {
       headSha: pull.head.sha,
       headBranch: typeof pull.head.ref === "string" ? pull.head.ref.slice(0, 120) : null,
       baseBranch: typeof pull.base?.ref === "string" ? pull.base.ref.slice(0, 120) : null,
-      checks: runs.slice(0, 30).map(run => ({
-        name: typeof run.name === "string" ? run.name.slice(0, 120) : "check",
-        status: run.status,
-        conclusion: run.conclusion,
-      })),
+      ...summarizeCheckRuns(checks),
     });
   }
+  phase.current = "browser_navigation";
   await page.goto(`https://github.com/${request.repository}/pulls`, { waitUntil: "domcontentloaded", timeout: 15000 });
   return { repository: request.repository, pullRequests: results };
 }
@@ -100,14 +105,19 @@ async function processRequest(request) {
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of input) {
   let id = null;
+  const phase = { current: "request_parse" };
   try {
     const request = JSON.parse(line);
     id = request.id ?? null;
-    const result = await processRequest(request);
+    const result = await processRequest(request, phase);
     process.stdout.write(JSON.stringify({ id, result }) + "\n");
     if (request.action === "shutdown") break;
   } catch (error) {
-    const code = error?.name === "TimeoutError" ? "browser_timeout" : "browser_operation_failed";
+    const code = error?.name === "TimeoutError" ? "browser_timeout"
+      : phase.current === "edge_launch" ? "edge_launch_failed"
+      : phase.current === "browser_navigation" ? "browser_navigation_failed"
+      : phase.current === "github_api" ? "github_api_unavailable"
+      : "browser_operation_failed";
     process.stdout.write(JSON.stringify({ id, result: { error: code } }) + "\n");
   }
 }

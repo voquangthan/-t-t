@@ -276,7 +276,7 @@ static async Task BackupIsEncrypted()
 
 static async Task RestoreIsVerified()
 {
-    var node = Environment.GetEnvironmentVariable("DETOT_TEST_NODE") ?? "C:\\Program Files\\nodejs\\node.exe";
+    var node = Environment.GetEnvironmentVariable("DETOT_TEST_NODE") ?? FindNodeOnPath() ?? "C:\\Program Files\\nodejs\\node.exe";
     if (!File.Exists(node)) throw new InvalidOperationException("Node runtime required for restore-preflight integration check.");
     var root = Path.Combine(Path.GetTempPath(), "detot-restore-tests-" + Guid.NewGuid().ToString("N"));
     var source = Path.Combine(root, "memory");
@@ -312,6 +312,18 @@ static async Task RestoreIsVerified()
         await Throws<InvalidDataException>(() => service.RestoreToStagingAsync("test-id", passphrase, CancellationToken.None));
     }
     finally { try { Directory.Delete(root, recursive: true); } catch { } }
+}
+
+static string? FindNodeOnPath()
+{
+    var executable = OperatingSystem.IsWindows() ? "node.exe" : "node";
+    foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator,
+                 StringSplitOptions.RemoveEmptyEntries))
+    {
+        var candidate = Path.Combine(directory.Trim('"'), executable);
+        if (File.Exists(candidate)) return candidate;
+    }
+    return null;
 }
 
 static async Task TrustedLearningWorkflow()

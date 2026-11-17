@@ -56,6 +56,11 @@ public sealed class PlaywrightEdgeAdapter : IAsyncDisposable
             await StopWorkerAsync();
             return JsonSerializer.SerializeToElement(new { error = "browser_timeout" });
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await StopWorkerAsync();
+            throw;
+        }
         catch (Exception error) when (error is InvalidOperationException or JsonException or IOException or
                                       System.ComponentModel.Win32Exception)
         {
@@ -87,7 +92,7 @@ public sealed class PlaywrightEdgeAdapter : IAsyncDisposable
         start.Environment["DETOT_DESKTOP_EDGE_PROFILE"] = profileDirectory;
         worker = new Process { StartInfo = start, EnableRaisingEvents = true };
         if (!worker.Start()) throw new InvalidOperationException("browser_worker_start_failed");
-        _ = worker.StandardError.ReadToEndAsync(cancellationToken);
+        _ = worker.StandardError.ReadToEndAsync();
         await Task.Delay(150, cancellationToken);
         if (worker.HasExited) throw new InvalidOperationException("browser_worker_start_failed");
     }

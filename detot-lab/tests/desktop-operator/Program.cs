@@ -74,28 +74,43 @@ var node = FindExecutable("node.exe");
 if (node is not null)
 {
     var adapterRoot = CreateIsolatedTestDirectory("desktop-adapter");
-    var script = Path.Combine(adapterRoot, "fake-edge-reader.mjs");
+    var script = Path.Combine(AppContext.BaseDirectory, "fake-edge-reader-" + Guid.NewGuid().ToString("N") + ".mjs");
     var profile = Path.Combine(adapterRoot, "profile");
     var moduleRoot = Path.Combine(adapterRoot, "playwright-core");
     Directory.CreateDirectory(moduleRoot);
-    File.WriteAllText(script, "import readline from 'node:readline'; for await (const line of readline.createInterface({input:process.stdin,crlfDelay:Infinity})) { const req=JSON.parse(line); process.stdout.write(JSON.stringify({id:req.id,result:{accepted:req.action==='open-edge',sentinelPresent:!!process.env.DETOT_TEST_SENTINEL}})+'\\n'); if(req.action==='shutdown') break; }");
+    File.WriteAllText(script, "import readline from 'node:readline'; import fs from 'node:fs/promises'; for await (const line of readline.createInterface({input:process.stdin,crlfDelay:Infinity})) { const req=JSON.parse(line); if(req.action==='shutdown') { await fs.writeFile(process.env.DETOT_DESKTOP_EDGE_PROFILE+'/shutdown-marker','stopped'); break; } if(req.id===1) await new Promise(resolve=>setTimeout(resolve,1000)); process.stdout.write(JSON.stringify({id:req.id,result:{accepted:req.action==='open-edge',sentinelPresent:!!process.env.DETOT_TEST_SENTINEL}})+'\\n'); }");
     var previousSentinel = Environment.GetEnvironmentVariable("DETOT_TEST_SENTINEL");
     Environment.SetEnvironmentVariable("DETOT_TEST_SENTINEL", "synthetic-secret-sentinel");
     try
     {
-        await using var adapter = new PlaywrightEdgeAdapter(node, script, profile, moduleRoot);
-        var result = await adapter.ExecuteAsync("open-edge", null);
-        Check(result.GetProperty("accepted").GetBoolean(), "browser adapter accepts an allowlisted action through its child protocol");
-        Check(!result.GetProperty("sentinelPresent").GetBoolean(), "browser child process does not inherit unrelated secret environment variables");
-        var rejected = await adapter.ExecuteAsync("run-shell", null);
-        Check(rejected.GetProperty("error").GetString() == "action_not_allowed", "browser adapter rejects unlisted actions before starting a worker");
-        var rejectedRepository = await adapter.ExecuteAsync("read-github", "https://attacker.example/owner/repo", CancellationToken.None);
-        Check(rejectedRepository.GetProperty("error").GetString() == "repository_not_allowed", "browser adapter rejects repositories outside the GitHub allowlist");
+        await using (var adapter = new PlaywrightEdgeAdapter(node, script, profile, moduleRoot))
+        {
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            try
+            {
+                await adapter.ExecuteAsync("open-edge", null, cancellation.Token);
+                Check(false, "caller cancellation is propagated while a browser command is pending");
+            }
+            catch (OperationCanceledException)
+            {
+                Check(true, "caller cancellation is propagated while a browser command is pending");
+            }
+
+            var result = await adapter.ExecuteAsync("open-edge", null);
+            Check(result.GetProperty("accepted").GetBoolean(), "the next browser command succeeds after cancellation resets its worker");
+            Check(!result.GetProperty("sentinelPresent").GetBoolean(), "browser child process does not inherit unrelated secret environment variables");
+            var rejected = await adapter.ExecuteAsync("run-shell", null);
+            Check(rejected.GetProperty("error").GetString() == "action_not_allowed", "browser adapter rejects unlisted actions before starting a worker");
+            var rejectedRepository = await adapter.ExecuteAsync("read-github", "https://attacker.example/owner/repo", CancellationToken.None);
+            Check(rejectedRepository.GetProperty("error").GetString() == "repository_not_allowed", "browser adapter rejects repositories outside the GitHub allowlist");
+        }
+        Check(File.Exists(Path.Combine(profile, "shutdown-marker")), "cancelled browser worker receives shutdown and exits before reuse");
     }
     finally
     {
         Environment.SetEnvironmentVariable("DETOT_TEST_SENTINEL", previousSentinel);
         if (Directory.Exists(adapterRoot)) Directory.Delete(adapterRoot, recursive: true);
+        if (File.Exists(script)) File.Delete(script);
     }
 }
 else Console.WriteLine("SKIP: node.exe not found; child process protocol checks not run.");

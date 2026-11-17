@@ -31,6 +31,11 @@ type DesktopObservation = {
     headBranch: string | null;
     baseBranch: string | null;
     checks: Array<{ name: string; status: string; conclusion: string | null }>;
+    checksStatus?: "available" | "empty" | "unavailable";
+    checksError?: "rate_limited" | "http_error" | "invalid_response" | null;
+    checksHttpStatus?: number | null;
+    checksTotalCount?: number | null;
+    checksTruncated?: boolean;
   }>;
 };
 
@@ -183,7 +188,13 @@ export function DesktopActions() {
         {observation.pullRequests.map(pr => <li key={`${pr.number}-${pr.headSha}`}>
           <div><a href={`https://github.com/${observation.repository}/pull/${pr.number}`} target="_blank" rel="noreferrer">#{pr.number} {pr.title}</a>
             <small>{pr.state}{pr.merged ? " · đã merge" : ""} · {pr.headBranch ?? "?"} → {pr.baseBranch ?? "?"} · {pr.headSha.slice(0, 8)}</small></div>
-          <div className="desktop-check-list">{pr.checks.length ? pr.checks.map((check, index) => <span key={`${check.name}-${index}`} className={check.conclusion === "success" ? "desktop-check-ok" : check.conclusion === "failure" ? "desktop-check-error" : ""}>{check.name}: {check.conclusion ?? check.status}</span>) : <span>Chưa có check run</span>}</div>
+          <div className="desktop-check-list">
+            {pr.checksStatus === "unavailable" ? <span className="desktop-check-error">Không đọc được CI{pr.checksError === "rate_limited" ? " · GitHub giới hạn yêu cầu" : pr.checksHttpStatus ? ` · HTTP ${pr.checksHttpStatus}` : " · phản hồi không hợp lệ"}</span>
+              : pr.checksStatus === "empty" ? <span>API xác nhận chưa có check run</span>
+              : pr.checksStatus === "available" ? pr.checks.map((check, index) => <span key={`${check.name}-${index}`} className={check.conclusion === "success" ? "desktop-check-ok" : check.conclusion === "failure" ? "desktop-check-error" : ""}>{check.name}: {check.conclusion ?? check.status}</span>)
+              : <span>Chưa xác định được trạng thái CI</span>}
+            {pr.checksTruncated && <small>Đang hiện {pr.checks.length}/{pr.checksTotalCount ?? "nhiều"} checks.</small>}
+          </div>
         </li>)}
       </ul>}
     </section>}
