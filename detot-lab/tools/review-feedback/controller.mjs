@@ -54,11 +54,11 @@ export async function runController({ taskId, controllerConfig, controllerConfig
   validateControllerConfig(initialConfig, taskId);
   if (execute) fail("execution_blocked_no_trusted_isolation_provider");
 
-  const releaseLock = createLock(controllerRoot, taskId);
-  const paths = taskPaths(controllerRoot, taskId);
   const listener = listenerFactory
     ? listenerFactory()
     : new ReviewFeedbackListener({ repoRoot: LAB_ROOT, config: listenerConfig });
+  const releaseLock = createLock(controllerRoot, taskId);
+  const paths = taskPaths(controllerRoot, taskId);
   let stopping = false;
   const stop = () => { stopping = true; };
   process.once("SIGINT", stop);

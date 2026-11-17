@@ -598,3 +598,18 @@ test("controller source has no local child executor or Git write path", () => {
   const source = fs.readFileSync(path.resolve(here, "../../tools/review-feedback/controller.mjs"), "utf8");
   assert.doesNotMatch(source, /node:child_process|spawnSync|execFile|git push|git apply|git commit/u);
 });
+
+test("listener initialization failure does not leave a stale controller lock", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "detot-controller-init-lock-test-"));
+  const config = { enabled: true, execute_advisory_revise: false, approved_task_ids: ["task-1"], poll_seconds: 5, allowed_paths: ["detot-lab/tools/review-feedback/"] };
+  try {
+    await assert.rejects(() => runController({
+      taskId: "task-1",
+      controllerConfig: config,
+      listenerConfig: {},
+      listenerFactory: () => { throw new Error("invalid_listener_config"); },
+      controllerRoot: root,
+    }), /invalid_listener_config/u);
+    assert.equal(fs.existsSync(path.join(root, "controller.lock")), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
