@@ -107,3 +107,9 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Candidate name, description and prompt must appear verbatim in the supplied source text. The utility does not accept old skill history, provenance, files or approval state; it writes fresh provenance/segment hashes and an inactive pending-review proposal without copying source text or calling a model.
 - The new draft must pass the normal replay gate and explicit approval. Synthetic AutoSkill suite: **32/32 PASS**.
 - This is not a source-registration UI/API and does not establish trusted Backend source evidence. It does not enable capture or retrieval and remains staging-only.
+
+### Active pointer and mirror provenance — 17/11/2026
+
+- Active pointers and managed runtime mirror markers now carry opaque artifact IDs, source/dependency links, consent scope/revision, validation/activation/retention state, and hashes for their content segments.
+- Staging checks active pointer/version consistency and managed mirror lineage before using or updating them; forged pointer or mirror lineage is rejected before rollback/promotion. Synthetic suite: **36/36 PASS**.
+- Revocation still does not delete or sweep active pointers and mirror copies; this metadata closes traceability gaps only and is not a runtime revoke signal.

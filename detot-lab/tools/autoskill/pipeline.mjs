@@ -111,19 +111,97 @@ function mirrorPaths(root, skillId) {
   };
 }
 
+function copyProvenance({ ownerId, skillId, version, artifactType, sourceProvenance, dependencyIds }) {
+  const sourceIds = Array.isArray(sourceProvenance?.source_ids) ? sourceProvenance.source_ids : [];
+  const provenance = createArtifactProvenance({
+    artifactId: stableArtifactId(artifactType, ownerId, skillId, version),
+    artifactType,
+    sourceIds,
+    dependencyIds,
+    provenanceType: sourceProvenance?.provenance_type || "unknown",
+    consent: sourceProvenance?.consent_scope || null,
+    validationStatus: "replay_passed",
+    activationStatus: "active",
+    retentionState: "retained",
+  });
+  if (sourceProvenance?.independence_evidence?.verified === true) {
+    provenance.independence_evidence = {
+      verified: true,
+      source_ids: [...sourceProvenance.independence_evidence.source_ids],
+    };
+  }
+  return provenance;
+}
+
+function activePointer(ownerId, skillId, snapshot, at, rollback = false) {
+  const versionArtifactId = snapshot?.provenance?.artifact_id;
+  if (!versionArtifactId) throw new Error("active_version_provenance_missing");
+  return {
+    owner_id: ownerId,
+    skill_id: skillId,
+    version: snapshot.version,
+    skill_hash: snapshot.skill_hash,
+    updated_at: at,
+    ...(rollback ? { rollback: true } : {}),
+    provenance: copyProvenance({
+      ownerId,
+      skillId,
+      version: snapshot.version,
+      artifactType: "active_pointer",
+      sourceProvenance: snapshot.provenance,
+      dependencyIds: [versionArtifactId],
+    }),
+    content_segment_hashes: (snapshot.content_segments || []).map((segment) => ({
+      segment_id: segment.segment_id,
+      content_hash: segment.content_hash,
+    })),
+  };
+}
+
 function writeManagedMirror(root, ownerId, skillId, snapshot) {
   const paths = mirrorPaths(root, skillId);
   if (fs.existsSync(paths.dir)) {
     if (!fs.existsSync(paths.marker)) throw new Error("refuse_to_overwrite_unmanaged_skill_directory");
     const marker = readJson(paths.marker);
-    if (marker.owner_id !== ownerId || marker.skill_id !== skillId) throw new Error("managed_skill_owner_mismatch");
+    if (marker.managed_by !== "detot-autoskill-pipeline" || marker.owner_id !== ownerId || marker.skill_id !== skillId)
+      throw new Error("managed_skill_owner_mismatch");
   } else {
     fs.mkdirSync(paths.dir, { recursive: true });
-    writeJsonAtomic(paths.marker, { managed_by: "detot-autoskill-pipeline", owner_id: ownerId, skill_id: skillId });
   }
   const temp = `${paths.skill}.${process.pid}.tmp`;
   fs.writeFileSync(temp, snapshot.skill_markdown, { flag: "wx" });
   fs.renameSync(temp, paths.skill);
+  const sourceProvenance = snapshot.provenance;
+  const mirrorProvenance = copyProvenance({
+    ownerId,
+    skillId,
+    version: snapshot.version,
+    artifactType: "runtime_mirror",
+    sourceProvenance,
+    dependencyIds: [sourceProvenance.artifact_id],
+  });
+  const mirrorSegments = createContentSegments({
+    artifactId: mirrorProvenance.artifact_id,
+    values: { skill_markdown: snapshot.skill_markdown },
+    sourceIds: mirrorProvenance.source_ids,
+    dependencyIds: mirrorProvenance.dependency_ids,
+    provenanceType: mirrorProvenance.provenance_type,
+    consent: mirrorProvenance.consent_scope,
+  }).map((segment) => ({
+    ...segment,
+    validation_status: "replay_passed",
+    activation_status: "active",
+    ...(mirrorProvenance.independence_evidence ? { independence_evidence: mirrorProvenance.independence_evidence } : {}),
+  }));
+  writeJsonAtomic(paths.marker, {
+    managed_by: "detot-autoskill-pipeline",
+    owner_id: ownerId,
+    skill_id: skillId,
+    version: snapshot.version,
+    skill_hash: snapshot.skill_hash,
+    provenance: mirrorProvenance,
+    content_segments: mirrorSegments,
+  });
 }
 
 function assertMirrorWritable(root, ownerId, skillId) {
@@ -131,12 +209,31 @@ function assertMirrorWritable(root, ownerId, skillId) {
   if (!fs.existsSync(paths.dir)) return;
   if (!fs.existsSync(paths.marker)) throw new Error("refuse_to_overwrite_unmanaged_skill_directory");
   const marker = readJson(paths.marker);
-  if (marker.owner_id !== ownerId || marker.skill_id !== skillId) throw new Error("managed_skill_owner_mismatch");
+  if (marker.managed_by !== "detot-autoskill-pipeline" || marker.owner_id !== ownerId || marker.skill_id !== skillId)
+    throw new Error("managed_skill_owner_mismatch");
   const active = readActive(root, ownerId, skillId);
   if (!active) {
     if (fs.existsSync(paths.skill)) throw new Error("orphaned_managed_skill_requires_recovery");
     return;
   }
+  if (marker.version !== active.pointer.version || marker.skill_hash !== active.pointer.skill_hash ||
+      marker.provenance?.artifact_type !== "runtime_mirror" ||
+      marker.provenance.artifact_id !== stableArtifactId("runtime_mirror", ownerId, skillId, active.snapshot.version) ||
+      marker.provenance.activation_status !== "active" || marker.provenance.retention_state !== "retained" ||
+      marker.provenance.provenance_type !== active.snapshot.provenance.provenance_type ||
+      marker.provenance.consent_revision !== active.snapshot.provenance.consent_revision ||
+      JSON.stringify(marker.provenance.consent_scope) !== JSON.stringify(active.snapshot.provenance.consent_scope) ||
+      marker.provenance.validation_status !== "replay_passed" ||
+      !marker.provenance.dependency_ids?.includes(active.snapshot.provenance.artifact_id) ||
+      JSON.stringify(marker.provenance.source_ids) !== JSON.stringify(active.snapshot.provenance.source_ids) ||
+      !Array.isArray(marker.content_segments) || marker.content_segments.length !== 1 ||
+      marker.content_segments[0].artifact_id !== marker.provenance.artifact_id ||
+      marker.content_segments[0].content_hash !== hash(active.snapshot.skill_markdown) ||
+      marker.content_segments[0].activation_status !== "active" || marker.content_segments[0].retention_state !== "retained" ||
+      marker.content_segments[0].provenance_type !== marker.provenance.provenance_type ||
+      JSON.stringify(marker.content_segments[0].source_ids) !== JSON.stringify(marker.provenance.source_ids) ||
+      JSON.stringify(marker.content_segments[0].dependency_ids) !== JSON.stringify(marker.provenance.dependency_ids))
+    throw new Error("managed_skill_provenance_mismatch");
   if (!fs.existsSync(paths.skill) || hash(fs.readFileSync(paths.skill, "utf8")) !== active.snapshot.skill_hash) {
     throw new Error("active_skill_mirror_changed_outside_pipeline");
   }
@@ -158,9 +255,29 @@ function readActive(root, ownerId, skillId) {
   assertArtifactPathReadable(root, ownerId, pointerPath, "read_active_pointer");
   if (!fs.existsSync(pointerPath)) return null;
   const pointer = readJson(pointerPath);
+  if (pointer.owner_id !== ownerId || pointer.skill_id !== skillId || typeof pointer.version !== "string")
+    throw new Error("active_pointer_owner_or_skill_mismatch");
   const snapshotPath = versionPath(root, ownerId, skillId, pointer.version);
   assertArtifactPathReadable(root, ownerId, snapshotPath, "read_active_version");
   const snapshot = readJson(snapshotPath);
+  if (snapshot.owner_id !== ownerId || snapshot.skill_id !== skillId || snapshot.version !== pointer.version ||
+      snapshot.skill_hash !== pointer.skill_hash || !snapshot.provenance?.artifact_id)
+    throw new Error("active_version_identity_mismatch");
+  assertArtifactUsableForPipeline(root, ownerId, snapshot, "read_active_version");
+  const pointerProvenance = pointer.provenance;
+  if (pointerProvenance?.artifact_type !== "active_pointer" || pointerProvenance.activation_status !== "active" ||
+      pointerProvenance.retention_state !== "retained" ||
+      pointerProvenance.artifact_id !== stableArtifactId("active_pointer", ownerId, skillId, snapshot.version) ||
+      pointerProvenance.provenance_type !== snapshot.provenance.provenance_type ||
+      pointerProvenance.consent_revision !== snapshot.provenance.consent_revision ||
+      JSON.stringify(pointerProvenance.consent_scope) !== JSON.stringify(snapshot.provenance.consent_scope) ||
+      pointerProvenance.validation_status !== "replay_passed" ||
+      !pointerProvenance.dependency_ids?.includes(snapshot.provenance.artifact_id) ||
+      JSON.stringify(pointerProvenance.source_ids) !== JSON.stringify(snapshot.provenance.source_ids) ||
+      !Array.isArray(pointer.content_segment_hashes) || pointer.content_segment_hashes.length !== (snapshot.content_segments || []).length ||
+      pointer.content_segment_hashes.some((item, index) => item.segment_id !== snapshot.content_segments[index].segment_id ||
+        item.content_hash !== snapshot.content_segments[index].content_hash))
+    throw new Error("active_pointer_provenance_mismatch");
   return { pointer, snapshot, snapshotPath };
 }
 
@@ -340,7 +457,7 @@ function approveProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-o
   const snapshotFile = versionPath(stagingRoot, owner, skillId, version);
   if (fs.existsSync(snapshotFile)) throw new Error("skill_version_already_exists");
   writeJsonAtomic(snapshotFile, snapshot);
-  writeJsonAtomic(activePath(stagingRoot, owner, skillId), { owner_id: owner, skill_id: skillId, version, skill_hash: snapshot.skill_hash, updated_at: snapshot.activated_at });
+  writeJsonAtomic(activePath(stagingRoot, owner, skillId), activePointer(owner, skillId, snapshot, snapshot.activated_at));
   writeManagedMirror(stagingRoot, owner, skillId, snapshot);
   proposal.status = "approved";
   proposal.history = [...proposal.history, { action: "approved_and_activated", version, at: snapshot.activated_at }];
@@ -392,7 +509,7 @@ function rollbackSkillLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-own
   assertArtifactUsableForPipeline(stagingRoot, owner, target, "rollback_skill");
   assertMirrorWritable(stagingRoot, owner, skill);
   const at = new Date().toISOString();
-  writeJsonAtomic(activePath(stagingRoot, owner, skill), { owner_id: owner, skill_id: skill, version: targetVersion, skill_hash: target.skill_hash, updated_at: at, rollback: true });
+  writeJsonAtomic(activePath(stagingRoot, owner, skill), activePointer(owner, skill, target, at, true));
   writeManagedMirror(stagingRoot, owner, skill, target);
   appendAudit(stagingRoot, owner, { action: "skill_rollback", skill_id: skill, version: targetVersion, skill_hash: target.skill_hash });
   return { skill_id: skill, version: targetVersion, skill_hash: target.skill_hash, rolled_back: true };

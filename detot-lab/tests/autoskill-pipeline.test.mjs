@@ -76,6 +76,17 @@ test("new successful procedure requires three passing replay cases and explicit 
   const skillFile = path.join(stage.root, "state", "workspace", "skills", "autoskill-safe-file-workflow", "SKILL.md");
   assert.match(fs.readFileSync(skillFile, "utf8"), /name: autoskill-safe-file-workflow/);
   assert.match(fs.readFileSync(skillFile, "utf8"), /AutoSkill version 1\.0\.0/);
+  const active = JSON.parse(fs.readFileSync(path.join(stage.root, "state", "autoskill", "active", stage.owner, "safe-file-workflow.json"), "utf8"));
+  assert.equal(active.provenance.artifact_type, "active_pointer");
+  assert.equal(active.provenance.activation_status, "active");
+  assert.ok(active.provenance.dependency_ids.includes(`skill_version:${crypto.createHash("sha256").update(["skill_version", stage.owner, "safe-file-workflow", "1.0.0"].join("\0")).digest("hex").slice(0, 32)}`));
+  const markerPath = path.join(stage.root, "state", "workspace", "skills", "autoskill-safe-file-workflow", ".detot-autoskill-managed.json");
+  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  assert.equal(marker.provenance.artifact_type, "runtime_mirror");
+  assert.equal(marker.provenance.activation_status, "active");
+  assert.equal(marker.content_segments.length, 1);
+  assert.equal(marker.content_segments[0].content_hash, crypto.createHash("sha256").update(fs.readFileSync(skillFile)).digest("hex"));
+  assert.equal("content" in marker.content_segments[0], false);
 });
 
 test("failed then corrected procedure can be proposed as a new reviewed version", () => {
@@ -144,6 +155,33 @@ test("approval refuses a candidate changed after replay and refuses unmanaged sk
   assert.throws(() => approveProposal({ root: collision.root, ownerId: collision.owner, proposalId: "proposal-collision" }), /refuse_to_overwrite_unmanaged_skill_directory/);
   assert.equal(fs.readFileSync(userSkill, "utf8"), "user-owned skill\n");
   assert.equal(fs.existsSync(path.join(collision.root, "state", "autoskill", "active", collision.owner, "safe-file-workflow.json")), false);
+});
+
+test("active pointer and runtime mirror reject forged lineage before rollback or promotion", () => {
+  const stage = makeStage();
+  addProposal(stage, { proposalId: "proposal-pointer", skillId: "safe-file-workflow", prompt: "Inspect the staged copy and validate its checksum." });
+  evaluateProposal({ root: stage.root, ownerId: stage.owner, proposalId: "proposal-pointer", report: replayReport(stage, "proposal-pointer", [1, 1, 1], [0, 0, 0]) });
+  approveProposal({ root: stage.root, ownerId: stage.owner, proposalId: "proposal-pointer" });
+
+  const pointerPath = path.join(stage.root, "state", "autoskill", "active", stage.owner, "safe-file-workflow.json");
+  const pointer = JSON.parse(fs.readFileSync(pointerPath, "utf8"));
+  pointer.provenance.dependency_ids = [];
+  fs.writeFileSync(pointerPath, JSON.stringify(pointer));
+  assert.throws(() => rollbackSkill({ root: stage.root, ownerId: stage.owner, skillId: "safe-file-workflow", version: "1.0.0" }), /active_pointer_provenance_mismatch/);
+
+  const fresh = makeStage();
+  addProposal(fresh, { proposalId: "proposal-mirror-1", skillId: "safe-file-workflow", prompt: "Inspect the staged copy and validate its checksum." });
+  evaluateProposal({ root: fresh.root, ownerId: fresh.owner, proposalId: "proposal-mirror-1", report: replayReport(fresh, "proposal-mirror-1", [1, 1, 1], [0, 0, 0]) });
+  approveProposal({ root: fresh.root, ownerId: fresh.owner, proposalId: "proposal-mirror-1" });
+  const markerPath = path.join(fresh.root, "state", "workspace", "skills", "autoskill-safe-file-workflow", ".detot-autoskill-managed.json");
+  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  marker.provenance.source_ids = [];
+  fs.writeFileSync(markerPath, JSON.stringify(marker));
+  addProposal(fresh, { proposalId: "proposal-mirror-2", skillId: "safe-file-workflow", prompt: "Inspect the staged copy, compare hashes, and report the verified result." });
+  evaluateProposal({ root: fresh.root, ownerId: fresh.owner, proposalId: "proposal-mirror-2", report: replayReport(fresh, "proposal-mirror-2", [1, 1, 1], [0, 0, 0]) });
+  assert.throws(() => approveProposal({ root: fresh.root, ownerId: fresh.owner, proposalId: "proposal-mirror-2" }), /managed_skill_provenance_mismatch/);
+  const active = JSON.parse(fs.readFileSync(path.join(fresh.root, "state", "autoskill", "active", fresh.owner, "safe-file-workflow.json"), "utf8"));
+  assert.equal(active.version, "1.0.0");
 });
 
 test("rejection is auditable without exposing candidate text", () => {

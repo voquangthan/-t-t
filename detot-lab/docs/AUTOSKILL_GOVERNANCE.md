@@ -12,7 +12,7 @@ Conversation archive + manifest
   -> Active pointer / runtime mirror
 ```
 
-Each provenance-bearing object uses opaque artifact IDs and records `source_ids`, `dependency_ids`, `provenance_type`, `consent_scope`/revision, validation state, activation state and retention state. Session manifests retain hashes and metadata, not a second copy of message text. Proposals point to the conversation artifact; approved version snapshots point to the proposal and retain the original source IDs. Runtime mirror markers remain separate and must be linked by a future integrated revocation index.
+Each provenance-bearing object uses opaque artifact IDs and records `source_ids`, `dependency_ids`, `provenance_type`, `consent_scope`/revision, validation state, activation state and retention state. Session manifests retain hashes and metadata, not a second copy of message text. Proposals point to the conversation artifact; approved version snapshots point to the proposal and retain the original source IDs. Staging active pointers and runtime mirror markers now carry provenance and content-segment hashes and link to the version artifact. The revocation executor does not yet sweep active pointers or runtime mirrors.
 
 Missing/corrupt legacy session manifests are treated as UNKNOWN. Recovery checks the manifest before reading JSONL content and skips an archive if lineage is absent or the owner consent generation changed. Legacy proposals and versions without provenance are denied evaluation, approval and rollback. No automatic migration reads old content or infers independence.
 
@@ -44,6 +44,7 @@ This executor is not connected to the live Backend consent lease or Gateway adap
 - Analysis verifies the sidecar and current generation before reading an archive. It checks consent again before provider invocation and before proposal persistence.
 - Runtime retrieval blocks skills with missing, quarantined, unvalidated, inactive, or inconsistent provenance. Only verified independent sources or conversation-derived skills matching the current analysis revision can be injected.
 - Runtime cache snapshots carry their own provenance, source/dependency IDs and segment hashes. At `agent_end`, snapshots from stale generations or with invalid segment metadata are cleared and excluded from skill-learning evidence.
+- Active pointers and managed runtime mirror markers carry their own provenance, version dependency, consent scope, state and content hash metadata. The staging pipeline validates those links before baselining or updating an existing managed mirror.
 - The staging safe-rebuild utility accepts only verified independent source artifacts and creates a fresh pending proposal; it does not reuse a disabled skill or its approval state.
 - AutoSkill remains disabled in the primary Gateway. The adapter does not yet have a trusted Backend callback that can resolve the authenticated owner and obtain an atomic, revocable Backend lease. A mock callback in tests is not production integration.
 - The staging proposal/version revocation executor is not wired into the Backend lease or Gateway runtime. It does not provide an immediate Backend-to-Gateway revoke signal or cover caches, embeddings, mirrors, archives, or backup copies end-to-end. Local revocation must not claim removal from external model/provider logs.
