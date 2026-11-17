@@ -712,14 +712,6 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (!string.IsNullOrWhiteSpace(request.CalendarContext))
             requiredConsents.Add(new("calendar", "direct_request", "DeepSeek"));
         var historyRevisionHeader = context.Request.Headers["X-Detot-History-Revision"].ToString();
-        if (chatHistory is not null && Guid.TryParse(historyRevisionHeader, out _) &&
-            !consentPolicy.Check(owner, [new ConsentPolicy.ConsentRequirement("chat_history", "direct_request", "local_only")],
-                "chat_history_save", request.RequestId, out _))
-            return Results.Json(new { error = "Chưa được cấp quyền lưu lịch sử Chat cục bộ." }, statusCode: StatusCodes.Status403Forbidden);
-        if (requiredConsents.Count > 0 && !consentPolicy.Check(owner, requiredConsents, "chat_context",
-            request.RequestId, out var deniedConsents))
-            return Results.Json(new { error = "Chưa được cấp quyền cho một hoặc nhiều nguồn ngữ cảnh.", denied = deniedConsents },
-                statusCode: StatusCodes.Status403Forbidden);
         context.Items["conversationId"] = request.ConversationId;
 
         var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
@@ -747,6 +739,15 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             practicing, miniPractice, ExecuteDirectComputerUse);
         if (computerUseDispatch.Dispatched) return computerUseDispatch.Value ??
             Results.Problem("Computer Use không trả kết quả.", statusCode: 502);
+
+        if (chatHistory is not null && Guid.TryParse(historyRevisionHeader, out _) &&
+            !consentPolicy.Check(owner, [new ConsentPolicy.ConsentRequirement("chat_history", "direct_request", "local_only")],
+                "chat_history_save", request.RequestId, out _))
+            return Results.Json(new { error = "Chưa được cấp quyền lưu lịch sử Chat cục bộ." }, statusCode: StatusCodes.Status403Forbidden);
+        if (requiredConsents.Count > 0 && !consentPolicy.Check(owner, requiredConsents, "chat_context",
+            request.RequestId, out var deniedConsents))
+            return Results.Json(new { error = "Chưa được cấp quyền cho một hoặc nhiều nguồn ngữ cảnh.", denied = deniedConsents },
+                statusCode: StatusCodes.Status403Forbidden);
 
         consentPolicy.RecordExplicitAction(owner,
             new ConsentPolicy.ConsentRequirement("chat_message", "direct_request", "external_service"),

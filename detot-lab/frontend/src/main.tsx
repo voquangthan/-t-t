@@ -21,6 +21,7 @@ import python from "highlight.js/lib/languages/python";
 import json from "highlight.js/lib/languages/json";
 import csharp from "highlight.js/lib/languages/csharp";
 import { type Conversation, type Message, forkMessages, visibleConversations } from "./history";
+import { preflightConsentRequirements } from "./chatConsent";
 import "./style.css";
 
 const storageKey = "detot.conversations.v1";
@@ -278,9 +279,13 @@ function App() {
       if (pendingCalendarContext) requestConsents.push(
         { source: "calendar", purpose: "direct_request", destination: "DeepSeek" },
       );
-      if (requestConsents.length) {
+      // Chat history is only sent to an external model for normal chat. The
+      // backend handles allowlisted local Computer Use intents before checking
+      // these external-context consents, and remains the authority for normal chat.
+      const preflightConsents = preflightConsentRequirements(requestConsents);
+      if (preflightConsents.length) {
         const permission = await fetch("/api/consent/check", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ requirements: requestConsents, requestId }) });
+          body: JSON.stringify({ requirements: preflightConsents, requestId }) });
         if (permission.status === 403) throw new Error("Yêu cầu cần quyền cho nguồn dữ liệu tương ứng trong mục Quyền riêng tư.");
         if (!permission.ok) throw new Error("Không kiểm tra được quyền riêng tư trước khi truy xuất dữ liệu.");
       }
