@@ -201,6 +201,32 @@ if (args.Contains("--github-read-smoke", StringComparer.Ordinal))
     if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
 }
 
+if (args.Contains("--edge-open-smoke", StringComparer.Ordinal))
+{
+    if (node is null) throw new InvalidOperationException("node.exe is required for the Edge launch smoke test.");
+    var repositoryRoot = DesktopOperator.FindRepositoryRoot(AppContext.BaseDirectory)
+        ?? throw new InvalidOperationException("repository root unavailable");
+    var profile = CreateIsolatedTestDirectory("edge-open-smoke");
+    var adapter = new PlaywrightEdgeAdapter(node,
+        Path.Combine(repositoryRoot, "detot-lab", "tools", "computer-use", "edge-reader.mjs"), profile,
+        Path.Combine(repositoryRoot, "detot-lab", "tests", "runtime-candidate", "node_modules", "playwright-core"));
+    try
+    {
+        await using (adapter)
+        {
+            var result = await adapter.ExecuteAsync("open-edge", null);
+            if (result.TryGetProperty("error", out var error))
+                throw new InvalidOperationException($"Edge launch smoke failed: {error.GetString()}");
+            Check(result.TryGetProperty("opened", out var opened) && opened.ValueKind == JsonValueKind.True,
+                "Playwright opens Edge with an isolated lab profile");
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
+    }
+}
+
 static void RunGit(string directory, params string[] arguments)
 {
     var start = new ProcessStartInfo("git") { WorkingDirectory = directory, UseShellExecute = false,
