@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  listener-regression:
+  review-loop-security-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -27,4 +27,5 @@ jobs:
         working-directory: detot-lab
         run: |
           node --check tools/review-feedback/listener.mjs
+          node --check tools/review-feedback/controller.mjs
           node --test tests/review-feedback/listener.test.mjs
