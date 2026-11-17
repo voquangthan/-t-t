@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import readline from "node:readline";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { summarizeCheckRuns } from "./github-checks.mjs";
+import { classifyGithubResponseError, summarizeCheckRuns } from "./github-checks.mjs";
 
 const require = createRequire(import.meta.url);
 const moduleRoot = process.env.DETOT_PLAYWRIGHT_CORE;
@@ -39,10 +39,7 @@ async function requestJson(url) {
     timeout: 10000,
     headers: { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
   });
-  if (!response.ok()) return {
-    error: `github_http_${response.status()}`,
-    rateLimited: response.status() === 403 && response.headers().get("x-ratelimit-remaining") === "0",
-  };
+  if (!response.ok()) return classifyGithubResponseError(response);
   return response.json();
 }
 

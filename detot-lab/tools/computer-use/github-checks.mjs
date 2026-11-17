@@ -1,5 +1,19 @@
 const githubHttpError = /^github_http_(\d{3})$/u;
 
+export function classifyGithubResponseError(response) {
+  const status = typeof response?.status === "function" ? response.status() : null;
+  const headers = typeof response?.headers === "function" ? response.headers() : null;
+  if (!Number.isInteger(status) || !headers || typeof headers !== "object") {
+    return { error: "github_invalid_response", rateLimited: false };
+  }
+  const remaining = Object.entries(headers)
+    .find(([name]) => name.toLowerCase() === "x-ratelimit-remaining")?.[1];
+  return {
+    error: `github_http_${status}`,
+    rateLimited: status === 403 && remaining === "0",
+  };
+}
+
 export function summarizeCheckRuns(response, limit = 30) {
   if (response && typeof response === "object" && typeof response.error === "string") {
     const match = githubHttpError.exec(response.error);
