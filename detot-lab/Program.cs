@@ -245,8 +245,6 @@ app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRe
         return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
     if (request.Target == "approved-applications")
         return Results.Ok(new { applications = WindowsDesktopAutomation.ReadOpenApprovedApplications() });
-    if (request.Target == "approved-window-titles")
-        return Results.Ok(new { windows = WindowsDesktopAutomation.ReadOpenApprovedWindowTitles() });
     var repository = request.Target == "github-pull-requests"
         ? (await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken)).Repository
         : null;
@@ -1479,16 +1477,6 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
         var reply = applications.Count == 0
             ? "Mình không thấy cửa sổ nào trong danh sách ứng dụng được phép quan sát."
             : "Các ứng dụng đang mở: " + string.Join(", ", applications) + ".";
-        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action });
-    }
-
-    if (action == "read-approved-window-titles")
-    {
-        var windows = WindowsDesktopAutomation.ReadOpenApprovedWindowTitles();
-        var reply = windows.Count == 0
-            ? "Mình không thấy tiêu đề cửa sổ nào trong danh sách ứng dụng được phép."
-            : "Các cửa sổ trong ứng dụng được phép: " +
-              string.Join("; ", windows.Select(window => $"{window.Application}: {window.Title}"));
         return Results.Ok(new { reply, toolUsed = true, computerUseAction = action });
     }
 

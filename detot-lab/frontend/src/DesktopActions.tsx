@@ -22,7 +22,6 @@ type DesktopObservation = {
   needsUserLogin?: boolean;
   repository?: string;
   applications?: string[];
-  windows?: Array<{ application: string; title: string }>;
   pullRequests?: Array<{
     number: number;
     title: string;
@@ -42,7 +41,6 @@ type DesktopObservation = {
 
 const permissionLabels: Record<string, string> = {
   "approved-applications": "ứng dụng được duyệt",
-  "approved-window-titles": "tiêu đề cửa sổ của ứng dụng được duyệt",
   "github-account": "tài khoản GitHub trong Edge riêng",
   "github-pull-requests": "PR và CI công khai",
   "open-workspace": "mở workspace",
@@ -143,24 +141,6 @@ export function DesktopActions() {
     } finally { setObserving(""); }
   }
 
-  async function observeWindowTitles() {
-    setObserving("approved-window-titles"); setError(""); setNotice("");
-    try {
-      const response = await fetch("/api/desktop/observe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: "approved-window-titles" }),
-      });
-      const result = await response.json() as DesktopObservation;
-      if (!response.ok || result.error) throw new Error(result.error ?? `Không đọc được tiêu đề cửa sổ (HTTP ${response.status}).`);
-      setObservation(result);
-      setNotice("Chỉ đọc tiêu đề của cửa sổ thuộc ứng dụng được phép; không đọc nội dung bên trong.");
-    } catch (cause) {
-      setObservation(undefined);
-      setError(cause instanceof Error ? cause.message : "Không đọc được tiêu đề cửa sổ.");
-    } finally { setObserving(""); }
-  }
-
   return <section className="desktop-actions-page">
     <div className="cloud-heading"><div><span className="eyebrow">THAO TÁC CỤC BỘ</span><h1>Trợ lý máy tính</h1>
       <p>Mở workspace, mở repository GitHub và kiểm tra nhánh cùng trạng thái Git.</p></div>
@@ -188,7 +168,6 @@ export function DesktopActions() {
       </div>
       <div className="desktop-actions-row">
         <button type="button" disabled={!!observing} onClick={() => void observeApplications()}>{observing === "approved-applications" ? "Đang quan sát…" : "Ứng dụng đang mở"}</button>
-        <button type="button" disabled={!!observing} onClick={() => void observeWindowTitles()}>{observing === "approved-window-titles" ? "Đang đọc tiêu đề…" : "Tiêu đề cửa sổ"}</button>
         <button type="button" disabled={!!observing} onClick={() => void observe("github-account")}>{observing === "github-account" ? "Đang kiểm tra…" : "Kiểm tra tài khoản trong Edge riêng"}</button>
         <button type="button" disabled={!!observing || !status.repository} onClick={() => void observe("github-pull-requests")}>{observing === "github-pull-requests" ? "Đang đọc…" : "Đọc PR và CI"}</button>
       </div>
@@ -198,12 +177,6 @@ export function DesktopActions() {
       {observation.applications.length === 0 ? <p className="desktop-muted">Không thấy cửa sổ của ứng dụng trong danh sách được hỗ trợ.</p> :
         <ul>{observation.applications.map(application => <li key={application}>{application}</li>)}</ul>}
       <p className="desktop-muted">Không đọc tiêu đề, văn bản, tab hoặc nội dung bên trong cửa sổ.</p>
-    </section>}
-    {observation?.windows && <section className="desktop-workspace-card" aria-label="Tiêu đề cửa sổ đang mở">
-      <div className="overview-card-head"><h2>Tiêu đề cửa sổ</h2><span className="desktop-muted">Ứng dụng được duyệt</span></div>
-      {observation.windows.length === 0 ? <p className="desktop-muted">Không thấy cửa sổ nào trong danh sách ứng dụng được hỗ trợ.</p> :
-        <ul>{observation.windows.map((window, index) => <li key={`${window.application}-${index}`}><strong>{window.application}:</strong> {window.title}</li>)}</ul>}
-      <p className="desktop-muted">Chỉ đọc tiêu đề cửa sổ, không đọc nội dung, văn bản, tab hoặc dữ liệu bên trong.</p>
     </section>}
     {observation?.authenticated && observation.login && <section className="desktop-workspace-card" aria-label="Tài khoản GitHub">
       <div className="overview-card-head"><h2>Tài khoản trong profile Edge riêng</h2><span className="desktop-state-ok">Đã đăng nhập</span></div>

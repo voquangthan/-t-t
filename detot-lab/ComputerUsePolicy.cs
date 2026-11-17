@@ -3,7 +3,6 @@ public static class ComputerUsePolicy
     private static readonly HashSet<string> ObservationTargets = new(StringComparer.Ordinal)
     {
         "approved-applications",
-        "approved-window-titles",
         "github-account",
         "github-pull-requests"
     };
@@ -25,7 +24,7 @@ public static class ComputerUsePolicy
 
     public static object Describe() => new
     {
-        observe = new[] { "approved-applications", "approved-window-titles", "github-account", "github-pull-requests" },
+        observe = new[] { "approved-applications", "github-account", "github-pull-requests" },
         navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode" },
         write = Array.Empty<string>(),
         codeExecution = false
