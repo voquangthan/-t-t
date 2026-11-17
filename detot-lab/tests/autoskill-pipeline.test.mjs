@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { approveProposal, evaluateProposal, rejectProposal, rollbackSkill } from "../tools/autoskill/pipeline.mjs";
+import { approveProposal, evaluateProposal, listProposals, rejectProposal, rollbackSkill } from "../tools/autoskill/pipeline.mjs";
+import { planConsentRevocation } from "../tools/autoskill/governance.mjs";
+import { prepareRevocation, resumeRevocation } from "../tools/autoskill/revocation-store.mjs";
 import { sanitizeExperienceText, sanitizeSkillCandidate } from "../tools/autoskill/privacy.mjs";
 
 function makeStage() {
@@ -165,4 +167,31 @@ test("legacy proposals without lineage remain quarantined and cannot be evaluate
   const audit = fs.readFileSync(path.join(stage.root, "state", "autoskill", "audit", `${stage.owner}.jsonl`), "utf8");
   assert.match(audit, /artifact_policy_denied/);
   assert.doesNotMatch(audit, /A legacy candidate with no source trail/);
+});
+
+test("revoked proposal tombstones block replay evaluation and activation", () => {
+  const stage = makeStage();
+  addProposal(stage, { proposalId: "proposal-revoked", skillId: "safe-file-workflow", prompt: "Must not be evaluated after revoke." });
+  const proposalPath = path.join(stage.root, "state", "autoskill", "proposals", "Users", stage.owner, "proposal-revoked.json");
+  const proposal = JSON.parse(fs.readFileSync(proposalPath, "utf8"));
+  const savedBytes = fs.readFileSync(proposalPath);
+  const revokedScope = { source: "chat_history", purpose: "skill_learning", destination: "local_only" };
+  const artifact = { ...proposal, artifact_id: proposal.provenance.artifact_id, path: proposalPath };
+  const plan = planConsentRevocation({ artifacts: [artifact], revokedScope });
+  const journal = prepareRevocation({ root: stage.root, ownerId: stage.owner, consentRevision: 2, revokedScope, plan, artifacts: [artifact] });
+  assert.equal(journal.targets.length, 1);
+  assert.equal(resumeRevocation({ root: stage.root, ownerId: stage.owner, revocationId: journal.revocation_id, apply: true }).mode, "complete");
+  assert.equal(fs.existsSync(proposalPath), false);
+  // A restored backup has the same artifact id and remains denied by the monotonic tombstone.
+  fs.writeFileSync(proposalPath, savedBytes);
+  assert.throws(() => evaluateProposal({ root: stage.root, ownerId: stage.owner, proposalId: "proposal-revoked", report: {} }), /artifact_revoked_by_consent/);
+  assert.throws(() => approveProposal({ root: stage.root, ownerId: stage.owner, proposalId: "proposal-revoked" }), /artifact_revoked_by_consent/);
+  fs.writeFileSync(proposalPath, "not-json");
+  assert.throws(() => evaluateProposal({ root: stage.root, ownerId: stage.owner, proposalId: "proposal-revoked", report: {} }), /artifact_revoked_by_consent/);
+  assert.deepEqual(listProposals({ root: stage.root, ownerId: stage.owner }), []);
+  assert.equal(fs.existsSync(proposalPath), true);
+  assert.equal(fs.existsSync(path.join(stage.root, "state", "autoskill", "active", stage.owner, "safe-file-workflow.json")), false);
+  const audit = fs.readFileSync(path.join(stage.root, "state", "autoskill", "audit", `${stage.owner}.jsonl`), "utf8");
+  assert.match(audit, /artifact_policy_denied/);
+  assert.doesNotMatch(audit, /Must not be evaluated after revoke/);
 });

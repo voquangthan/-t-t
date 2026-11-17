@@ -91,3 +91,11 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - If every independently labeled segment still has revoked lineage, the complete mixed artifact is quarantined.
 - Synthetic governance/provenance/pipeline/integration/migration tests: **24/24 PASS**.
 - This remains planning-only. No content was split or deleted, and no real owner data, Gateway or provider was used.
+
+### Staging revocation journal — 17/11/2026
+
+- Added an owner-scoped metadata journal and monotonic artifact/path tombstones. The staging pipeline checks tombstones before parsing affected proposal/version files and rejects replay evaluation, approval, and rollback for revoked artifacts.
+- Resume is idempotent. It revalidates the embedded owner/artifact IDs and exact planned file hash before deleting an allowlisted proposal/version JSON file. A changed target stays in place and the revoke remains blocked. Unknown/ambiguous lineage is quarantined; an unmappable node quarantines that owner's AutoSkill pipeline.
+- Mixed artifacts are kept quarantined because the current executor cannot safely split file contents, even when the policy planner identifies candidate independent segments.
+- Synthetic tests cover interruption/resume, repeated revoke, owner isolation, changed-file refusal, restore-at-tombstoned-path denial, and no deletion of quarantined records. Project AutoSkill suite: **30/30 PASS**; pinned adapter suite: **82/82 PASS**.
+- This is staging pipeline integration only. It is not bound to Backend-authenticated consent, and it does not cover conversation archives, runtime mirrors/caches, embeddings, active pointers, or backups. No real data was migrated/deleted, no Gateway was started/changed, and no provider was used.

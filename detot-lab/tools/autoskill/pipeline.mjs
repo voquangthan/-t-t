@@ -6,6 +6,7 @@ import { sanitizeSkillCandidate } from "./privacy.mjs";
 import { assertArtifactUsable } from "./governance.mjs";
 import { stableArtifactId } from "./provenance.mjs";
 import { migrateLegacyArtifact } from "./migration.mjs";
+import { isArtifactRevoked, isPathRevoked } from "./revocation-store.mjs";
 
 const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/u;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -57,7 +58,11 @@ function appendAudit(root, ownerId, event) {
 }
 
 function assertArtifactUsableForPipeline(root, ownerId, artifact, operation) {
-  try { return assertArtifactUsable(artifact); }
+  try {
+    const artifactId = String(artifact?.provenance?.artifact_id || artifact?.artifact_id || "");
+    if (isArtifactRevoked({ root, ownerId, artifactId })) throw new Error("artifact_revoked_by_consent");
+    return assertArtifactUsable(artifact);
+  }
   catch (error) {
     appendAudit(root, ownerId, {
       action: "artifact_policy_denied",
@@ -65,6 +70,20 @@ function assertArtifactUsableForPipeline(root, ownerId, artifact, operation) {
       proposal_id: String(artifact?.proposal_id || artifact?.source_proposal_id || ""),
       operation,
       reason: String(error?.message || "artifact_not_usable").slice(0, 120),
+    });
+    throw error;
+  }
+}
+
+function assertArtifactPathReadable(root, ownerId, artifactPath, operation) {
+  try {
+    if (isPathRevoked({ root, ownerId, artifactPath })) throw new Error("artifact_revoked_by_consent");
+  } catch (error) {
+    appendAudit(root, ownerId, {
+      action: "artifact_policy_denied",
+      artifact_id: "",
+      operation,
+      reason: String(error?.message || "revocation_state_unavailable").slice(0, 120),
     });
     throw error;
   }
@@ -135,9 +154,11 @@ function hash(value) {
 
 function readActive(root, ownerId, skillId) {
   const pointerPath = activePath(root, ownerId, skillId);
+  assertArtifactPathReadable(root, ownerId, pointerPath, "read_active_pointer");
   if (!fs.existsSync(pointerPath)) return null;
   const pointer = readJson(pointerPath);
   const snapshotPath = versionPath(root, ownerId, skillId, pointer.version);
+  assertArtifactPathReadable(root, ownerId, snapshotPath, "read_active_version");
   const snapshot = readJson(snapshotPath);
   return { pointer, snapshot, snapshotPath };
 }
@@ -176,7 +197,10 @@ export function listProposals({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
   const ownerRoot = ensureInside(stagingRoot, path.join(stagingRoot, "state", "autoskill", "proposals", "Users", owner));
   if (!fs.existsSync(ownerRoot)) return [];
   return fs.readdirSync(ownerRoot).filter((name) => name.endsWith(".json")).sort().map((name) => {
-    const proposal = readJson(ensureInside(stagingRoot, path.join(ownerRoot, name)));
+    const artifactPath = ensureInside(stagingRoot, path.join(ownerRoot, name));
+    try { assertArtifactPathReadable(stagingRoot, owner, artifactPath, "list_proposals"); }
+    catch (error) { if (error?.message === "artifact_revoked_by_consent") return null; throw error; }
+    const proposal = readJson(artifactPath);
     return {
       proposal_id: proposal.proposal_id,
       status: proposal.status,
@@ -184,7 +208,7 @@ export function listProposals({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
       created_at: proposal.created_at,
       skill_name: proposal.candidate?.name || "",
     };
-  });
+  }).filter(Boolean);
 }
 
 export function evaluateProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, report }) {
@@ -192,6 +216,7 @@ export function evaluateProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
   const filePath = proposalPath(stagingRoot, owner, id);
+  assertArtifactPathReadable(stagingRoot, owner, filePath, "evaluate_proposal");
   const proposal = readJson(filePath);
   if (proposal.owner_id !== owner || proposal.proposal_id !== id) throw new Error("proposal_owner_or_id_mismatch");
   assertArtifactUsableForPipeline(stagingRoot, owner, proposal, "evaluate_proposal");
@@ -246,6 +271,7 @@ export function approveProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
   const filePath = proposalPath(stagingRoot, owner, id);
+  assertArtifactPathReadable(stagingRoot, owner, filePath, "approve_proposal");
   const proposal = readJson(filePath);
   if (proposal.owner_id !== owner || proposal.proposal_id !== id) throw new Error("proposal_owner_or_id_mismatch");
   assertArtifactUsableForPipeline(stagingRoot, owner, proposal, "approve_proposal");
@@ -328,7 +354,9 @@ export function rollbackSkill({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
   const owner = requireId(ownerId, "owner_id");
   const skill = requireId(skillId, "skill_id");
   const targetVersion = requireId(version, "version");
-  const target = readJson(versionPath(stagingRoot, owner, skill, targetVersion));
+  const targetPath = versionPath(stagingRoot, owner, skill, targetVersion);
+  assertArtifactPathReadable(stagingRoot, owner, targetPath, "rollback_skill");
+  const target = readJson(targetPath);
   if (target.owner_id !== owner || target.skill_id !== skill || target.version !== targetVersion) throw new Error("rollback_target_mismatch");
   assertArtifactUsableForPipeline(stagingRoot, owner, target, "rollback_skill");
   assertMirrorWritable(stagingRoot, owner, skill);
