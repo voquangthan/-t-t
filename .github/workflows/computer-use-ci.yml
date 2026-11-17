@@ -47,17 +47,20 @@ jobs:
       - name: Run GitHub reader tests
         run: node --test detot-lab/tests/desktop-operator/github-checks.test.mjs
 
-      - name: Check Computer Use JavaScript syntax
-        run: |
-          node --check detot-lab/tools/computer-use/edge-reader.mjs
-          node --check detot-lab/tools/computer-use/github-checks.mjs
+      - name: Check Edge reader JavaScript syntax
+        run: node --check detot-lab/tools/computer-use/edge-reader.mjs
+
+      - name: Check GitHub checks JavaScript syntax
+        run: node --check detot-lab/tools/computer-use/github-checks.mjs
 
       - name: Install frontend dependencies
         working-directory: detot-lab/frontend
         run: pnpm install --frozen-lockfile
 
-      - name: Test and build frontend
+      - name: Test frontend
         working-directory: detot-lab/frontend
-        run: |
-          pnpm test
-          pnpm build
+        run: pnpm test
+
+      - name: Build frontend
+        working-directory: detot-lab/frontend
+        run: pnpm build
