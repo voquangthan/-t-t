@@ -75,6 +75,49 @@ computerUseExecutions = 0;
 var normalQuestionDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Làm sao mở Edge?", false, false, FakeComputerUseExecutor);
 Check(!normalQuestionDispatch.Dispatched && computerUseExecutions == 0,
     "a normal-chat how-to question does not invoke the desktop executor");
+var routeExecutorCalls = 0;
+var routeConsentChecks = 0;
+var routeProviderCalls = 0;
+Task<string> RouteExecutor(string action)
+{
+    routeExecutorCalls++;
+    return Task.FromResult("executed:" + action);
+}
+var localRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync(
+    "Mở VS Code", false, false, RouteExecutor, () =>
+    {
+        routeConsentChecks++;
+        return Task.FromResult<string?>("403");
+    });
+if (localRoute.ContinueToChat) routeProviderCalls++;
+Check(!localRoute.ContinueToChat && localRoute.Result == "executed:open-vscode" &&
+      routeExecutorCalls == 1 && routeConsentChecks == 0 && routeProviderCalls == 0,
+    "an approved local Computer Use action runs before denied chat-history consent and never calls the provider");
+routeExecutorCalls = 0;
+routeConsentChecks = 0;
+routeProviderCalls = 0;
+var deniedChatRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync(
+    "Dựa trên lịch sử cuộc trò chuyện, nhắc lại việc cũ", false, false, RouteExecutor, () =>
+    {
+        routeConsentChecks++;
+        return Task.FromResult<string?>("403");
+    });
+if (deniedChatRoute.ContinueToChat) routeProviderCalls++;
+Check(!deniedChatRoute.ContinueToChat && deniedChatRoute.Result == "403" &&
+      routeExecutorCalls == 0 && routeConsentChecks == 1 && routeProviderCalls == 0,
+    "normal chat with missing or revoked history consent is denied before the provider receives history");
+routeConsentChecks = 0;
+routeProviderCalls = 0;
+var authorizedChatRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync(
+    "Dựa trên lịch sử cuộc trò chuyện, nhắc lại việc cũ", false, false, RouteExecutor, () =>
+    {
+        routeConsentChecks++;
+        return Task.FromResult<string?>(null);
+    });
+if (authorizedChatRoute.ContinueToChat) routeProviderCalls++;
+Check(authorizedChatRoute.ContinueToChat && authorizedChatRoute.Result is null &&
+      routeExecutorCalls == 0 && routeConsentChecks == 1 && routeProviderCalls == 1,
+    "normal chat continues to the provider only after history consent is granted");
 var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUsePolicy.Describe());
 Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
     "the exposed permission description keeps code execution disabled");

@@ -37,6 +37,7 @@ public static class ComputerUseChatIntent
 public static class ComputerUseChatDispatcher
 {
     public sealed record DispatchResult<T>(bool Dispatched, string? Action, T? Value) where T : class;
+    public sealed record RouteResult<T>(bool ContinueToChat, T? Result) where T : class;
 
     public static bool IsPracticeMode(bool startPracticeRequested, bool activeCase) => startPracticeRequested || activeCase;
 
@@ -52,5 +53,18 @@ public static class ComputerUseChatDispatcher
         if (action is null)
             return new(false, null, null);
         return new(true, action, await executor(action));
+    }
+
+    public static async Task<RouteResult<T>> DispatchBeforeChatAuthorizationAsync<T>(string? message,
+        bool practiceActive, bool miniPracticeActive, Func<string, Task<T>> executor,
+        Func<Task<T?>> authorizeNormalChat) where T : class
+    {
+        var dispatch = await TryDispatchAsync(message, practiceActive, miniPracticeActive, executor);
+        if (dispatch.Dispatched) return new(false, dispatch.Value);
+
+        var authorizationFailure = await authorizeNormalChat();
+        return authorizationFailure is null
+            ? new(true, null)
+            : new(false, authorizationFailure);
     }
 }

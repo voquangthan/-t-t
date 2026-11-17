@@ -735,19 +735,23 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 cancellationToken);
         }
 
-        var computerUseDispatch = await ComputerUseChatDispatcher.TryDispatchAsync<IResult>(message,
-            practicing, miniPractice, ExecuteDirectComputerUse);
-        if (computerUseDispatch.Dispatched) return computerUseDispatch.Value ??
-            Results.Problem("Computer Use không trả kết quả.", statusCode: 502);
+        async Task<IResult?> AuthorizeNormalChat()
+        {
+            if (chatHistory is not null && Guid.TryParse(historyRevisionHeader, out _) &&
+                !consentPolicy.Check(owner, [new ConsentPolicy.ConsentRequirement("chat_history", "direct_request", "local_only")],
+                    "chat_history_save", request.RequestId, out _))
+                return Results.Json(new { error = "Chưa được cấp quyền lưu lịch sử Chat cục bộ." }, statusCode: StatusCodes.Status403Forbidden);
+            if (requiredConsents.Count > 0 && !consentPolicy.Check(owner, requiredConsents, "chat_context",
+                request.RequestId, out var deniedConsents))
+                return Results.Json(new { error = "Chưa được cấp quyền cho một hoặc nhiều nguồn ngữ cảnh.", denied = deniedConsents },
+                    statusCode: StatusCodes.Status403Forbidden);
+            return null;
+        }
 
-        if (chatHistory is not null && Guid.TryParse(historyRevisionHeader, out _) &&
-            !consentPolicy.Check(owner, [new ConsentPolicy.ConsentRequirement("chat_history", "direct_request", "local_only")],
-                "chat_history_save", request.RequestId, out _))
-            return Results.Json(new { error = "Chưa được cấp quyền lưu lịch sử Chat cục bộ." }, statusCode: StatusCodes.Status403Forbidden);
-        if (requiredConsents.Count > 0 && !consentPolicy.Check(owner, requiredConsents, "chat_context",
-            request.RequestId, out var deniedConsents))
-            return Results.Json(new { error = "Chưa được cấp quyền cho một hoặc nhiều nguồn ngữ cảnh.", denied = deniedConsents },
-                statusCode: StatusCodes.Status403Forbidden);
+        var chatRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync<IResult>(message,
+            practicing, miniPractice, ExecuteDirectComputerUse, AuthorizeNormalChat);
+        if (!chatRoute.ContinueToChat) return chatRoute.Result ??
+            Results.Problem("Computer Use hoặc kiểm tra quyền không trả kết quả.", statusCode: 502);
 
         consentPolicy.RecordExplicitAction(owner,
             new ConsentPolicy.ConsentRequirement("chat_message", "direct_request", "external_service"),
