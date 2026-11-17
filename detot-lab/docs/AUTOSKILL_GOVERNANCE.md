@@ -27,7 +27,7 @@ The staging pipeline has an owner-scoped legacy migration command. It scans only
 - **MIXED:** separate only independently verified, hash-backed content segments; otherwise quarantine.
 - **UNKNOWN:** quarantine and block use.
 
-`planConsentRevocation` is currently a pure, deterministic plan builder. It follows both source and dependency links, quarantines nodes without artifact IDs, and blocks the plan if IDs collide. Repeating the same plan over the same graph produces the same output. It does not delete files. This prevents unclassified bulk deletion while the adapter/Backend owner identity and transactional revoke contract are unresolved. Audit records contain artifact IDs, action names and reasons only.
+`planConsentRevocation` is currently a pure, deterministic plan builder. It follows both source and dependency links, quarantines nodes without artifact IDs, and blocks the plan if IDs collide. For a mixed artifact, a hash-backed segment can be selected for separation only when its source/dependency links do not intersect the revoked dependency closure and its consent scope does not include the revoked tuple. If no segment meets that test, the whole artifact is quarantined. Repeating the same plan over the same graph produces the same output. It does not separate or delete files. This prevents unclassified bulk deletion while the adapter/Backend owner identity and transactional revoke contract are unresolved. Audit records contain artifact IDs, action names and reasons only.
 
 ## Runtime enforcement and current limits
 

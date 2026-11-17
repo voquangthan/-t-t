@@ -91,7 +91,18 @@ export function planConsentRevocation({ artifacts, revokedScope }) {
       continue;
     }
     const policy = evaluateArtifactPolicy(item, revokedScope);
-    if (policy.action === "separate_verified_segments") actions.push({ artifact_id: id, action: policy.action, reason: policy.reason, segment_ids: policy.segment_ids });
+    if (policy.action === "separate_verified_segments") {
+      const impactedSegments = new Set();
+      for (const segment of item?.content_segments || []) {
+        if (!policy.segment_ids.includes(segment?.segment_id)) continue;
+        const references = [...(segment?.source_ids || []), ...(segment?.dependency_ids || [])];
+        if (references.some((reference) => impacted.has(reference)) || scopeMatches(segment?.consent_scope, revokedScope))
+          impactedSegments.add(segment.segment_id);
+      }
+      const safeSegmentIds = policy.segment_ids.filter((segmentId) => !impactedSegments.has(segmentId)).sort();
+      if (safeSegmentIds.length) actions.push({ artifact_id: id, action: policy.action, reason: policy.reason, segment_ids: safeSegmentIds });
+      else actions.push({ artifact_id: id, action: "quarantine", reason: "no_independent_segments_outside_revoked_lineage" });
+    }
     else if (policy.decision === "UNKNOWN") actions.push({ artifact_id: id, action: "quarantine", reason: "revoked_dependency_or_unknown_lineage" });
     else actions.push({ artifact_id: id, action: "invalidate_and_delete", reason: policy.reason === "revoked_scope" ? policy.reason : "derived_from_revoked_artifact" });
   }

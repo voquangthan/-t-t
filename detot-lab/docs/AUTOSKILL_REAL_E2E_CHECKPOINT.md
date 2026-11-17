@@ -84,3 +84,10 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Added a staging-only, owner-scoped migration command. Dry-run is the default; explicit apply annotates legacy proposals and version snapshots as UNKNOWN/quarantined, preserves candidate/history bytes semantically, and blocks activation.
 - The migrator does not touch archives, active pointers, mirrors, backup data, or real owner storage. It refuses to apply when an artifact is unreadable or the embedded owner ID does not match.
 - Synthetic migration/restart-idempotence/owner-isolation tests pass; project governance/provenance/pipeline/integration/migration suite is **22/22 PASS**. Migration was not run against the existing `.local` tree.
+
+### Mixed provenance revocation guard — 17/11/2026
+
+- Revocation planning now filters mixed-content segments against the full revoked source/dependency closure and the revoked consent tuple before selecting segments for separation.
+- If every independently labeled segment still has revoked lineage, the complete mixed artifact is quarantined.
+- Synthetic governance/provenance/pipeline/integration/migration tests: **24/24 PASS**.
+- This remains planning-only. No content was split or deleted, and no real owner data, Gateway or provider was used.
