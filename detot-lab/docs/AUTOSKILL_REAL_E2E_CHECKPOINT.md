@@ -97,7 +97,8 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Added an owner-scoped metadata journal and monotonic artifact/path tombstones. The staging pipeline checks tombstones before parsing affected proposal/version files and rejects replay evaluation, approval, and rollback for revoked artifacts.
 - Resume is idempotent. It revalidates the embedded owner/artifact IDs and exact planned file hash before deleting an allowlisted proposal/version JSON file. A changed target stays in place and the revoke remains blocked. Unknown/ambiguous lineage is quarantined; an unmappable node quarantines that owner's AutoSkill pipeline.
 - Mixed artifacts are kept quarantined because the current executor cannot safely split file contents, even when the policy planner identifies candidate independent segments.
-- Synthetic tests cover interruption/resume, repeated revoke, owner isolation, changed-file refusal, restore-at-tombstoned-path denial, and no deletion of quarantined records. Project AutoSkill suite: **30/30 PASS**; pinned adapter suite: **82/82 PASS**.
+- Owner-scoped locks serialize staging writes and revocation across processes; dead-process lock recovery is tested, while malformed lock metadata remains fail-closed for manual recovery.
+- Synthetic tests cover interruption/resume, repeated revoke, owner isolation, concurrent process denial, changed-file refusal, restore-at-tombstoned-path denial, and no deletion of quarantined records. Project AutoSkill suite: **35/35 PASS**; pinned adapter suite: **82/82 PASS**.
 - This is staging pipeline integration only. It is not bound to Backend-authenticated consent, and it does not cover conversation archives, runtime mirrors/caches, embeddings, active pointers, or backups. No real data was migrated/deleted, no Gateway was started/changed, and no provider was used.
 
 ### Independent-source rebuild draft — 17/11/2026

@@ -7,6 +7,7 @@ import { assertArtifactUsable, evaluateArtifactPolicy } from "./governance.mjs";
 import { createArtifactProvenance, createContentSegments, stableArtifactId } from "./provenance.mjs";
 import { migrateLegacyArtifact } from "./migration.mjs";
 import { isArtifactRevoked, isPathRevoked } from "./revocation-store.mjs";
+import { withOwnerLockSync } from "./owner-lock.mjs";
 
 const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/u;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -191,7 +192,13 @@ function buildSkillMarkdown(candidate, skillId, version) {
   ].join("\n");
 }
 
-export function listProposals({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner" } = {}) {
+export function listProposals(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => listProposalsLocked({ root, ownerId }));
+}
+
+function listProposalsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner" } = {}) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const ownerRoot = ensureInside(stagingRoot, path.join(stagingRoot, "state", "autoskill", "proposals", "Users", owner));
@@ -211,7 +218,13 @@ export function listProposals({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
   }).filter(Boolean);
 }
 
-export function evaluateProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, report }) {
+export function evaluateProposal(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => evaluateProposalLocked({ ...options, root, ownerId }));
+}
+
+function evaluateProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, report }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
@@ -266,7 +279,13 @@ export function evaluateProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot
   return evaluation;
 }
 
-export function approveProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId }) {
+export function approveProposal(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => approveProposalLocked({ ...options, root, ownerId }));
+}
+
+function approveProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
@@ -330,7 +349,13 @@ export function approveProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-
   return { skill_id: skillId, version, skill_hash: snapshot.skill_hash, path: snapshotFile };
 }
 
-export function rejectProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, reason = "review_rejected" }) {
+export function rejectProposal(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => rejectProposalLocked({ ...options, root, ownerId }));
+}
+
+function rejectProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, reason = "review_rejected" }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
@@ -349,7 +374,13 @@ export function rejectProposal({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-o
   return { proposal_id: id, status: proposal.status };
 }
 
-export function rollbackSkill({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", skillId, version }) {
+export function rollbackSkill(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => rollbackSkillLocked({ ...options, root, ownerId }));
+}
+
+function rollbackSkillLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", skillId, version }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const skill = requireId(skillId, "skill_id");
@@ -368,7 +399,13 @@ export function rollbackSkill({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
 }
 
 /** Create a fresh, inactive proposal from explicitly supplied verified independent source artifacts. */
-export function prepareSafeSkillRebuild({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", candidate, sourceArtifacts }) {
+export function prepareSafeSkillRebuild(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => prepareSafeSkillRebuildLocked({ ...options, root, ownerId }));
+}
+
+function prepareSafeSkillRebuildLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", candidate, sourceArtifacts }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   if (!Array.isArray(sourceArtifacts) || sourceArtifacts.length === 0 || sourceArtifacts.length > 32)
@@ -500,7 +537,13 @@ function collectLegacyArtifactPaths(root, ownerId) {
 }
 
 /** Dry-runs by default; apply only adds UNKNOWN/quarantine provenance to known owner-scoped records. */
-export function migrateLegacyArtifacts({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", apply = false } = {}) {
+export function migrateLegacyArtifacts(options = {}) {
+  const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
+  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  return withOwnerLockSync(root, ownerId, () => migrateLegacyArtifactsLocked({ ...options, root, ownerId }));
+}
+
+function migrateLegacyArtifactsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", apply = false } = {}) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const files = collectLegacyArtifactPaths(stagingRoot, owner);

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { withOwnerLockSync } from "./owner-lock.mjs";
 
 const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/u;
 
@@ -138,7 +139,11 @@ function writeTombstones(root, ownerId, journal) {
 }
 
 /** Create a durable, metadata-only journal from the deterministic policy plan. */
-export function prepareRevocation({ root, ownerId, consentRevision, revokedScope, plan, artifacts }) {
+export function prepareRevocation(options) {
+  return withOwnerLockSync(options?.root, options?.ownerId, () => prepareRevocationLocked(options));
+}
+
+function prepareRevocationLocked({ root, ownerId, consentRevision, revokedScope, plan, artifacts }) {
   const base = path.resolve(root);
   const owner = requireSafeId(ownerId, "owner_id");
   if (!Number.isSafeInteger(consentRevision) || consentRevision < 0) throw new Error("invalid_consent_revision");
@@ -227,7 +232,11 @@ export function prepareRevocation({ root, ownerId, consentRevision, revokedScope
 }
 
 /** Persist artifact tombstones before any deletion. Repeated calls safely resume after interruption. */
-export function resumeRevocation({ root, ownerId, revocationId, apply = false, stopAfter = Number.POSITIVE_INFINITY }) {
+export function resumeRevocation(options) {
+  return withOwnerLockSync(options?.root, options?.ownerId, () => resumeRevocationLocked(options));
+}
+
+function resumeRevocationLocked({ root, ownerId, revocationId, apply = false, stopAfter = Number.POSITIVE_INFINITY }) {
   const base = path.resolve(root);
   const owner = requireSafeId(ownerId, "owner_id");
   const id = requireSafeId(revocationId, "revocation_id");
