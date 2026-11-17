@@ -726,13 +726,14 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         async Task<IResult> ExecuteDirectComputerUse(string computerAction)
         {
             var observationTarget = ComputerUseChatIntent.ObservationTargetForAction(computerAction);
-            if (!ComputerUsePolicy.CanNavigate(computerAction) && !ComputerUsePolicy.CanObserve(observationTarget))
+            if (!ComputerUsePolicy.CanNavigate(computerAction) && !ComputerUsePolicy.CanObserve(observationTarget) &&
+                !ComputerUsePolicy.CanSelectGitHubAccount(computerAction))
                 return Results.BadRequest(new { error = "Hành động Computer Use không được cấp phép." });
             if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
                 context.Connection.RemoteIpAddress))
                 return Results.Problem("Computer Use chỉ hoạt động khi Đệ Tốt chạy local trên Windows.", statusCode: 503);
-            var destination = computerAction is "open-github" or "read-github-account" or "read-github-pull-requests"
-                ? "GitHub" : "local_only";
+            var destination = computerAction is "open-github" or "read-github-account" or "read-github-pull-requests" ||
+                ComputerUsePolicy.CanSelectGitHubAccount(computerAction) ? "GitHub" : "local_only";
             consentPolicy.RecordExplicitAction(owner,
                 new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", destination),
                 "chat_computer_use", request.RequestId);
@@ -1476,6 +1477,15 @@ static IResult BrowserActionResult(JsonElement result)
 static async Task<IResult> ExecuteComputerUseChatAction(string action, string? repositoryRoot,
     PlaywrightEdgeAdapter browser, CancellationToken cancellationToken)
 {
+    if (ComputerUsePolicy.CanSelectGitHubAccount(action))
+    {
+        var target = ComputerUseChatIntent.GitHubAccountTargetForAction(action);
+        var selection = GitCredentialAccountSelector.SelectAccount(target);
+        return selection.Succeeded
+            ? Results.Ok(new { reply = selection.Message, toolUsed = true, computerUseAction = "select-github-account" })
+            : Results.Problem(selection.Message, statusCode: 409);
+    }
+
     if (action == "read-approved-applications")
     {
         var observation = WindowsDesktopAutomation.ObserveOpenApprovedApplications();

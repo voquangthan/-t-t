@@ -63,6 +63,43 @@ Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application nav
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
+Check(ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:voquangthan"),
+    "explicit GitHub identity selection is a separate narrowly-scoped capability");
+Check(ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:bottom"),
+    "the explicitly requested bottom account maps to a bounded selection capability");
+Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:voquangthan;run-shell"),
+    "account-selection targets cannot carry extra commands");
+Check(!ComputerUsePolicy.CanWrite("select-github-account:voquangthan"),
+    "GitHub account selection does not grant write or code-execution permission");
+var exactAccountRequest = ComputerUseChatIntent.DetectDirectRequest("Chọn tài khoản GitHub voquangthan");
+Check(exactAccountRequest == "select-github-account:voquangthan" && ComputerUsePolicy.CanSelectGitHubAccount(exactAccountRequest),
+    "a direct request for a named GitHub account is recognized and authorized separately");
+var bottomAccountRequest = ComputerUseChatIntent.DetectDirectRequest("Chọn cái ở dưới đi");
+Check(bottomAccountRequest == "select-github-account:bottom" && ComputerUsePolicy.CanSelectGitHubAccount(bottomAccountRequest),
+    "a direct request for the bottom listed account is recognized without hard-coding its identity");
+Check(ComputerUseChatIntent.DetectDirectRequest("Làm sao chọn tài khoản GitHub voquangthan?") is null,
+    "an account-selection how-to question does not switch identity");
+Check(ComputerUseChatIntent.DetectDirectRequest("Trong ví dụ: chọn cái ở dưới") is null,
+    "an embedded account-selection example does not switch identity");
+Check(ComputerUseChatIntent.DetectDirectRequest("Chọn cái ở dưới\nMở Edge") is null,
+    "multiline content cannot trigger account selection");
+Check(ComputerUseChatIntent.GitHubAccountTargetForAction(bottomAccountRequest!) == "bottom",
+    "the account-selection action carries only the bounded target token");
+var accountChoices = GitCredentialAccountSelector.ResolveTarget(["voquangthan111-lgtm", "voquangthan"], "bottom");
+Check(accountChoices.Allowed && accountChoices.Login == "voquangthan" && accountChoices.Index == 1,
+    "bottom selection resolves against currently visible account rows");
+var namedAccountChoice = GitCredentialAccountSelector.ResolveTarget(["voquangthan111-lgtm", "voquangthan"], "voquangthan");
+Check(namedAccountChoice.Allowed && namedAccountChoice.Login == "voquangthan" && namedAccountChoice.Index == 1,
+    "named selection resolves only an exact visible login");
+Check(!GitCredentialAccountSelector.ResolveTarget(["voquangthan111-lgtm"], "voquangthan").Allowed,
+    "a named account absent from the chooser is rejected");
+Check(!GitCredentialAccountSelector.ResolveTarget(["voquangthan", "VOQUANGTHAN"], "voquangthan").Allowed,
+    "duplicate case-insensitive chooser identities are rejected as ambiguous");
+var malformedLabelChoice = GitCredentialAccountSelector.ResolveTarget(["invalid/login", "voquangthan"], "bottom");
+Check(malformedLabelChoice.Allowed && malformedLabelChoice.Login == "voquangthan",
+    "malformed labels are ignored while bottom selection stays within valid GitHub identities");
+Check(!GitCredentialAccountSelector.ResolveTarget([], "bottom").Allowed,
+    "selection fails closed when no account rows are visible");
 Check(ComputerUseChatIntent.DetectDirectRequest("Mở Edge đi") == "open-edge",
     "a direct chat request maps to an allowlisted Edge action");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đệ Tốt, mở VS Code giúp t") == "open-vscode",
