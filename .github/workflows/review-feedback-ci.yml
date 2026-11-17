@@ -1,0 +1,31 @@
+name: Review feedback CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-feedback-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-loop-security-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the PR revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Validate and test review feedback listener
+        working-directory: detot-lab
+        run: |
+          node --check tools/review-feedback/listener.mjs
+          node --check tools/review-feedback/controller.mjs
+          node --test tests/review-feedback/listener.test.mjs
