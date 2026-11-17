@@ -27,6 +27,8 @@ The staging pipeline has an owner-scoped legacy migration command. It scans only
 - **MIXED:** separate only independently verified, hash-backed content segments; otherwise quarantine.
 - **UNKNOWN:** quarantine and block use.
 
+A mixed segment is eligible only with a valid SHA-256 content hash, nonempty source IDs matching the independent evidence, dependency IDs, an explicit consent-scope field, known validation/activation states, and `retention_state: retained`. Missing or withdrawn segment metadata makes it ineligible for separation.
+
 `planConsentRevocation` follows both source and dependency links, quarantines nodes without artifact IDs, and blocks the plan if IDs collide. For a mixed artifact, a hash-backed segment can be selected for separation only when its source/dependency links do not intersect the revoked dependency closure and its consent scope does not include the revoked tuple. The staging executor does not yet split content, so it quarantines the whole mixed artifact instead of retaining selected segments.
 
 The staging-only `revocation-store.mjs` persists an owner-scoped journal and monotonic tombstones before cleanup. Deletion is limited to exact proposal/version JSON files under that owner's managed directories; it rechecks the planned content hash and embedded owner/artifact IDs before unlinking. Repeated execution resumes missing targets idempotently. Tombstones block proposal/version evaluation and activation, including a restored file at a tombstoned path. Unknown artifacts are blocked by ID; if an artifact cannot be mapped safely, the owner is quarantined until review. Journal/tombstone files contain IDs, scope, relative managed paths, hashes, revisions and state, not artifact content.

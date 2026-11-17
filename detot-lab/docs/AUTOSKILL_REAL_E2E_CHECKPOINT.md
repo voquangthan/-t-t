@@ -108,6 +108,11 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - The new draft must pass the normal replay gate and explicit approval. Synthetic AutoSkill suite: **32/32 PASS**.
 - This is not a source-registration UI/API and does not establish trusted Backend source evidence. It does not enable capture or retrieval and remains staging-only.
 
+### Mixed-segment metadata gate — 17/11/2026
+
+- Mixed-content separation now requires a SHA-256 hash, exact independent source evidence, dependency metadata, explicit consent-scope metadata, non-unknown validation/activation states, and retained content. Incomplete or withdrawn segments are ineligible and the artifact is quarantined.
+- Synthetic governance and full AutoSkill suite: **36/36 PASS**.
+
 ### Active pointer and mirror provenance — 17/11/2026
 
 - Active pointers and managed runtime mirror markers now carry opaque artifact IDs, source/dependency links, consent scope/revision, validation/activation/retention state, and hashes for their content segments.

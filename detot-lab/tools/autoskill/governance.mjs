@@ -8,6 +8,21 @@ function normalizedType(provenance) {
   return TYPES.has(provenance?.provenance_type) ? provenance.provenance_type : "unknown";
 }
 
+function hasVerifiedIndependentSegmentMetadata(segment) {
+  const sourceIds = Array.isArray(segment?.source_ids) ? segment.source_ids.filter(Boolean) : [];
+  const evidenceIds = Array.isArray(segment?.independence_evidence?.source_ids)
+    ? segment.independence_evidence.source_ids.filter(Boolean)
+    : [];
+  return typeof segment?.segment_id === "string" && segment.segment_id.length > 0 &&
+    /^[a-f0-9]{64}$/u.test(String(segment?.content_hash || "")) &&
+    segment?.provenance_type === "independent" && segment?.independence_evidence?.verified === true &&
+    sourceIds.length > 0 && sourceIds.length === evidenceIds.length && sourceIds.every((id) => evidenceIds.includes(id)) &&
+    Array.isArray(segment?.dependency_ids) && Object.hasOwn(segment, "consent_scope") &&
+    ["pending_review", "replay_passed", "validated"].includes(segment?.validation_status) &&
+    ["inactive", "active", "not_applicable"].includes(segment?.activation_status) &&
+    segment?.retention_state === "retained";
+}
+
 export function evaluateArtifactPolicy(artifact, revokedScope = null) {
   const provenance = artifact?.provenance || artifact;
   const type = normalizedType(provenance);
@@ -35,11 +50,7 @@ export function evaluateArtifactPolicy(artifact, revokedScope = null) {
     : { decision: "UNKNOWN", action: "quarantine", reason: "incomplete_conversation_lineage" };
   if (type === "mixed") {
     const segments = Array.isArray(artifact?.content_segments) ? artifact.content_segments : [];
-    const separable = segments.filter((segment) => segment?.provenance_type === "independent" &&
-      segment?.independence_evidence?.verified === true && segment?.content_hash &&
-      Array.isArray(segment?.independence_evidence?.source_ids) && segment.independence_evidence.source_ids.length &&
-      Array.isArray(segment?.source_ids) && segment.source_ids.length === segment.independence_evidence.source_ids.length &&
-      segment.source_ids.every((id) => segment.independence_evidence.source_ids.includes(id)));
+    const separable = segments.filter(hasVerifiedIndependentSegmentMetadata);
     return separable.length
       ? { decision: "MIXED", action: "separate_verified_segments", reason: revoked ? "revoked_mixed_source_separate_verified_segments" : "verified_independent_segments_only", segment_ids: separable.map((item) => item.segment_id).filter(Boolean) }
       : { decision: "UNKNOWN", action: "quarantine", reason: "mixed_content_not_safely_separable" };

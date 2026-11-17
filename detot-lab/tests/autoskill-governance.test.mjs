@@ -13,6 +13,19 @@ const source = (id, type, overrides = {}) => ({
   retention_state: "retained",
   ...overrides,
 });
+const independentSegment = (id, sourceIds, dependencyIds = [], overrides = {}) => ({
+  segment_id: id,
+  content_hash: "a".repeat(64),
+  provenance_type: "independent",
+  source_ids: sourceIds,
+  dependency_ids: dependencyIds,
+  consent_scope: null,
+  validation_status: "pending_review",
+  activation_status: "inactive",
+  retention_state: "retained",
+  independence_evidence: { verified: true, source_ids: sourceIds },
+  ...overrides,
+});
 
 test("unverified independence and unknown legacy artifacts are quarantined", () => {
   assert.equal(evaluateArtifactPolicy({ provenance: source("skill-a", "independent") }).action, "quarantine");
@@ -75,12 +88,16 @@ test("mixed artifacts separate only hash backed independently verified segments"
   const mixed = {
     provenance: source("mixed-1", "mixed"),
     content_segments: [
-      { segment_id: "safe-segment", content_hash: "hash", provenance_type: "independent", source_ids: ["docs:1"], independence_evidence: { verified: true, source_ids: ["docs:1"] } },
-      { segment_id: "unverified-segment", content_hash: "hash", provenance_type: "independent" },
+      independentSegment("safe-segment", ["docs:1"]),
+      independentSegment("unverified-segment", ["docs:2"], [], { independence_evidence: { verified: false, source_ids: ["docs:2"] } }),
     ],
   };
   assert.deepEqual(evaluateArtifactPolicy(mixed).segment_ids, ["safe-segment"]);
   assert.equal(evaluateArtifactPolicy({ provenance: source("mixed-2", "mixed") }).action, "quarantine");
+  const withdrawn = { provenance: source("mixed-withdrawn", "mixed"), content_segments: [
+    independentSegment("withdrawn", ["docs:3"], [], { retention_state: "withdrawn" }),
+  ] };
+  assert.equal(evaluateArtifactPolicy(withdrawn).action, "quarantine");
 });
 
 test("revocation excludes mixed segments linked to revoked sources or dependencies", () => {
@@ -88,10 +105,10 @@ test("revocation excludes mixed segments linked to revoked sources or dependenci
   const mixed = {
     provenance: source("mixed-revoke", "mixed", { source_ids: ["conversation-mixed"] }),
     content_segments: [
-      { segment_id: "public-safe", content_hash: "hash-a", provenance_type: "independent", source_ids: ["docs:public"], dependency_ids: [], independence_evidence: { verified: true, source_ids: ["docs:public"] } },
-      { segment_id: "linked-by-source", content_hash: "hash-b", provenance_type: "independent", source_ids: ["conversation-mixed"], dependency_ids: [], independence_evidence: { verified: true, source_ids: ["conversation-mixed"] } },
-      { segment_id: "linked-by-dependency", content_hash: "hash-c", provenance_type: "independent", source_ids: ["docs:derived"], dependency_ids: ["conversation-mixed"], independence_evidence: { verified: true, source_ids: ["docs:derived"] } },
-      { segment_id: "linked-by-consent", content_hash: "hash-d", provenance_type: "independent", source_ids: ["docs:other"], dependency_ids: [], consent_scope: { revision: 3, requirements: [revokedScope] }, independence_evidence: { verified: true, source_ids: ["docs:other"] } },
+      independentSegment("public-safe", ["docs:public"]),
+      independentSegment("linked-by-source", ["conversation-mixed"]),
+      independentSegment("linked-by-dependency", ["docs:derived"], ["conversation-mixed"]),
+      independentSegment("linked-by-consent", ["docs:other"], [], { consent_scope: { revision: 3, requirements: [revokedScope] } }),
     ],
   };
   const plan = planConsentRevocation({ artifacts: [{ provenance: conversation }, mixed], revokedScope });
@@ -108,7 +125,7 @@ test("mixed artifact is quarantined when every independently labeled segment has
   const mixed = {
     provenance: source("mixed-only", "mixed", { source_ids: ["conversation-only"] }),
     content_segments: [
-      { segment_id: "linked", content_hash: "hash", provenance_type: "independent", source_ids: ["docs:public"], dependency_ids: ["conversation-only"], independence_evidence: { verified: true, source_ids: ["docs:public"] } },
+      independentSegment("linked", ["docs:public"], ["conversation-only"]),
     ],
   };
   const plan = planConsentRevocation({ artifacts: [{ provenance: conversation }, mixed], revokedScope });
