@@ -58,11 +58,28 @@ function appendAudit(root, ownerId, event) {
   fs.appendFileSync(auditPath, `${JSON.stringify({ at: new Date().toISOString(), owner_id: ownerId, ...event })}\n`, "utf8");
 }
 
+function auditReasonCode(error) {
+  const message = String(error?.message || "");
+  const policyReason = message.match(/^artifact_not_usable:([a-z0-9_]+)$/u)?.[1];
+  if (policyReason) return policyReason;
+  if (message === "artifact_revoked_by_consent" || message === "revocation_state_unavailable") return message;
+  return "policy_check_failed";
+}
+
 function assertArtifactUsableForPipeline(root, ownerId, artifact, operation) {
   try {
     const artifactId = String(artifact?.provenance?.artifact_id || artifact?.artifact_id || "");
     if (isArtifactRevoked({ root, ownerId, artifactId })) throw new Error("artifact_revoked_by_consent");
-    return assertArtifactUsable(artifact);
+    const policy = assertArtifactUsable(artifact);
+    appendAudit(root, ownerId, {
+      action: "artifact_policy_allowed",
+      artifact_id: artifactId,
+      operation,
+      decision: policy.decision,
+      policy_action: policy.action,
+      reason: policy.reason,
+    });
+    return policy;
   }
   catch (error) {
     appendAudit(root, ownerId, {
@@ -70,7 +87,7 @@ function assertArtifactUsableForPipeline(root, ownerId, artifact, operation) {
       artifact_id: String(artifact?.provenance?.artifact_id || artifact?.artifact_id || ""),
       proposal_id: String(artifact?.proposal_id || artifact?.source_proposal_id || ""),
       operation,
-      reason: String(error?.message || "artifact_not_usable").slice(0, 120),
+      reason: auditReasonCode(error),
     });
     throw error;
   }
@@ -79,12 +96,13 @@ function assertArtifactUsableForPipeline(root, ownerId, artifact, operation) {
 function assertArtifactPathReadable(root, ownerId, artifactPath, operation) {
   try {
     if (isPathRevoked({ root, ownerId, artifactPath })) throw new Error("artifact_revoked_by_consent");
+    appendAudit(root, ownerId, { action: "artifact_path_allowed", operation });
   } catch (error) {
     appendAudit(root, ownerId, {
       action: "artifact_policy_denied",
       artifact_id: "",
       operation,
-      reason: String(error?.message || "revocation_state_unavailable").slice(0, 120),
+      reason: auditReasonCode(error),
     });
     throw error;
   }

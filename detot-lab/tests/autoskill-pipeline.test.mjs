@@ -87,6 +87,10 @@ test("new successful procedure requires three passing replay cases and explicit 
   assert.equal(marker.content_segments.length, 1);
   assert.equal(marker.content_segments[0].content_hash, crypto.createHash("sha256").update(fs.readFileSync(skillFile)).digest("hex"));
   assert.equal("content" in marker.content_segments[0], false);
+  const audit = fs.readFileSync(path.join(stage.root, "state", "autoskill", "audit", `${stage.owner}.jsonl`), "utf8");
+  assert.match(audit, /artifact_policy_allowed/);
+  assert.match(audit, /artifact_path_allowed/);
+  assert.doesNotMatch(audit, /Inspect a copy, validate the result/);
 });
 
 test("failed then corrected procedure can be proposed as a new reviewed version", () => {

@@ -125,3 +125,9 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Updated the shared gate to deny MIXED and every non-retain policy action, and to honor top-level as well as nested activation/retention state. The artifact remains quarantined until a separately validated rebuild/split exists.
 - Synthetic governance, pipeline, owner-lock, revocation-store, provenance, migration and integration tests: **38/38 PASS**; `git diff --check` PASS. Adapter suite SKIP because the pinned upstream checkout is absent from this workspace.
 - Local commit: `a6a5f42`. No real owner data, provider, Gateway or AutoSkill capture was used; AutoSkill remains disabled. Backend consent lease binding and full-store revocation remain blockers.
+
+### Policy decision audit metadata — 17/11/2026
+
+- Staging artifact usability and tombstone path checks now record both allow and deny decisions with operation/policy codes. Denial reasons are normalized to fixed codes; arbitrary exception text and artifact bodies are not copied into the audit log.
+- The synthetic pipeline regression verifies allow metadata and confirms a candidate prompt is absent from audit output. AutoSkill suite: **38/38 PASS**; syntax and diff checks PASS.
+- This is staging pipeline audit evidence, not a durable consent-decision log from the live Backend/Gateway lease, which remains unimplemented.
