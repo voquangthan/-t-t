@@ -12,11 +12,11 @@ Windows application launch and observation use fixed allowlists. FlaUI UIA3 chec
 
 ## GitHub profile
 
-The Playwright adapter uses its own profile at `detot-lab/.local/computer-use/edge-profile`. It does not reuse the user's personal Edge profile or copy browser credentials into the Backend. If the dedicated profile has no GitHub session, account lookup reports that state; the user must sign in directly in that Edge window if they choose to use it. Public PR/check summaries do not require a GitHub login.
+The Playwright adapter uses its own profile under the selected runtime directory at `.local/runtime-<web-port>-<gateway-port>/computer-use/edge-profile`. It does not reuse the user's personal Edge profile or copy browser credentials into the Backend. Separate lab port pairs get separate Edge profiles; restarts of the same pair reuse that profile. If the dedicated profile has no GitHub session, account lookup reports that state; the user must sign in directly in that Edge window if they choose to use it. Public PR/check summaries do not require a GitHub login.
 
 ## Runtime configuration
 
-`Start-Lab.ps1` supplies the Node executable and the sibling `playwright-core` path. The adapter starts the fixed `tools/computer-use/edge-reader.mjs` worker with a restricted environment and stores its profile under `.local`. Do not expose the Backend beyond loopback for these endpoints.
+`Start-Lab.ps1` supplies the Node executable, sibling `playwright-core` path, and runtime-scoped Edge profile directory. The adapter starts the fixed `tools/computer-use/edge-reader.mjs` worker with a restricted environment. Do not expose the Backend beyond loopback for these endpoints.
 
 Autonomous code execution remains hard-blocked. This adapter only handles the fixed read and navigation actions listed above.
 

@@ -1,4 +1,4 @@
-﻿param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
+param([switch]$ConfigureDeepSeek, [switch]$FromClipboard, [switch]$CalendarTrial,
     [string]$ImportGoogleOAuth, [string]$ImportDriveOAuth, [string]$RestoredState, [switch]$EnableGoogle,
     [string]$PublicOrigin = $env:DETOT_PUBLIC_ORIGIN,
     [ValidateRange(1024,65535)][int]$WebPort = 5183,
@@ -307,6 +307,7 @@ try {
         DETOT_LAB_RUNTIME = $gateway
         DETOT_NODE_EXECUTABLE = $node
         DETOT_PLAYWRIGHT_CORE = Join-Path (Split-Path (Split-Path $gateway -Parent) -Parent) 'playwright-core'
+        DETOT_DESKTOP_EDGE_PROFILE = Join-Path $runtimeDir 'computer-use/edge-profile'
         OPENCLAW_STATE_DIR = $state
         OPENCLAW_CONFIG_PATH = $configPath
         DETOT_WEB_PORT = [string]$WebPort
