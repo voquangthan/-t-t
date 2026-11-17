@@ -1,6 +1,8 @@
 # Proactive Intelligence Engine — kiến trúc đề xuất
 
-**Trạng thái:** bản thiết kế, chưa triển khai. Phạm vi là ranh giới module, hợp đồng dữ liệu và cách chuyển Weather; không thêm nguồn mới, không thay consent hiện tại, không đổi API/UI.
+**Trạng thái (17/11/2026):** kiến trúc nền đã được triển khai cho Weather; đây tiếp tục là tài liệu hợp đồng và ranh giới module. Baseline migration hiện tại là `712493b`, sau contract/golden tests `468ffef`. API Weather cũ được giữ tương thích. Chưa có domain proactive thứ hai.
+
+Weather có thêm luồng cảnh báo NCHMF chính thức qua Google Public Alerts trong commit `3c2b25b`. Đây là endpoint cảnh báo bổ sung theo địa điểm chọn tay, có consent riêng; nó trả cảnh báo nguồn trực tiếp, không tạo Weather suggestion và không gọi Analyzer/DeepSeek. Không xem luồng này là provider/domain thứ hai của Proactive Engine.
 
 ## Mục tiêu và nguyên tắc
 
@@ -194,10 +196,20 @@ Chuyển Weather chỉ được chấp nhận khi tất cả mục sau đạt:
 - **Commercial use:** repo mô tả lab cá nhân một người dùng. Open-Meteo free API không dành cho sản phẩm thương mại; không mở rộng deployment thương mại cho tới khi có giấy phép/endpoint tương ứng.
 - **Mở rộng quá sớm:** chỉ chuyển Weather trước. Không thêm provider thứ hai trước khi hợp đồng và migration Weather giữ đủ compatibility criteria.
 
-## Các bước triển khai sau khi duyệt thiết kế
+## Trạng thái triển khai và việc còn lại
 
-1. Chốt consent stages, lifecycle/status, freshness/retention và phân biệt ba loại score.
-2. Viết contract tests dùng chung cho Provider/Analyzer/Engine; giữ Weather API golden tests.
-3. Tách Weather thành `OpenMeteoProvider` + `WeatherSignalPolicy` + common Engine + `DeepSeekProactiveAnalyzer`, không đổi UI/API.
-4. Chạy mock regression, isolated live smoke, revoke/restart/concurrency suites; so sánh output JSON với baseline.
-5. Chỉ sau khi rollback/compatibility đạt mới đánh giá provider domain thứ hai.
+Đã hoàn thành cho migration Weather:
+
+1. Consent Weather hiện có và owner-wide revision lease được giữ nguyên; quyền cảnh báo Google là quyền cộng thêm, default-deny.
+2. Contract tests và golden response tests được thêm trước migration.
+3. Weather dùng `OpenMeteoProvider`, `WeatherSignalPolicy`, `ProactiveEngine` và `DeepSeekProactiveAnalyzer`, với route/JSON/UI tương thích.
+4. Mock regression, isolated live Weather smoke, revoke/restart/concurrency và kiểm tra JSON compatibility đã được ghi nhận trong các checkpoint/commit tương ứng.
+
+Việc còn lại trước khi mở rộng Engine:
+
+- Đánh giá retention/freshness dùng chung trước khi có thêm domain lưu suggestion/evidence.
+- Thực hiện một accuracy study thời tiết nhiều địa điểm/mùa; một live smoke không chứng minh độ chính xác dài hạn.
+- Chỉ đánh giá domain thứ hai sau khi chốt các rủi ro và consent hợp đồng của domain đó. Không thêm nguồn tự động trong lúc này.
+- AutoSkill không thuộc Engine migration. Nó vẫn disabled cho tới khi capture/archive/extraction kiểm tra quyền Backend trước khi đọc nội dung. Xem `AUTOSKILL_REAL_E2E_CHECKPOINT.md`.
+
+**Giới hạn live hiện tại:** Google Public Alerts chưa có live smoke vì môi trường chưa cấu hình `DETOT_GOOGLE_WEATHER_KEY`; chỉ có mock contract tests. Luồng này cũng không phải nowcast mưa từng phút.

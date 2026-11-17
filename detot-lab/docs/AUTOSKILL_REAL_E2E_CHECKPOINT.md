@@ -44,3 +44,12 @@ Status: **DISABLED — CONSENT BACKEND GATE REQUIRED BEFORE ANY E2E**
 Keep AutoSkill disabled until its capture/archive/extraction path can call the owner-scoped consent backend before reading conversation content. Only then resume isolated staging diagnosis and synthetic E2E; do not alter the primary Gateway config or state.
 
 Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with actual Gateway-backed DeepSeek, proposal, activation, comparative replay, and rollback results.
+
+## Follow-up audit — 17/11/2026
+
+- Repository baseline: `056a35b`; working tree was clean before this documentation checkpoint.
+- The backend consent catalog contains `chat_history / skill_learning / local_only` and `DeepSeek` grants, but repository inspection found no AutoSkill adapter call into the owner-scoped Backend lease. This is not sufficient to enable capture.
+- The pinned upstream clone is absent from this workspace (`.local/research/AutoSkill/AutoSkill4OpenClaw/adapter/embedded_runtime.js` not found), so the hook/archive boundary cannot be safely patched or integration-tested here. Staging config and primary Gateway remain untouched and AutoSkill remains disabled.
+- Verification with synthetic/local fixtures: backend build PASS (0 warnings/errors); Weather checks PASS; consent audit PASS (test project reports CA1416 on its Windows-only DPAPI call); Cloud Storage checks PASS (24/24); AutoSkill pipeline PASS (7/7); frontend tests PASS (2/2) and production build PASS.
+- AutoSkill adapter integration test: SKIP (upstream clone absent). No live provider, personal data or Gateway was used.
+- Frontend build reports existing non-failing warnings: `canonical-host.js` is not bundled because it is a classic script, and the JavaScript chunk is about 553 kB minified.
