@@ -141,3 +141,9 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 
 - Added a phase-by-phase evidence matrix to `AUTOSKILL_GOVERNANCE.md`. All six phases remain marked PARTIAL: current controls are staging/synthetic, not Backend/Gateway end-to-end.
 - Explicit acceptance result: **NOT PASS** until trusted owner-bound consent enforcement and full-store revocation/restore barriers are integrated and runtime-tested. Adapter regression remains unavailable because the pinned source checkout is absent.
+
+### Adapter regression recheck — 17/11/2026
+
+- The current workspace now contains the pinned upstream clone at `94c47ca488d4ba4117d20272e66d49b9877e68cf` with the tracked local privacy patch applied (the local research checkout itself has patch modifications and was not edited in this recheck).
+- Adapter runtime/unit suite: **82/82 PASS** using temporary synthetic fixtures. Project governance/pipeline/revocation/integration suite: **39/39 PASS**. `git diff --check` passed for the project and pinned clone.
+- This replaces the earlier “adapter suite unavailable” note for the current checkout. It does not establish Backend lease integration or live Gateway E2E; overall acceptance remains **NOT PASS**.

@@ -6,12 +6,12 @@ Status: **PARTIAL — provenance governance, staging-only revocation and indepen
 
 | Phase | Status | Evidence and remaining gap |
 |---|---|---|
-| A — Provenance graph | Partial | Conversation sidecars and runtime cache lineage exist in the pinned adapter patch; staging proposals, versions, pointers and mirrors carry lineage. There is no live inventory/revocation traversal across every store, and the adapter clone is absent for current-turn regression. |
+| A — Provenance graph | Partial | Conversation sidecars and runtime cache lineage exist in the pinned adapter patch; staging proposals, versions, pointers and mirrors carry lineage. Isolated adapter tests now run against upstream SHA `94c47ca488d4ba4117d20272e66d49b9877e68cf` with the local privacy patch applied. There is no live inventory/revocation traversal across every store. |
 | B — Policy engine | Partial | Deterministic independent/derived/mixed/unknown planning is implemented. Mixed artifacts are denied whole until a splitter materializes a new artifact. Synthetic governance tests pass; no trusted source-registration workflow verifies independent evidence in application use. |
 | C — Revocation pipeline | Partial | Owner-scoped staging journal tombstones first and deletes only managed proposal/version files, with restart/idempotence/corruption tests. It is not triggered by Backend consent revocation and does not sweep archives, active pointers, mirrors, caches, embeddings or backups. |
 | D — Safe rebuild | Partial | A staging-only utility creates fresh pending drafts from explicitly supplied independent source artifacts. There is no owner-reviewed source registry/API; no old approval state is inherited. |
 | E — Runtime governance | Partial | Adapter patch has default-deny callbacks and revision rechecks; staging writes/revokes use owner locks. No authenticated owner-bound Backend lease, atomic generation fence across workers, or restore barrier across managed stores is integrated. |
-| F — Tests and audit | Partial | Current synthetic project suite: 39/39 PASS. The pinned adapter suite is unavailable in this checkout; no live Gateway or user data was used. Full revoke-during-extraction/promotion and backup-restore integration are not verified. |
+| F — Tests and audit | Partial | Current synthetic project suite: 39/39 PASS; pinned adapter suites: 82/82 PASS against the SHA above with local patch changes. No live Gateway or user data was used. Backend lease integration, full revoke-during-extraction/promotion and backup-restore are not verified. |
 
 **Acceptance result: NOT PASS.** The current evidence supports staging controls only and does not satisfy end-to-end backend enforcement or complete-store revocation.
 
