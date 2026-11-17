@@ -168,9 +168,9 @@
 
 ## GitHub Actions + secure Codex controller — 17/11/2026
 
-- Latest Work comment is `6947728403`, `PASS` for `9eb15026d025f112d4448809df44640583fd84b5`. The reviewer confirms listener/CI and poller-only controller meet the scoped review; formal PR review API is empty. Comment author remains `voquangthan` (ID `198889798`), the PR owner, so it is not independent publisher attestation.
-- Remote branch `codex/review` was pushed to `9eb1502` without force. Worktree is now being updated for the review's non-blocking P3 stale-lock finding: construct the listener before acquiring the controller lock and test constructor failure. This follow-up is not yet committed/pushed.
-- CI run `44080962781` checked out exact SHA `9eb1502`, ran both syntax checks and **34/34** tests. Local tests after adding the P3 regression now pass **35/35**; the new test is not yet in CI.
+- Latest Work comment is `6947814909`, `PASS` for `210d1bb0550ebdc017a68247f18386817c5233a6`. It confirms the 3 P1 issues are contained by a poller-only controller with execution hard-blocked, and accepts the P3 stale-lock fix. Formal PR review API is empty. Comment author remains `voquangthan` (ID `198889798`), the PR owner, so it is not independent publisher attestation.
+- Remote branch `codex/review` is pushed to `210d1bb` without force. The listener is unchanged; controller construction now occurs before lock creation, with a regression proving factory failure leaves no stale lock.
+- CI run `44081694584` checked out exact SHA `210d1bb`, ran both syntax checks and **35/35** tests, with 0 failures or skips.
 - Controller is a foreground poller only. Codex/test/apply/commit/push execution is hard-blocked because no trusted OS isolation provider is available. Approval is reloaded after each poll, STOP is checkpointed, and controller result always has `stageAdvanceAllowed: false`.
 - CI workflow uses GitHub-hosted `pull_request` with read-only permission. Review signal only records minimal metadata and does not checkout PR code. No self-hosted runner, service, Task Scheduler, AutoSkill, consent or product module changes.
 - Remaining limits: no trusted independent Work publisher identity; no real event→controller→Codex→push→Work execution E2E because code execution is intentionally blocked. The signal workflow cannot run for top-level comments until its definition is on the default branch. Do not enable code execution or claim full E2E PASS.
