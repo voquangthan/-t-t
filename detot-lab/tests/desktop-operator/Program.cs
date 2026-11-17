@@ -45,6 +45,36 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở GitHub") is { } openGithub
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") is { } readGitHub &&
       ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(readGitHub)),
     "chat observation intents remain within the observation permission set");
+var computerUseExecutions = 0;
+Task<string> FakeComputerUseExecutor(string action)
+{
+    computerUseExecutions++;
+    return Task.FromResult(action);
+}
+var activeCaseDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở Edge",
+    ComputerUseChatDispatcher.IsPracticeMode(false, true), false, FakeComputerUseExecutor);
+Check(!activeCaseDispatch.Dispatched && computerUseExecutions == 0,
+    "an active incident case never invokes the real desktop executor");
+var startPracticeDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở Edge",
+    ComputerUseChatDispatcher.IsPracticeMode(true, false), false, FakeComputerUseExecutor);
+Check(!startPracticeDispatch.Dispatched && computerUseExecutions == 0,
+    "starting a practice case never invokes the real desktop executor");
+var miniPracticeDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở VS Code", false,
+    ComputerUseChatDispatcher.IsMiniPracticeMode(true, false), FakeComputerUseExecutor);
+Check(!miniPracticeDispatch.Dispatched && computerUseExecutions == 0,
+    "an active mini-practice never invokes the real desktop executor");
+var startMiniPracticeDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở VS Code", false,
+    ComputerUseChatDispatcher.IsMiniPracticeMode(false, true), FakeComputerUseExecutor);
+Check(!startMiniPracticeDispatch.Dispatched && computerUseExecutions == 0,
+    "starting a mini-practice never invokes the real desktop executor");
+var normalChatDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở VS Code", false, false, FakeComputerUseExecutor);
+Check(normalChatDispatch.Dispatched && normalChatDispatch.Action == "open-vscode" &&
+      normalChatDispatch.Value == "open-vscode" && computerUseExecutions == 1,
+    "a direct normal-chat command invokes exactly one allowlisted action");
+computerUseExecutions = 0;
+var normalQuestionDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Làm sao mở Edge?", false, false, FakeComputerUseExecutor);
+Check(!normalQuestionDispatch.Dispatched && computerUseExecutions == 0,
+    "a normal-chat how-to question does not invoke the desktop executor");
 var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUsePolicy.Describe());
 Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
     "the exposed permission description keeps code execution disabled");

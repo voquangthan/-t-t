@@ -33,3 +33,24 @@ public static class ComputerUseChatIntent
         _ => null
     };
 }
+
+public static class ComputerUseChatDispatcher
+{
+    public sealed record DispatchResult<T>(bool Dispatched, string? Action, T? Value) where T : class;
+
+    public static bool IsPracticeMode(bool startPracticeRequested, bool activeCase) => startPracticeRequested || activeCase;
+
+    public static bool IsMiniPracticeMode(bool miniPracticeRequested, bool startMiniPracticeRequested) =>
+        miniPracticeRequested || startMiniPracticeRequested;
+
+    public static async Task<DispatchResult<T>> TryDispatchAsync<T>(string? message, bool practiceActive,
+        bool miniPracticeActive, Func<string, Task<T>> executor) where T : class
+    {
+        if (practiceActive || miniPracticeActive)
+            return new(false, null, null);
+        var action = ComputerUseChatIntent.DetectDirectRequest(message);
+        if (action is null)
+            return new(false, null, null);
+        return new(true, action, await executor(action));
+    }
+}

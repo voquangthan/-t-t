@@ -722,7 +722,11 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 statusCode: StatusCodes.Status403Forbidden);
         context.Items["conversationId"] = request.ConversationId;
 
-        if (ComputerUseChatIntent.DetectDirectRequest(message) is { } computerAction)
+        var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
+        var practicing = ComputerUseChatDispatcher.IsPracticeMode(request.StartPractice, caseState is not null);
+        var miniPractice = ComputerUseChatDispatcher.IsMiniPracticeMode(request.MiniPractice, request.StartMiniPractice);
+
+        async Task<IResult> ExecuteDirectComputerUse(string computerAction)
         {
             var observationTarget = ComputerUseChatIntent.ObservationTargetForAction(computerAction);
             if (!ComputerUsePolicy.CanNavigate(computerAction) && !ComputerUsePolicy.CanObserve(observationTarget))
@@ -739,6 +743,11 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 cancellationToken);
         }
 
+        var computerUseDispatch = await ComputerUseChatDispatcher.TryDispatchAsync<IResult>(message,
+            practicing, miniPractice, ExecuteDirectComputerUse);
+        if (computerUseDispatch.Dispatched) return computerUseDispatch.Value ??
+            Results.Problem("Computer Use không trả kết quả.", statusCode: 502);
+
         consentPolicy.RecordExplicitAction(owner,
             new ConsentPolicy.ConsentRequirement("chat_message", "direct_request", "external_service"),
             "chat_send", request.RequestId);
@@ -747,9 +756,6 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (request.ConversationId is Guid conversationId)
             gateway.DefaultRequestHeaders.Add("x-openclaw-session-key", ConversationKey(conversationId));
         var tools = new List<object>();
-        var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
-        var practicing = request.StartPractice || caseState is not null;
-        var miniPractice = request.MiniPractice || request.StartMiniPractice;
         Practice.AgenticTask? reminderTask = null;
         string? memoryFallbackNotice = null;
         if (practice is not null && !practicing && !miniPractice && request.CalendarContext is null &&
