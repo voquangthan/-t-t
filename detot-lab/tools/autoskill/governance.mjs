@@ -122,8 +122,13 @@ export function planConsentRevocation({ artifacts, revokedScope }) {
 
 export function assertArtifactUsable(artifact) {
   const policy = evaluateArtifactPolicy(artifact);
-  if (["UNKNOWN"].includes(policy.decision) || policy.action === "quarantine" ||
-      artifact?.provenance?.activation_status === "blocked" || artifact?.provenance?.retention_state !== "retained") {
+  const provenance = artifact?.provenance || artifact;
+  // A mixed artifact is not safe to consume as a whole. The planner can identify
+  // candidate independent segments, but until a verified splitter materializes
+  // a new artifact, those segments remain embedded in the mixed source.
+  if (["UNKNOWN", "MIXED"].includes(policy.decision) ||
+      !["retain", "retain_until_revoke"].includes(policy.action) ||
+      provenance?.activation_status === "blocked" || provenance?.retention_state !== "retained") {
     throw new Error(`artifact_not_usable:${policy.reason}`);
   }
   return policy;

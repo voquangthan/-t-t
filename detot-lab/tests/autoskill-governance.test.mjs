@@ -100,6 +100,26 @@ test("mixed artifacts separate only hash backed independently verified segments"
   assert.equal(evaluateArtifactPolicy(withdrawn).action, "quarantine");
 });
 
+test("mixed artifacts cannot be consumed whole until a verified split creates a new artifact", () => {
+  const mixed = {
+    provenance: source("mixed-usable-check", "mixed"),
+    content_segments: [independentSegment("safe-segment", ["docs:1"])],
+  };
+  assert.equal(evaluateArtifactPolicy(mixed).action, "separate_verified_segments");
+  assert.throws(() => assertArtifactUsable(mixed), /artifact_not_usable/);
+});
+
+test("artifact usability checks top-level and nested blocked or withdrawn metadata", () => {
+  const independent = source("independent-usable-check", "independent", {
+    source_ids: ["docs:runbook"],
+    consent_scope: null,
+    consent_revision: null,
+    independence_evidence: { verified: true, source_ids: ["docs:runbook"] },
+  });
+  assert.throws(() => assertArtifactUsable({ ...independent, activation_status: "blocked" }), /artifact_not_usable/);
+  assert.throws(() => assertArtifactUsable({ provenance: { ...independent, retention_state: "withdrawn" } }), /artifact_not_usable/);
+});
+
 test("revocation excludes mixed segments linked to revoked sources or dependencies", () => {
   const conversation = source("conversation-mixed", "conversation");
   const mixed = {
