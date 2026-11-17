@@ -71,3 +71,10 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - The pure planner now follows `source_ids` as well as `dependency_ids`, quarantines unidentified artifacts, and blocks the entire plan on duplicate artifact IDs rather than risking ambiguous deletion.
 - Repeated planning over the same synthetic graph is verified deterministic.
 - Governance/provenance/pipeline/integration tests now **18/18 PASS**; adapter remains **79/79 PASS** from the preceding checkpoint, with no adapter source changes in this follow-up.
+
+### Runtime cache governance — 17/11/2026
+
+- Retrieval now refuses skill hints unless the artifact is active, validated, retained, and either has source-matched independent evidence or conversation provenance matching the current analysis consent generation.
+- Runtime cache snapshots carry provenance, source/dependency IDs, consent revision and content-segment hashes. `agent_end` drops stale or malformed cache evidence and only forwards skill IDs backed by that validated cache.
+- Unknown and forged independence metadata tests pass. Synthetic verification: pinned adapter **82/82 PASS**; project governance/provenance/pipeline/integration **18/18 PASS**.
+- Revocation is still not immediate across Gateway caches because there is no authenticated Backend-to-Gateway lease/revoke channel. No primary Gateway or real user data used.

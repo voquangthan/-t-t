@@ -776,14 +776,14 @@ index 04b75931..ed82e5b0 100644
  
  test("embedded runtime reads shared prompt pack templates for extraction and maintenance", async () => {
 diff --git a/AutoSkill4OpenClaw/adapter/index.js b/AutoSkill4OpenClaw/adapter/index.js
-index 478b036e..249f726c 100644
+index 478b036e..2c778953 100644
 --- a/AutoSkill4OpenClaw/adapter/index.js
 +++ b/AutoSkill4OpenClaw/adapter/index.js
 @@ -2,6 +2,7 @@ import fs from "node:fs";
  import os from "node:os";
  import path from "node:path";
  import { createEmbeddedProcessor } from "./embedded_runtime.js";
-+import { normalizeConsentGrant } from "./detot-provenance.mjs";
++import { createArtifactProvenance, createContentSegments, normalizeConsentGrant, stableArtifactId } from "./detot-provenance.mjs";
  
  const PLUGIN_ID = "autoskill-openclaw-adapter";
  const BEFORE_PROMPT_BUILD_HOOK_NAMES = ["before_prompt_build"];
@@ -858,50 +858,201 @@ index 478b036e..249f726c 100644
    cfg.includeUserFeedback = asBool(cfg.includeUserFeedback, DEFAULTS.includeUserFeedback);
    cfg.logPayload = asBool(cfg.logPayload, DEFAULTS.logPayload);
    return cfg;
-@@ -1348,10 +1363,20 @@ function buildInjectionResult(cfg, text) {
+@@ -990,6 +1005,7 @@ function extractSelectedSkills(out) {
+       entry && typeof entry === "object" && entry.skill && typeof entry.skill === "object"
+         ? {
+             ...entry.skill,
++            provenance: entry.provenance || entry.skill.provenance,
+             _score: Number(
+               entry.score ??
+                 entry.similarity ??
+@@ -1052,8 +1068,43 @@ function normalizeSkillSummary(skill) {
+   };
+ }
+ 
+-function buildSkillInjectionBlock(out, cfg) {
++function isSkillProvenanceUsable(skill, analysisGrant) {
++  const provenance = skill?.provenance;
++  if (!provenance || provenance.retention_state !== "retained" || provenance.activation_status !== "active" ||
++      !["validated", "replay_passed"].includes(provenance.validation_status) ||
++      !provenance.artifact_id || !Array.isArray(provenance.source_ids) || provenance.source_ids.length === 0) return false;
++  if (provenance.provenance_type === "independent") {
++    const evidence = provenance.independence_evidence;
++    return (!Array.isArray(provenance.dependency_ids) || provenance.dependency_ids.length === 0) &&
++      evidence?.verified === true && Array.isArray(evidence.source_ids) && evidence.source_ids.length === provenance.source_ids.length &&
++      provenance.source_ids.every((id) => evidence.source_ids.includes(id));
++  }
++  if (provenance.provenance_type !== "conversation" || !analysisGrant ||
++      provenance.consent_revision !== analysisGrant.revision || !Array.isArray(provenance.consent_scope?.requirements)) return false;
++  const expected = analysisGrant.requirements;
++  const supplied = provenance.consent_scope.requirements;
++  return supplied.length === expected.length && expected.every((item, index) =>
++    item.source === supplied[index]?.source && item.purpose === supplied[index]?.purpose && item.destination === supplied[index]?.destination);
++}
++
++function isRuntimeCacheUsable(snapshot, analysisGrant) {
++  const provenance = snapshot?.provenance;
++  if (!analysisGrant || provenance?.artifact_type !== "runtime_cache" || provenance?.provenance_type !== "conversation" ||
++      provenance?.retention_state !== "retained" || provenance?.activation_status === "blocked" ||
++      provenance?.validation_status !== "validated" ||
++      provenance?.consent_revision !== analysisGrant.revision || !Array.isArray(provenance.source_ids) ||
++      !Array.isArray(provenance.consent_scope?.requirements) || !Array.isArray(snapshot?.content_segments) ||
++      !snapshot.content_segments.every((segment) => segment.segment_id && segment.artifact_id === provenance.artifact_id &&
++        segment.content_hash && segment.retention_state === "retained" && segment.validation_status === "validated")) return false;
++  const supplied = provenance.consent_scope.requirements;
++  return supplied.length === analysisGrant.requirements.length && analysisGrant.requirements.every((item, index) =>
++    item.source === supplied[index]?.source && item.purpose === supplied[index]?.purpose && item.destination === supplied[index]?.destination) &&
++    Array.isArray(snapshot.hits) && snapshot.hits.length > 0 && snapshot.hits.every((hit) => isSkillProvenanceUsable(hit, analysisGrant));
++}
++
++function buildSkillInjectionBlock(out, cfg, analysisGrant) {
+   const selected = extractSelectedSkills(out)
++    .filter((skill) => isSkillProvenanceUsable(skill, analysisGrant))
+     .filter((skill) => !Number.isFinite(skill?._score) || skill._score >= cfg.skillRetrieval.minScore)
+     .slice(0, cfg.skillRetrieval.topK);
+   if (!selected.length) {
+@@ -1125,10 +1176,11 @@ function normalizeRetrievalHit(entry) {
+     name: trimmed(entry.name || entry.skill?.name),
+     description: trimmed(entry.description || entry.skill?.description),
+     score: Number.isFinite(score) ? score : 0,
++    provenance: entry.provenance || entry.skill?.provenance || null,
+   };
+ }
+ 
+-function buildRetrievalSnapshot(out, payload) {
++function buildRetrievalSnapshot(out, payload, analysisGrant) {
+   const data = extractResultData(out);
+   const query = trimmed(
+     data?.search_query ||
+@@ -1162,8 +1214,9 @@ function buildRetrievalSnapshot(out, payload) {
+   const hits = [];
+   const seen = new Set();
+   for (const raw of hitBuckets) {
+-    const hit = normalizeRetrievalHit(raw);
++    const hit = normalizeRetrievalHit(raw, analysisGrant);
+     if (!hit) continue;
++    if (!isSkillProvenanceUsable(hit, analysisGrant)) continue;
+     const key = hit.id.toLowerCase();
+     if (seen.has(key)) continue;
+     seen.add(key);
+@@ -1183,11 +1236,38 @@ function buildRetrievalSnapshot(out, payload) {
+       selectedForUseIds.push(...selectedIds);
+     }
+   }
+-  const selectedContext = selectedForContextIds.length
+-    ? selectedForContextIds
+-    : dedupStrings(hits.map((item) => item.id), 64);
+-  const selectedUse = selectedForUseIds.length ? selectedForUseIds : selectedContext;
++  const allowedIds = new Set(hits.map((item) => item.id.toLowerCase()));
++  const selectedContext = (selectedForContextIds.length ? selectedForContextIds : hits.map((item) => item.id))
++    .filter((id) => allowedIds.has(id.toLowerCase()));
++  const selectedUse = (selectedForUseIds.length ? selectedForUseIds : selectedContext)
++    .filter((id) => allowedIds.has(id.toLowerCase()));
+   if (!hits.length && !selectedContext.length) return null;
++  if (!hits.length) return null;
++  const sourceIds = dedupStrings(hits.flatMap((item) => item.provenance.source_ids), 64);
++  const dependencyIds = dedupStrings(hits.map((item) => item.provenance.artifact_id), 64);
++  const sessionId = trimmed(payload?.session_id);
++  const conversationId = stableArtifactId("conversation", payload?.user || "", sessionId || "unscoped");
++  const consent = { revision: analysisGrant.revision, requirements: analysisGrant.requirements };
++  const provenance = createArtifactProvenance({ artifactId: stableArtifactId("runtime_cache", payload?.user || "", sessionId || Date.now()),
++    artifactType: "runtime_cache", sourceIds: dedupStrings([conversationId, ...sourceIds], 64), dependencyIds,
++    provenanceType: "conversation", consent, validationStatus: "validated", activationStatus: "not_applicable", retentionState: "retained" });
++  const contentSegments = [
++    ...createContentSegments({ artifactId: provenance.artifact_id, values: { query }, sourceIds: [conversationId],
++      dependencyIds: [], provenanceType: "conversation", consent }).map((segment) => ({
++      ...segment, validation_status: "validated", activation_status: "not_applicable", retention_state: "retained",
++    })),
++    ...hits.flatMap((item, index) => createContentSegments({ artifactId: provenance.artifact_id,
++      values: { name: item.name, description: item.description }, sourceIds: item.provenance.source_ids,
++      dependencyIds: [item.provenance.artifact_id], provenanceType: item.provenance.provenance_type,
++      consent: item.provenance.consent_scope }).map((segment) => ({
++      ...segment,
++      segment_id: stableArtifactId("segment", provenance.artifact_id, index, segment.segment_id),
++      validation_status: "validated",
++      activation_status: "not_applicable",
++      retention_state: "retained",
++      ...(item.provenance.provenance_type === "independent" ? { independence_evidence: item.provenance.independence_evidence } : {}),
++    }))),
++  ];
+   return {
+     query,
+     search_query: query,
+@@ -1195,6 +1275,8 @@ function buildRetrievalSnapshot(out, payload) {
+     selected_for_context_ids: selectedContext,
+     selected_for_use_ids: selectedUse,
+     hits,
++    provenance,
++    content_segments: contentSegments,
+     event_time: Number(data?.event_time ?? Date.now()) || Date.now(),
+   };
+ }
+@@ -1348,10 +1430,21 @@ function buildInjectionResult(cfg, text) {
    return { appendSystemContext: content };
  }
  
++async function getConsentGrant(authorizeConsent, stage) {
++  if (typeof authorizeConsent !== "function") return null;
++  try { return normalizeConsentGrant(await authorizeConsent(stage), stage); } catch (_) { return null; }
++}
++
 +async function consentAllows(authorizeConsent, stage) {
-+  if (typeof authorizeConsent !== "function") return false;
-+  try {
-+    return normalizeConsentGrant(await authorizeConsent(stage), stage) !== null;
-+  } catch (_) {
-+    return false;
-+  }
++  return (await getConsentGrant(authorizeConsent, stage)) !== null;
 +}
 +
  function createBeforePromptBuildHandler(cfg, log, deps = {}) {
    const requestFn = typeof deps.postJson === "function" ? deps.postJson : postJson;
    const onRetrieval = typeof deps.onRetrieval === "function" ? deps.onRetrieval : null;
++  const clearRetrieval = typeof deps.clearRetrieval === "function" ? deps.clearRetrieval : null;
    const embeddedProcessor = deps.embeddedProcessor;
 +  const authorizeConsent = deps.authorizeConsent;
  
    const stageEmbeddedLiveSnapshot = async (event, ctx) => {
      if (cfg.runtimeMode !== "embedded") return;
-@@ -1369,6 +1394,10 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+@@ -1369,6 +1462,12 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
  
    return async (event, ctx) => {
      if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build invoked`);
 +    if (!(await consentAllows(authorizeConsent, "capture"))) {
++      const staleSessionId = resolveSessionId(event, ctx, []);
++      if (staleSessionId && clearRetrieval) clearRetrieval(staleSessionId, resolveUserId(cfg, event, ctx));
 +      if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build skipped reason=consent_denied`);
 +      return;
 +    }
      await stageEmbeddedLiveSnapshot(event, ctx);
      if (!cfg.skillRetrieval.enabled) {
        if (log?.info) {
-@@ -1388,6 +1417,10 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+@@ -1388,6 +1487,12 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
        if (log?.info) log.info(`[${PLUGIN_ID}] retrieval skipped no prompt or messages`);
        return;
      }
-+    if (!(await consentAllows(authorizeConsent, "analysis"))) {
++    const analysisGrant = await getConsentGrant(authorizeConsent, "analysis");
++    if (!analysisGrant) {
++      if (payload.session_id && clearRetrieval) clearRetrieval(payload.session_id, payload.user);
 +      if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build skipped reason=analysis_consent_denied`);
 +      return;
 +    }
      try {
        const out = await requestFn(
          cfg,
-@@ -1505,8 +1538,13 @@ function createAgentEndHandler(cfg, log, deps = {}) {
+@@ -1396,12 +1501,14 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+         log,
+       );
+       if (onRetrieval && payload?.session_id) {
+-        const snapshot = buildRetrievalSnapshot(out, payload);
++        const snapshot = buildRetrievalSnapshot(out, payload, analysisGrant);
+         if (snapshot) {
+           onRetrieval(payload.session_id, snapshot, payload.user);
++        } else if (clearRetrieval) {
++          clearRetrieval(payload.session_id, payload.user);
+         }
+       }
+-      const block = buildSkillInjectionBlock(out, cfg);
++      const block = buildSkillInjectionBlock(out, cfg, analysisGrant);
+       if (!block.text) {
+         if (log?.info) log.info(`[${PLUGIN_ID}] retrieval no result`);
+         return;
+@@ -1505,15 +1612,28 @@ function createAgentEndHandler(cfg, log, deps = {}) {
    const embeddedProcessor = deps.embeddedProcessor;
    const consumeRetrieval = typeof deps.consumeRetrieval === "function" ? deps.consumeRetrieval : null;
    const clearRetrieval = typeof deps.clearRetrieval === "function" ? deps.clearRetrieval : null;
@@ -915,18 +1066,38 @@ index 478b036e..249f726c 100644
      const status = resolveSuccess(event);
      if (cfg.successOnly && status.hasSignal && !status.value) return;
      const sessionIdHint = resolveSessionId(event, ctx, pickMessages(event, ctx));
-@@ -1554,6 +1592,10 @@ function createAgentEndHandler(cfg, log, deps = {}) {
+     const payloadUser = resolveUserId(cfg, event, ctx);
+-    const retrieved = sessionIdHint && consumeRetrieval ? consumeRetrieval(sessionIdHint, payloadUser) : null;
+-    const usedSkillIds = extractUsedSkillIds(event, ctx);
+-    const inferredUsedSkillIdsRaw = extractInferredUsedSkillIds(event, ctx, retrieved);
++    const analysisGrant = await getConsentGrant(authorizeConsent, "analysis");
++    let retrieved = analysisGrant && sessionIdHint && consumeRetrieval ? consumeRetrieval(sessionIdHint, payloadUser) : null;
++    if (!isRuntimeCacheUsable(retrieved, analysisGrant)) {
++      if (sessionIdHint) clearRetrieval?.(sessionIdHint, payloadUser);
++      retrieved = null;
++    }
++    const allowedIds = new Set((retrieved?.hits || []).filter((hit) => isSkillProvenanceUsable(hit, analysisGrant))
++      .map((hit) => asString(hit.id).toLowerCase()));
++    const usedSkillIds = extractUsedSkillIds(event, ctx).filter((id) => allowedIds.has(asString(id).trim().toLowerCase()));
++    const inferredUsedSkillIdsRaw = extractInferredUsedSkillIds(event, ctx, retrieved)
++      .filter((id) => allowedIds.has(asString(id).trim().toLowerCase()));
+     const usedSet = new Set(usedSkillIds.map((id) => asString(id).trim().toLowerCase()).filter(Boolean));
+     const inferredUsedSkillIds = inferredUsedSkillIdsRaw.filter(
+       (id) => !usedSet.has(asString(id).trim().toLowerCase()),
+@@ -1554,6 +1674,12 @@ function createAgentEndHandler(cfg, log, deps = {}) {
        return;
      }
      try {
-+      if (!(await consentAllows(authorizeConsent, "analysis"))) {
++      const currentGrant = await getConsentGrant(authorizeConsent, "analysis");
++      if (!currentGrant || currentGrant.revision !== analysisGrant?.revision) {
++        if (sessionIdHint) clearRetrieval?.(sessionIdHint, payloadUser);
 +        if (log?.info) log.info(`[${PLUGIN_ID}] agent_end skipped reason=analysis_consent_denied`);
 +        return;
 +      }
        await requestFn(cfg, "/autoskill/openclaw/hooks/agent_end", payload, log);
      } catch (_) {
        return;
-@@ -1627,7 +1669,7 @@ export default {
+@@ -1627,7 +1753,7 @@ export default {
          log.info(`[${PLUGIN_ID}] hook first invocation name=message_received`);
        }
        if (log?.info) {
@@ -935,11 +1106,21 @@ index 478b036e..249f726c 100644
          const channel = asString(event?.channel || event?.provider || ctx?.channel || ctx?.provider).trim();
          log.info(
            `[${PLUGIN_ID}] message_received invoked session=${sessionId || "<missing>"} channel=${channel || "<empty>"}`,
+@@ -1638,6 +1764,9 @@ export default {
+ 
+     const beforePromptBuildHandler = createBeforePromptBuildHandler(cfg, log, {
+       embeddedProcessor,
++      clearRetrieval(sessionId, userId) {
++        retrievalCache.clear(sessionId, userId);
++      },
+       onRetrieval(sessionId, snapshot, userId) {
+         retrievalCache.remember(sessionId, snapshot, userId);
+       },
 diff --git a/AutoSkill4OpenClaw/adapter/index.test.mjs b/AutoSkill4OpenClaw/adapter/index.test.mjs
-index 5c78bff3..e9e4b7e2 100644
+index 5c78bff3..f789eea3 100644
 --- a/AutoSkill4OpenClaw/adapter/index.test.mjs
 +++ b/AutoSkill4OpenClaw/adapter/index.test.mjs
-@@ -5,10 +5,23 @@ import test from "node:test";
+@@ -5,10 +5,34 @@ import test from "node:test";
  import plugin, {
    buildEndPayload,
    createSessionRetrievalCache,
@@ -962,10 +1143,29 @@ index 5c78bff3..e9e4b7e2 100644
 +function createBeforePromptBuildHandler(cfg, log, deps = {}) {
 +  return createRawBeforePromptBuildHandler(cfg, log, { async authorizeConsent(stage) { return consentGrant(stage); }, ...deps });
 +}
++
++const syntheticIndependentProvenance = {
++  artifact_id: "skill:synthetic-approved",
++  source_ids: ["docs:synthetic-runbook"],
++  dependency_ids: [],
++  provenance_type: "independent",
++  independence_evidence: { verified: true, source_ids: ["docs:synthetic-runbook"] },
++  validation_status: "validated",
++  activation_status: "active",
++  retention_state: "retained",
++};
  
  function makeLogger() {
    const entries = [];
-@@ -99,6 +112,58 @@ test("before_prompt_build returns no-op when skill retrieval is disabled", async
+@@ -68,6 +92,7 @@ function sampleResult(overrides = {}) {
+         triggers: ["the user asks about release flow"],
+         instructions: "List checks\nCall out rollback criteria\nKeep the answer concise",
+         tags: ["release", "ops"],
++        provenance: syntheticIndependentProvenance,
+       },
+     ],
+     ...overrides,
+@@ -99,6 +124,58 @@ test("before_prompt_build returns no-op when skill retrieval is disabled", async
    assert(logger.entries.some((entry) => entry.message.includes("retrieval disabled")));
  });
  
@@ -1024,7 +1224,46 @@ index 5c78bff3..e9e4b7e2 100644
  test("before_prompt_build skips external retrieval in embedded mirror mode", async () => {
    await withEnv(
      {
-@@ -574,14 +639,13 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
+@@ -350,6 +427,30 @@ test("before_prompt_build returns no-op when retrieval returns no skills", async
+   assert(logger.entries.some((entry) => entry.message.includes("retrieval no result")));
+ });
+ 
++test("before_prompt_build blocks skills with unknown provenance and does not cache them", async () => {
++  const logger = makeLogger();
++  const cfg = makeConfig();
++  let cached = 0;
++  const handler = createBeforePromptBuildHandler(cfg, logger, {
++    async postJson() { return { selected_skills: [{ id: "legacy-skill", name: "Legacy", description: "Unknown origin" }] }; },
++    onRetrieval() { cached += 1; },
++  });
++  const result = await handler({ sessionId: "legacy-session", messages: [{ role: "user", content: "Use the old skill" }] }, {});
++  assert.equal(result, undefined);
++  assert.equal(cached, 0);
++  assert(logger.entries.some((entry) => entry.message.includes("retrieval no result")));
++});
++
++test("before_prompt_build blocks a skill that claims independence without matching source evidence", async () => {
++  const logger = makeLogger();
++  const handler = createBeforePromptBuildHandler(makeConfig(), logger, {
++    async postJson() { return { selected_skills: [{ id: "forged-skill", name: "Forged", description: "Synthetic",
++      provenance: { ...syntheticIndependentProvenance, independence_evidence: { verified: true, source_ids: ["other-source"] } } }] }; },
++  });
++  const result = await handler({ messages: [{ role: "user", content: "Use forged skill" }] }, {});
++  assert.equal(result, undefined);
++});
++
+ test("before_prompt_build appends concise skill hints when retrieval succeeds", async () => {
+   const logger = makeLogger();
+   const cfg = makeConfig();
+@@ -439,6 +540,7 @@ test("before_prompt_build truncates injected context to the configured maxChars"
+               "First long instruction sentence. ".repeat(12) +
+               "\n" +
+               "Second long instruction sentence. ".repeat(12),
++            provenance: syntheticIndependentProvenance,
+           },
+         ],
+       });
+@@ -574,14 +676,13 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
    assert.equal(typeof before, "function");
    assert.equal(typeof end, "function");
  
@@ -1046,7 +1285,7 @@ index 5c78bff3..e9e4b7e2 100644
    await before(
      { messages: [{ role: "user", content: "hello" }] },
      {},
-@@ -590,6 +654,7 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
+@@ -590,6 +691,7 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
      { messages: [{ role: "user", content: "hello" }] },
      {},
    );
@@ -1054,7 +1293,7 @@ index 5c78bff3..e9e4b7e2 100644
  
    assert(
      logger.entries.some((entry) => entry.message.includes("hook first invocation name=message_received")),
-@@ -700,7 +765,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
+@@ -700,7 +802,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
          extractOnAgentEnd: true,
        });
        assert.equal(cfg.runtimeMode, "embedded");
@@ -1063,7 +1302,7 @@ index 5c78bff3..e9e4b7e2 100644
        assert.equal(cfg.embedded.sessionMaxTurns, 20);
        assert.equal(cfg.embedded.bm25TopK, 8);
        assert.deepEqual(cfg.embedded.modelInvocation.modes, [
-@@ -728,6 +793,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
+@@ -728,6 +830,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
    );
  });
  
@@ -1098,7 +1337,7 @@ index 5c78bff3..e9e4b7e2 100644
  test("normalizeConfig supports embedded session max turns override", async () => {
    await withEnv(
      {
-@@ -784,7 +877,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
+@@ -784,7 +914,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
        ]);
        assert.equal(cfg.embedded.modelInvocation.timeoutMs, 35000);
        assert.equal(cfg.embedded.modelInvocation.retries, 2);
@@ -1107,7 +1346,7 @@ index 5c78bff3..e9e4b7e2 100644
        assert.equal(cfg.embedded.modelInvocation.manualBaseUrl, "http://127.0.0.1:8999/v1");
        assert.equal(cfg.embedded.modelInvocation.manualApiKey, "k-test");
        assert.equal(cfg.embedded.modelInvocation.manualModel, "m-test");
-@@ -825,7 +918,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
+@@ -825,7 +955,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
          extractOnAgentEnd: true,
        });
        assert.equal(cfg.runtimeMode, "embedded");
@@ -1116,6 +1355,90 @@ index 5c78bff3..e9e4b7e2 100644
      },
    );
  });
+@@ -922,6 +1052,7 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
+   });
+   const sent = [];
+   const retrievalCache = new Map();
++  let cachedSnapshot = null;
+   const beforeHandler = createBeforePromptBuildHandler(cfg, logger, {
+     async postJson() {
+       return {
+@@ -934,11 +1065,13 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
+             name: "Release Checklist",
+             description: "Checklist for release",
+             score: 0.91,
++            provenance: syntheticIndependentProvenance,
+           },
+         ],
+       };
+     },
+     onRetrieval(sessionId, snapshot) {
++      cachedSnapshot = snapshot;
+       retrievalCache.set(sessionId, snapshot);
+     },
+   });
+@@ -975,10 +1108,14 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
+   );
+ 
+   assert.equal(sent.length, 1);
++  assert.ok(cachedSnapshot);
++  assert.equal(cachedSnapshot.provenance.consent_revision, 1);
+   assert.equal(sent[0].path, "/autoskill/openclaw/hooks/agent_end");
+   assert.deepEqual(sent[0].payload.used_skill_ids, ["skill-1"]);
+   assert.equal(sent[0].payload.retrieval.selected_for_context_ids[0], "skill-1");
+   assert.equal(sent[0].payload.retrieval.hits[0].id, "skill-1");
++  assert.equal(sent[0].payload.retrieval.provenance.provenance_type, "conversation");
++  assert.ok(sent[0].payload.retrieval.content_segments.every((segment) => segment.content_hash && !("content" in segment)));
+ });
+ 
+ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent", async () => {
+@@ -1003,6 +1140,7 @@ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent"
+             name: "Rollback Procedure",
+             description: "Rollback deployment safely",
+             score: 0.88,
++            provenance: syntheticIndependentProvenance,
+           },
+         ],
+       };
+@@ -1049,6 +1187,38 @@ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent"
+   assert.equal(sent[0].payload.used_skill_ids, undefined);
+ });
+ 
++test("agent_end drops a retrieval cache from an older consent generation", async () => {
++  const logger = makeLogger();
++  const cfg = normalizeConfig({ runtimeMode: "sidecar", extractOnAgentEnd: true, successOnly: true,
++    skillRetrieval: { enabled: true, topK: 3, minScore: 0.1, maxChars: 1200 } });
++  const cache = createSessionRetrievalCache();
++  const sent = [];
++  let analysisRevision = 1;
++  const authorizeConsent = async (stage) => consentGrant(stage, stage === "analysis" ? analysisRevision : 1);
++  const before = createRawBeforePromptBuildHandler(cfg, logger, {
++    authorizeConsent,
++    async postJson() { return { selected_skills: [{ id: "skill-x", name: "X", description: "Synthetic", provenance: syntheticIndependentProvenance }],
++      hits: [{ id: "skill-x", name: "X", description: "Synthetic", score: 0.9, provenance: syntheticIndependentProvenance }] }; },
++    onRetrieval(sessionId, snapshot, userId) { cache.remember(sessionId, snapshot, userId); },
++    clearRetrieval(sessionId, userId) { cache.clear(sessionId, userId); },
++  });
++  await before({ sessionId: "generation-session", messages: [{ role: "user", content: "Use X" }] }, {});
++  analysisRevision = 2;
++  const end = createRawAgentEndHandler(cfg, logger, {
++    authorizeConsent,
++    async postJson(_cfg, _route, payload) { sent.push(payload); return { ok: true }; },
++    consumeRetrieval(sessionId, userId) { return cache.consume(sessionId, userId); },
++    clearRetrieval(sessionId, userId) { cache.clear(sessionId, userId); },
++  });
++  await end({ sessionId: "generation-session", used_skill_ids: ["skill-x"], messages: [
++    { role: "user", content: "Use X" }, { role: "assistant", content: "Done" },
++  ], success: true }, {});
++  assert.equal(sent.length, 1);
++  assert.equal(sent[0].retrieval, undefined);
++  assert.equal(sent[0].used_skill_ids, undefined);
++  assert.equal(cache.consume("generation-session", "detot-owner"), null);
++});
++
+ test("agent_end routes to embedded processor in embedded mode", async () => {
+   const logger = makeLogger();
+   const cfg = normalizeConfig({
 diff --git a/AutoSkill4OpenClaw/adapter/openclaw.plugin.json b/AutoSkill4OpenClaw/adapter/openclaw.plugin.json
 index 44bdf9d5..03bcf5c2 100644
 --- a/AutoSkill4OpenClaw/adapter/openclaw.plugin.json

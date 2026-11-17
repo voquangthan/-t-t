@@ -42,6 +42,11 @@ test("provenance records opaque source/dependency links and unknown data stays u
   assert.equal(provenance.consent_revision, 4);
   assert.deepEqual(provenance.source_ids, [sourceId]);
   assert.equal(createArtifactProvenance({ artifactType: "legacy" }).provenance_type, "unknown");
+  const forgedScope = createArtifactProvenance({ artifactType: "proposal", provenanceType: "conversation",
+    sourceIds: [sourceId], consent: { revision: 4, requirements: [{ source: "chat_history", purpose: "direct_request", destination: "DeepSeek" }] },
+    retentionState: "retained" });
+  assert.equal(forgedScope.consent_scope, null);
+  assert.equal(forgedScope.consent_revision, null);
 });
 
 test("content segments link hashed text fields to exact provenance without duplicating their contents", () => {

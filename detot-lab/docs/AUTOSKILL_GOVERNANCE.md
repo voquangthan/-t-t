@@ -32,8 +32,10 @@ Missing/corrupt legacy session manifests are treated as UNKNOWN. Recovery checks
 - The isolated adapter checks explicit, exact-scope capture and analysis grants and validates consent generation.
 - Conversation archive writes include a provenance sidecar and segment hashes. A stale generation is rejected before archive writes or content reads.
 - Analysis verifies the sidecar and current generation before reading an archive. It checks consent again before provider invocation and before proposal persistence.
+- Runtime retrieval blocks skills with missing, quarantined, unvalidated, inactive, or inconsistent provenance. Only verified independent sources or conversation-derived skills matching the current analysis revision can be injected.
+- Runtime cache snapshots carry their own provenance, source/dependency IDs and segment hashes. At `agent_end`, snapshots from stale generations or with invalid segment metadata are cleared and excluded from skill-learning evidence.
 - AutoSkill remains disabled in the primary Gateway. The adapter does not yet have a trusted Backend callback that can resolve the authenticated owner and obtain an atomic, revocable Backend lease. A mock callback in tests is not production integration.
-- No deletion executor is enabled. Proposals, versions, embeddings/caches, mirrors and backup copies are not yet traversed/cleaned end-to-end. Local revocation must not claim removal from external model/provider logs.
+- No deletion executor or immediate Backend-to-Gateway revoke signal is enabled. Cache invalidation occurs on the next hook when consent is denied or the owner generation changes; it cannot guarantee immediate clearing without the missing lease bridge. Proposals, versions, embeddings, mirrors and backup copies are not yet traversed/cleaned end-to-end. Local revocation must not claim removal from external model/provider logs.
 - Re-consent never reconstructs a missing archive or revives an unknown artifact.
 
 ## Verification evidence

@@ -15,6 +15,14 @@ const VALIDATION_STATUSES = new Set(["captured", "pending_review", "replay_passe
 const ACTIVATION_STATUSES = new Set(["inactive", "active", "not_applicable", "blocked", "unknown"]);
 const RETENTION_STATES = new Set(["retained", "quarantined", "withdrawn", "unknown"]);
 
+function normalizeConsentScope(consent) {
+  if (!consent || !Number.isSafeInteger(consent.revision) || consent.revision < 0 || !Array.isArray(consent.requirements)) return null;
+  const same = (left, right) => left?.source === right.source && left?.purpose === right.purpose && left?.destination === right.destination;
+  const valid = Object.values(CONSENT_REQUIREMENTS).find((expected) => expected.length === consent.requirements.length &&
+    expected.every((item, index) => same(item, consent.requirements[index])));
+  return valid ? { revision: consent.revision, requirements: valid.map((item) => ({ ...item })) } : null;
+}
+
 export function normalizeConsentGrant(value, stage) {
   const expected = CONSENT_REQUIREMENTS[stage];
   if (!expected || !value || typeof value !== "object" || value.allowed !== true ||
@@ -49,11 +57,7 @@ export function createArtifactProvenance({
   activationStatus = "unknown",
   retentionState = "unknown",
 }) {
-  const normalizedConsent = consent && Number.isSafeInteger(consent.revision) && Array.isArray(consent.requirements)
-    ? { revision: consent.revision, requirements: consent.requirements.map((item) => ({
-      source: String(item.source), purpose: String(item.purpose), destination: String(item.destination),
-    })) }
-    : null;
+  const normalizedConsent = normalizeConsentScope(consent);
   const validProvenance = PROVENANCE_TYPES.has(provenanceType) ? provenanceType : "unknown";
   return {
     artifact_id: String(artifactId || ""),
@@ -71,6 +75,7 @@ export function createArtifactProvenance({
 
 export function createContentSegments({ artifactId, values, sourceIds, dependencyIds, provenanceType, consent }) {
   const segments = [];
+  const normalizedConsent = normalizeConsentScope(consent);
   const visit = (value, fieldPath) => {
     if (typeof value === "string") {
       if (!value.trim()) return;
@@ -83,7 +88,7 @@ export function createContentSegments({ artifactId, values, sourceIds, dependenc
         source_ids: [...new Set(sourceIds.map(String).filter(Boolean))],
         dependency_ids: [...new Set(dependencyIds.map(String).filter(Boolean))],
         provenance_type: PROVENANCE_TYPES.has(provenanceType) ? provenanceType : "unknown",
-        consent_scope: consent ? { revision: consent.revision, requirements: consent.requirements.map((item) => ({ ...item })) } : null,
+        consent_scope: normalizedConsent,
         validation_status: "pending_review",
         activation_status: "inactive",
         retention_state: "retained",
