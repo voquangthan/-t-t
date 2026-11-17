@@ -99,3 +99,10 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Mixed artifacts are kept quarantined because the current executor cannot safely split file contents, even when the policy planner identifies candidate independent segments.
 - Synthetic tests cover interruption/resume, repeated revoke, owner isolation, changed-file refusal, restore-at-tombstoned-path denial, and no deletion of quarantined records. Project AutoSkill suite: **30/30 PASS**; pinned adapter suite: **82/82 PASS**.
 - This is staging pipeline integration only. It is not bound to Backend-authenticated consent, and it does not cover conversation archives, runtime mirrors/caches, embeddings, active pointers, or backups. No real data was migrated/deleted, no Gateway was started/changed, and no provider was used.
+
+### Independent-source rebuild draft — 17/11/2026
+
+- Added a staging utility that accepts only owner-matched, hash-checked source artifacts already classified as verified independent `source_document`, `source_code`, or `operational_rule` records with no consent scope or dependencies.
+- Candidate name, description and prompt must appear verbatim in the supplied source text. The utility does not accept old skill history, provenance, files or approval state; it writes fresh provenance/segment hashes and an inactive pending-review proposal without copying source text or calling a model.
+- The new draft must pass the normal replay gate and explicit approval. Synthetic AutoSkill suite: **32/32 PASS**.
+- This is not a source-registration UI/API and does not establish trusted Backend source evidence. It does not enable capture or retrieval and remains staging-only.

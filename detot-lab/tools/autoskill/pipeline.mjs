@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeSkillCandidate } from "./privacy.mjs";
-import { assertArtifactUsable } from "./governance.mjs";
-import { stableArtifactId } from "./provenance.mjs";
+import { assertArtifactUsable, evaluateArtifactPolicy } from "./governance.mjs";
+import { createArtifactProvenance, createContentSegments, stableArtifactId } from "./provenance.mjs";
 import { migrateLegacyArtifact } from "./migration.mjs";
 import { isArtifactRevoked, isPathRevoked } from "./revocation-store.mjs";
 
@@ -365,6 +365,112 @@ export function rollbackSkill({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
   writeManagedMirror(stagingRoot, owner, skill, target);
   appendAudit(stagingRoot, owner, { action: "skill_rollback", skill_id: skill, version: targetVersion, skill_hash: target.skill_hash });
   return { skill_id: skill, version: targetVersion, skill_hash: target.skill_hash, rolled_back: true };
+}
+
+/** Create a fresh, inactive proposal from explicitly supplied verified independent source artifacts. */
+export function prepareSafeSkillRebuild({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", candidate, sourceArtifacts }) {
+  const stagingRoot = path.resolve(root);
+  const owner = requireId(ownerId, "owner_id");
+  if (!Array.isArray(sourceArtifacts) || sourceArtifacts.length === 0 || sourceArtifacts.length > 32)
+    throw new Error("independent_rebuild_sources_required");
+
+  const sourceIds = [];
+  const sourceHashes = [];
+  for (const source of sourceArtifacts) {
+    const provenance = source?.provenance;
+    const sourceId = String(provenance?.artifact_id || "");
+    if (source.owner_id !== owner || !ID_RE.test(sourceId)) throw new Error("independent_rebuild_source_owner_or_id_invalid");
+    if (!new Set(["source_document", "source_code", "operational_rule"]).has(provenance.artifact_type))
+      throw new Error("independent_rebuild_source_type_denied");
+    if (typeof source.content !== "string" || !source.content.trim() || source.content.length > 1_000_000 ||
+        source.content_hash !== hash(source.content)) throw new Error("independent_rebuild_source_hash_invalid");
+    if (provenance.consent_scope !== null || provenance.consent_revision !== null ||
+        !Array.isArray(provenance.dependency_ids) || provenance.dependency_ids.length !== 0)
+      throw new Error("independent_rebuild_source_has_consent_or_dependencies");
+    if (isArtifactRevoked({ root: stagingRoot, ownerId: owner, artifactId: sourceId }))
+      throw new Error("independent_rebuild_source_revoked");
+    const policy = evaluateArtifactPolicy(source);
+    if (policy.decision !== "INDEPENDENT" || policy.action !== "retain")
+      throw new Error(`independent_rebuild_source_not_verified:${policy.reason}`);
+    sourceIds.push(sourceId);
+    sourceHashes.push({ artifact_id: sourceId, content_hash: source.content_hash });
+  }
+  if (new Set(sourceIds).size !== sourceIds.length) throw new Error("duplicate_independent_rebuild_source");
+
+  const supplied = candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate : {};
+  // Project only user-visible skill fields. Incoming provenance, history, files and prior approval state are ignored.
+  const seed = {
+    name: String(supplied.name || "").trim(),
+    description: String(supplied.description || "").trim(),
+    prompt: String(supplied.prompt || "").trim(),
+    files: {},
+  };
+  const sanitized = sanitizeSkillCandidate(seed);
+  if (!sanitized.safe) throw new Error(`unsafe_rebuild_candidate:${sanitized.reasons.join(",")}`);
+  const sourceContent = sourceArtifacts.map((source) => source.content);
+  for (const field of ["name", "description", "prompt"]) {
+    const value = sanitized.candidate[field];
+    if (value && !sourceContent.some((content) => content.includes(value)))
+      throw new Error("rebuild_candidate_text_not_verbatim_in_independent_source");
+  }
+  const baseSkillId = skillIdFor({ name: seed.name });
+  const rebuiltSkillId = `rebuilt-${baseSkillId}-${crypto.randomBytes(4).toString("hex")}`.slice(0, 95);
+  const rebuiltCandidate = { ...sanitized.candidate, skill_id: rebuiltSkillId };
+  const proposalId = crypto.randomUUID();
+  const artifactId = stableArtifactId("rebuild_proposal", owner, proposalId);
+  const provenance = {
+    ...createArtifactProvenance({
+      artifactId,
+      artifactType: "proposal",
+      sourceIds,
+      dependencyIds: sourceIds,
+      provenanceType: "independent",
+      validationStatus: "pending_review",
+      activationStatus: "inactive",
+      retentionState: "retained",
+    }),
+    independence_evidence: { verified: true, source_ids: sourceIds },
+  };
+  const contentSegments = createContentSegments({
+    artifactId,
+    values: { candidate: rebuiltCandidate },
+    sourceIds,
+    dependencyIds: sourceIds,
+    provenanceType: "independent",
+  }).map((segment) => ({
+    ...segment,
+    independence_evidence: { verified: true, source_ids: sourceIds },
+  }));
+  const proposal = {
+    proposal_id: proposalId,
+    owner_id: owner,
+    status: "pending_review",
+    version: "0.1.0",
+    created_at: new Date().toISOString(),
+    source: "detot-safe-skill-rebuild",
+    evidence: {
+      rebuild: true,
+      source_artifact_ids: sourceIds,
+      source_hashes: sourceHashes,
+      candidate_hash: hash(rebuiltCandidate),
+    },
+    provenance,
+    content_segments: contentSegments,
+    candidate: rebuiltCandidate,
+    history: [{ action: "safe_rebuild_drafted", source_count: sourceIds.length }],
+  };
+  const filePath = proposalPath(stagingRoot, owner, proposalId);
+  if (fs.existsSync(filePath)) throw new Error("rebuild_proposal_id_collision");
+  writeJsonAtomic(filePath, proposal);
+  appendAudit(stagingRoot, owner, {
+    action: "skill_rebuild_drafted",
+    proposal_id: proposalId,
+    artifact_id: artifactId,
+    source_ids: sourceIds,
+    source_count: sourceIds.length,
+    candidate_hash: proposal.evidence.candidate_hash,
+  });
+  return { proposal_id: proposalId, skill_id: rebuiltSkillId, status: proposal.status, artifact_id: artifactId, path: filePath };
 }
 
 function collectLegacyArtifactPaths(root, ownerId) {

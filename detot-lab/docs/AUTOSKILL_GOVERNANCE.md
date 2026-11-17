@@ -1,6 +1,6 @@
 # AutoSkill Intelligent Governance
 
-Status: **PARTIAL — provenance governance and a staging-only revocation executor are implemented; trusted Backend/Gateway consent integration, full-store cleanup and safe rebuild remain incomplete.**
+Status: **PARTIAL — provenance governance, staging-only revocation and independent-source rebuild drafts are implemented; trusted Backend/Gateway consent integration and full-store cleanup remain incomplete.**
 
 ## Data lineage contract
 
@@ -31,6 +31,8 @@ The staging pipeline has an owner-scoped legacy migration command. It scans only
 
 The staging-only `revocation-store.mjs` persists an owner-scoped journal and monotonic tombstones before cleanup. Deletion is limited to exact proposal/version JSON files under that owner's managed directories; it rechecks the planned content hash and embedded owner/artifact IDs before unlinking. Repeated execution resumes missing targets idempotently. Tombstones block proposal/version evaluation and activation, including a restored file at a tombstoned path. Unknown artifacts are blocked by ID; if an artifact cannot be mapped safely, the owner is quarantined until review. Journal/tombstone files contain IDs, scope, relative managed paths, hashes, revisions and state, not artifact content.
 
+`prepareSafeSkillRebuild` creates a new inactive review proposal from explicitly supplied, owner-matched `source_document`, `source_code`, or `operational_rule` artifacts that already pass the independent-source policy, have no consent scope/dependencies, and whose content hash matches. Candidate name, description and prompt must be literal text found in those source artifacts; old skill history, provenance, files, approval state and skill IDs are not copied. The proposal gets fresh IDs, new source lineage, new hashes and pending validation; it still requires replay and explicit approval. It stores source hashes/IDs, not source document contents, and makes no model call. This is a staging utility, not a public or Gateway-integrated rebuild endpoint.
+
 This executor is not connected to the live Backend consent lease or Gateway adapter and is not a production revocation path. It does not yet traverse session archives, active pointers, runtime mirrors/caches, embeddings, or backups. A production integration still needs authenticated owner binding, cancellation/recheck during extraction and promotion, mirror/cache invalidation, archive cleanup, and restore protection across every managed store. Local revocation cannot retract content already sent to external providers. Audit records contain artifact IDs, action names and reasons only.
 
 ## Runtime enforcement and current limits
@@ -40,6 +42,7 @@ This executor is not connected to the live Backend consent lease or Gateway adap
 - Analysis verifies the sidecar and current generation before reading an archive. It checks consent again before provider invocation and before proposal persistence.
 - Runtime retrieval blocks skills with missing, quarantined, unvalidated, inactive, or inconsistent provenance. Only verified independent sources or conversation-derived skills matching the current analysis revision can be injected.
 - Runtime cache snapshots carry their own provenance, source/dependency IDs and segment hashes. At `agent_end`, snapshots from stale generations or with invalid segment metadata are cleared and excluded from skill-learning evidence.
+- The staging safe-rebuild utility accepts only verified independent source artifacts and creates a fresh pending proposal; it does not reuse a disabled skill or its approval state.
 - AutoSkill remains disabled in the primary Gateway. The adapter does not yet have a trusted Backend callback that can resolve the authenticated owner and obtain an atomic, revocable Backend lease. A mock callback in tests is not production integration.
 - The staging proposal/version revocation executor is not wired into the Backend lease or Gateway runtime. It does not provide an immediate Backend-to-Gateway revoke signal or cover caches, embeddings, mirrors, archives, or backup copies end-to-end. Local revocation must not claim removal from external model/provider logs.
 - Re-consent never reconstructs a missing archive or revives an unknown artifact.
@@ -51,4 +54,4 @@ This executor is not connected to the live Backend consent lease or Gateway adap
 - Legacy archive test verifies no JSONL content read without a valid manifest.
 - No user conversation, real AutoSkill archive, primary Gateway or provider was used.
 
-Before enabling AutoSkill, implement the trusted Backend lease bridge and connect revocation to archives, proposals, versions, runtime caches/mirrors and restore paths; then test revoke during extraction/promotion, stale workers, restart recovery, retries, and backup restoration. Until then, keep the feature disabled and treat this checkpoint as partial.
+Before enabling AutoSkill, implement the trusted Backend lease bridge and connect revocation to archives, proposals, versions, runtime caches/mirrors and restore paths; then test revoke during extraction/promotion, stale workers, restart recovery, retries, and backup restoration. The staging rebuild code also needs a source-registration path tied to owner review before application integration. Until then, keep the feature disabled and treat this checkpoint as partial.

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { approveProposal, evaluateProposal, listProposals, rejectProposal, rollbackSkill } from "../tools/autoskill/pipeline.mjs";
+import { approveProposal, evaluateProposal, listProposals, prepareSafeSkillRebuild, rejectProposal, rollbackSkill } from "../tools/autoskill/pipeline.mjs";
 import { planConsentRevocation } from "../tools/autoskill/governance.mjs";
 import { prepareRevocation, resumeRevocation } from "../tools/autoskill/revocation-store.mjs";
 import { sanitizeExperienceText, sanitizeSkillCandidate } from "../tools/autoskill/privacy.mjs";
@@ -194,4 +194,105 @@ test("revoked proposal tombstones block replay evaluation and activation", () =>
   const audit = fs.readFileSync(path.join(stage.root, "state", "autoskill", "audit", `${stage.owner}.jsonl`), "utf8");
   assert.match(audit, /artifact_policy_denied/);
   assert.doesNotMatch(audit, /Must not be evaluated after revoke/);
+});
+
+function independentSource(stage, artifactId = "source-runbook-1") {
+  const content = "Verified file routine\nUse a staged copy and verify the result.\nRead the approved runbook, work on a staging copy, verify the output, and report the result.\nSynthetic independent source fixture.";
+  const sourceIds = [`document-${artifactId}`];
+  return {
+    owner_id: stage.owner,
+    content,
+    content_hash: crypto.createHash("sha256").update(content).digest("hex"),
+    provenance: {
+      artifact_id: artifactId,
+      artifact_type: "source_document",
+      source_ids: sourceIds,
+      dependency_ids: [],
+      provenance_type: "independent",
+      consent_scope: null,
+      consent_revision: null,
+      validation_status: "validated",
+      activation_status: "not_applicable",
+      retention_state: "retained",
+      independence_evidence: { verified: true, source_ids: sourceIds },
+    },
+  };
+}
+
+test("safe rebuild creates a fresh inactive proposal from verified independent sources and requires replay plus approval", () => {
+  const stage = makeStage();
+  const priorRevokedId = "version-revoked-old";
+  const result = prepareSafeSkillRebuild({
+    root: stage.root,
+    ownerId: stage.owner,
+    sourceArtifacts: [independentSource(stage)],
+    candidate: {
+      name: "Verified file routine",
+      description: "Use a staged copy and verify the result.",
+      prompt: "Read the approved runbook, work on a staging copy, verify the output, and report the result.",
+      provenance: { artifact_id: priorRevokedId, retention_state: "retained" },
+      history: [{ action: "previously_approved" }],
+      files: { "scripts/run.ps1": "must never be copied" },
+    },
+  });
+  const proposal = JSON.parse(fs.readFileSync(result.path, "utf8"));
+  assert.equal(result.status, "pending_review");
+  assert.equal(proposal.provenance.provenance_type, "independent");
+  assert.equal(proposal.provenance.validation_status, "pending_review");
+  assert.equal(proposal.provenance.activation_status, "inactive");
+  assert.deepEqual(proposal.provenance.source_ids, ["source-runbook-1"]);
+  assert.deepEqual(proposal.provenance.dependency_ids, ["source-runbook-1"]);
+  assert.notEqual(proposal.provenance.artifact_id, priorRevokedId);
+  assert.equal(proposal.candidate.files && Object.keys(proposal.candidate.files).length, 0);
+  assert.equal("history" in proposal.candidate, false);
+  assert.equal("provenance" in proposal.candidate, false);
+  assert.equal(JSON.stringify(proposal).includes("Synthetic independent source fixture"), false);
+  assert.equal(proposal.evidence.source_hashes[0].content_hash, independentSource(stage).content_hash);
+
+  const candidateHash = crypto.createHash("sha256").update(JSON.stringify(proposal.candidate)).digest("hex");
+  evaluateProposal({
+    root: stage.root,
+    ownerId: stage.owner,
+    proposalId: result.proposal_id,
+    report: {
+      candidate_hash: candidateHash,
+      baseline_version: null,
+      baseline_hash: "",
+      cases: [
+        { case_id: "rebuild-normal", candidate_score: 1, baseline_score: 0, safety: "pass" },
+        { case_id: "rebuild-retry", candidate_score: 0.9, baseline_score: 0, safety: "pass" },
+        { case_id: "rebuild-invalid", candidate_score: 0.8, baseline_score: 0, safety: "pass" },
+      ],
+    },
+  });
+  assert.equal(approveProposal({ root: stage.root, ownerId: stage.owner, proposalId: result.proposal_id }).version, "1.0.0");
+});
+
+test("safe rebuild rejects unknown, conversation-derived, revoked and invalid independent sources", () => {
+  const stage = makeStage();
+  const candidate = { name: "Verified file routine", prompt: "Read the approved runbook, work on a staging copy, verify the output, and report the result." };
+  const valid = independentSource(stage);
+  const unknown = structuredClone(valid);
+  unknown.provenance.provenance_type = "unknown";
+  unknown.provenance.independence_evidence = undefined;
+  assert.throws(() => prepareSafeSkillRebuild({ root: stage.root, ownerId: stage.owner, candidate, sourceArtifacts: [unknown] }), /not_verified/);
+
+  const conversation = structuredClone(valid);
+  conversation.provenance.provenance_type = "conversation";
+  assert.throws(() => prepareSafeSkillRebuild({ root: stage.root, ownerId: stage.owner, candidate, sourceArtifacts: [conversation] }), /not_verified/);
+
+  const revokedId = valid.provenance.artifact_id;
+  const tombstonePlan = planConsentRevocation({
+    artifacts: [{ ...valid, artifact_id: revokedId, provenance: { ...valid.provenance, provenance_type: "conversation", consent_scope: { revision: 1, requirements: [{ source: "chat_history", purpose: "skill_learning", destination: "local_only" }] }, consent_revision: 1, dependency_ids: ["conversation-source"] } }],
+    revokedScope: { source: "chat_history", purpose: "skill_learning", destination: "local_only" },
+  });
+  const revokedRecord = { ...valid, artifact_id: revokedId, path: path.join(stage.root, "state", "autoskill", "proposals", "Users", stage.owner, "source.json"), provenance: { ...valid.provenance, provenance_type: "conversation", consent_scope: { revision: 1, requirements: [{ source: "chat_history", purpose: "skill_learning", destination: "local_only" }] }, consent_revision: 1, dependency_ids: ["conversation-source"] } };
+  fs.mkdirSync(path.dirname(revokedRecord.path), { recursive: true });
+  fs.writeFileSync(revokedRecord.path, JSON.stringify(revokedRecord));
+  const revoke = prepareRevocation({ root: stage.root, ownerId: stage.owner, consentRevision: 2, revokedScope: tombstonePlan.revoked_scope, plan: tombstonePlan, artifacts: [revokedRecord] });
+  assert.ok(revoke);
+  assert.throws(() => prepareSafeSkillRebuild({ root: stage.root, ownerId: stage.owner, candidate, sourceArtifacts: [valid] }), /source_revoked/);
+
+  const tampered = { ...independentSource(stage, "source-hash-bad"), content_hash: "0".repeat(64) };
+  assert.throws(() => prepareSafeSkillRebuild({ root: stage.root, ownerId: stage.owner, candidate, sourceArtifacts: [tampered] }), /source_hash_invalid/);
 });
