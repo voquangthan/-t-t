@@ -47,9 +47,11 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 
 ## Follow-up audit — 17/11/2026
 
-- Repository baseline: `056a35b`; working tree was clean before this documentation checkpoint.
+- Repository baseline before this follow-up: `bb4520e`; working tree was clean before the source audit.
 - The backend consent catalog contains `chat_history / skill_learning / local_only` and `DeepSeek` grants, but repository inspection found no AutoSkill adapter call into the owner-scoped Backend lease. This is not sufficient to enable capture.
-- The pinned upstream clone is absent from this workspace (`.local/research/AutoSkill/AutoSkill4OpenClaw/adapter/embedded_runtime.js` not found), so the hook/archive boundary cannot be safely patched or integration-tested here. Staging config and primary Gateway remain untouched and AutoSkill remains disabled.
-- Verification with synthetic/local fixtures: backend build PASS (0 warnings/errors); Weather checks PASS; consent audit PASS (test project reports CA1416 on its Windows-only DPAPI call); Cloud Storage checks PASS (24/24); AutoSkill pipeline PASS (7/7); frontend tests PASS (2/2) and production build PASS.
-- AutoSkill adapter integration test: SKIP (upstream clone absent). No live provider, personal data or Gateway was used.
+- At the start of this audit the pinned upstream clone was absent. It has since been restored under `.local/research/AutoSkill` at exact commit `94c47ca488d4ba4117d20272e66d49b9877e68cf`; the tracked staging patch applied successfully.
+- The backend consent catalog contains `chat_history / skill_learning / local_only` and `DeepSeek` grants, but the adapter still has no call into the owner-scoped Backend lease. This is not sufficient to enable capture. Staging config and primary Gateway remain untouched and AutoSkill remains disabled.
+- Verification with synthetic/local fixtures: backend build PASS (0 warnings/errors); Weather checks PASS; consent audit PASS (test project reports CA1416 on its Windows-only DPAPI call); Cloud Storage checks PASS (24/24); AutoSkill pipeline PASS (7/7); upstream adapter tests PASS (72/72); proposal integration PASS (1/1); frontend tests PASS (2/2) and production build PASS.
+- No live provider, personal data or Gateway was used. Google Public Alerts live smoke remains unavailable without a configured key.
 - Frontend build reports existing non-failing warnings: `canonical-host.js` is not bundled because it is a classic script, and the JavaScript chunk is about 553 kB minified.
+- Before enabling capture, define and test revocation cleanup for source archives and derived proposals. Current AutoSkill policy retains proposals/version history, while the consent UI promises removal of worker-owned derived data where possible; implementation must not silently choose one retention semantics over the other.
