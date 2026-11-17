@@ -14,6 +14,23 @@ export function classifyGithubResponseError(response) {
   };
 }
 
+export async function requestGithubJson(context, url) {
+  const get = typeof context?.request?.get === "function" ? context.request.get.bind(context.request)
+    : typeof context?.get === "function" ? context.get.bind(context) : null;
+  if (!get) return { error: "github_invalid_response", rateLimited: false };
+  try {
+    const response = await get(url, {
+      timeout: 10000,
+      headers: { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!response || typeof response.ok !== "function") return { error: "github_invalid_response", rateLimited: false };
+    if (!response.ok()) return classifyGithubResponseError(response);
+    return await response.json();
+  } catch {
+    return { error: "github_api_unavailable", rateLimited: false };
+  }
+}
+
 export function summarizeCheckRuns(response, limit = 30) {
   if (response && typeof response === "object" && typeof response.error === "string") {
     const match = githubHttpError.exec(response.error);

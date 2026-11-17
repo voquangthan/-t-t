@@ -23,6 +23,28 @@ Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application nav
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở Edge đi") == "open-edge",
+    "a direct chat request maps to an allowlisted Edge action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Đệ Tốt, mở VS Code giúp t") == "open-vscode",
+    "a direct chat request maps to an allowlisted VS Code action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra tài khoản GitHub hiện tại") == "read-github-account",
+    "a direct GitHub account inspection request is recognized");
+Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-github-pull-requests",
+    "a direct PR and CI inspection request is recognized");
+Check(ComputerUseChatIntent.DetectDirectRequest("Xem ứng dụng đang mở") == "read-approved-applications",
+    "a direct approved-app observation request is recognized");
+Check(ComputerUseChatIntent.DetectDirectRequest("Làm sao để mở Edge?") is null,
+    "a how-to question does not launch an application");
+Check(ComputerUseChatIntent.DetectDirectRequest("Trong ví dụ này: mở Edge") is null,
+    "an embedded example does not launch an application");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở Edge\nĐọc PR") is null,
+    "multi-line content does not trigger a desktop action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở GitHub") is { } openGithub &&
+      ComputerUsePolicy.CanNavigate(openGithub),
+    "chat navigation intents remain within the navigation permission set");
+Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") is { } readGitHub &&
+      ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(readGitHub)),
+    "chat observation intents remain within the observation permission set");
 var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUsePolicy.Describe());
 Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
     "the exposed permission description keeps code execution disabled");

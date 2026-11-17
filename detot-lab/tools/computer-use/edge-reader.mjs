@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import readline from "node:readline";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { classifyGithubResponseError, summarizeCheckRuns } from "./github-checks.mjs";
+import { requestGithubJson, summarizeCheckRuns } from "./github-checks.mjs";
 
 const require = createRequire(import.meta.url);
 const moduleRoot = process.env.DETOT_PLAYWRIGHT_CORE;
@@ -10,7 +10,7 @@ if (!moduleRoot || path.basename(moduleRoot).toLowerCase() !== "playwright-core"
   process.stderr.write("playwright_core_unavailable\n");
   process.exit(2);
 }
-const { chromium } = require(moduleRoot);
+const { chromium, request: playwrightRequest } = require(moduleRoot);
 const profileRoot = process.env.DETOT_DESKTOP_EDGE_PROFILE;
 if (!profileRoot || !path.isAbsolute(profileRoot)) {
   process.stderr.write("edge_profile_unavailable\n");
@@ -34,13 +34,8 @@ async function ensureEdge() {
   page = context.pages()[0] ?? await context.newPage();
 }
 
-async function requestJson(url) {
-  const response = await context.request.get(url, {
-    timeout: 10000,
-    headers: { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-  });
-  if (!response.ok()) return classifyGithubResponseError(response);
-  return response.json();
+async function requestJson(apiContext, url) {
+  return requestGithubJson(apiContext, url);
 }
 
 async function processRequest(request, phase) {
@@ -50,6 +45,20 @@ async function processRequest(request, phase) {
     return { stopped: true };
   }
   if (!allowedActions.has(request?.action)) return { error: "action_not_allowed" };
+
+  if (request.action === "read-github") {
+    if (typeof request.repository !== "string" || !githubRepo.test(request.repository))
+      return { error: "repository_not_allowed" };
+    phase.current = "github_api";
+    if (typeof playwrightRequest?.newContext !== "function") return { error: "playwright_unavailable" };
+    const apiContext = await playwrightRequest.newContext({ timeout: 10000 });
+    try {
+      return await readPullRequests(apiContext, request.repository);
+    } finally {
+      await apiContext.dispose();
+    }
+  }
+
   phase.current = "edge_launch";
   await ensureEdge();
 
@@ -69,20 +78,23 @@ async function processRequest(request, phase) {
 
   if (typeof request.repository !== "string" || !githubRepo.test(request.repository))
     return { error: "repository_not_allowed" };
-  const apiRoot = `https://api.github.com/repos/${request.repository}`;
   if (request.action === "open-github") {
     phase.current = "browser_navigation";
     await page.goto(`https://github.com/${request.repository}/pulls`, { waitUntil: "domcontentloaded", timeout: 15000 });
     return { opened: true, message: "Đã mở danh sách Pull Request trong Edge." };
   }
 
-  phase.current = "github_api";
-  const pulls = await requestJson(`${apiRoot}/pulls?state=all&per_page=3`);
+  return { error: "action_not_allowed" };
+}
+
+async function readPullRequests(apiContext, repository) {
+  const apiRoot = `https://api.github.com/repos/${repository}`;
+  const pulls = await requestJson(apiContext, `${apiRoot}/pulls?state=all&per_page=3`);
   if (!Array.isArray(pulls)) return { error: pulls.error ?? "pull_request_unavailable" };
   const results = [];
   for (const pull of pulls) {
     if (!Number.isInteger(pull.number) || typeof pull.title !== "string" || typeof pull.head?.sha !== "string") continue;
-    const checks = await requestJson(`${apiRoot}/commits/${encodeURIComponent(pull.head.sha)}/check-runs?per_page=30`);
+    const checks = await requestJson(apiContext, `${apiRoot}/commits/${encodeURIComponent(pull.head.sha)}/check-runs?per_page=30`);
     results.push({
       number: pull.number,
       title: pull.title.slice(0, 180),
@@ -94,9 +106,7 @@ async function processRequest(request, phase) {
       ...summarizeCheckRuns(checks),
     });
   }
-  phase.current = "browser_navigation";
-  await page.goto(`https://github.com/${request.repository}/pulls`, { waitUntil: "domcontentloaded", timeout: 15000 });
-  return { repository: request.repository, pullRequests: results };
+  return { repository, pullRequests: results };
 }
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
