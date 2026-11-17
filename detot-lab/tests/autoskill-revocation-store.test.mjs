@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,11 @@ function fixture() {
   ];
   const plan = planConsentRevocation({ artifacts, revokedScope });
   return { root, ownerId, artifacts, plan, proposalPath, versionPath };
+}
+
+function tombstonePath(root, ownerId) {
+  const key = crypto.createHash("sha256").update(ownerId).digest("hex").slice(0, 32);
+  return path.join(root, "state", "autoskill", "revocations", key, "tombstones.json");
 }
 
 test("revocation tombstones before idempotent deletion and resumes after interruption", () => {
@@ -120,5 +126,23 @@ test("unidentified provenance quarantines the owner instead of allowing untracea
     const journal = prepareRevocation({ root, ownerId, consentRevision: 8, revokedScope, plan, artifacts: [] });
     assert.equal(journal.quarantine_owner, true);
     assert.equal(isArtifactRevoked({ root, ownerId, artifactId: "otherwise-independent-skill" }), true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("malformed tombstones fail closed for artifact and path lookups", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoskill-revoke-corrupt-")).replaceAll("\\", "/");
+  const ownerId = "synthetic-owner";
+  const filePath = tombstonePath(root, ownerId);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  try {
+    fs.writeFileSync(filePath, JSON.stringify({
+      schema: 1, owner_id: ownerId, artifact_ids: [{}], relative_paths: [], owner_quarantined: false, revocations: [],
+    }));
+    assert.throws(() => isArtifactRevoked({ root, ownerId, artifactId: "artifact-1" }), /invalid_revocation_tombstones/);
+
+    fs.writeFileSync(filePath, JSON.stringify({
+      schema: 1, owner_id: ownerId, artifact_ids: [], relative_paths: ["../outside/proposal.json"], owner_quarantined: false, revocations: [],
+    }));
+    assert.throws(() => isPathRevoked({ root, ownerId, artifactPath: path.join(root, "state/autoskill/proposals/Users", ownerId, "proposal.json") }), /invalid_revocation_tombstones/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

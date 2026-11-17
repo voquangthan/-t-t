@@ -131,3 +131,8 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Staging artifact usability and tombstone path checks now record both allow and deny decisions with operation/policy codes. Denial reasons are normalized to fixed codes; arbitrary exception text and artifact bodies are not copied into the audit log.
 - The synthetic pipeline regression verifies allow metadata and confirms a candidate prompt is absent from audit output. AutoSkill suite: **38/38 PASS**; syntax and diff checks PASS.
 - This is staging pipeline audit evidence, not a durable consent-decision log from the live Backend/Gateway lease, which remains unimplemented.
+
+### Tombstone corruption fail-closed — 17/11/2026
+
+- Revocation tombstone reads now validate every artifact ID, duplicate entries, owner-scoped normalized paths, and revocation revision records before answering whether an artifact/path is revoked. Malformed metadata throws and blocks the pipeline instead of being interpreted as an empty tombstone set.
+- Added synthetic tests for malformed IDs and out-of-scope paths. AutoSkill suite: **39/39 PASS**; syntax and diff checks PASS. No existing `.local` state was read or modified.

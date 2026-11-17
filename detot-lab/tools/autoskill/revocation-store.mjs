@@ -75,6 +75,37 @@ function validateScope(scope) {
   return { source: scope.source, purpose: scope.purpose, destination: scope.destination };
 }
 
+function validateTombstones(root, ownerId, data) {
+  if (data?.schema !== 1 || data.owner_id !== ownerId || !Array.isArray(data.artifact_ids) ||
+      !Array.isArray(data.relative_paths) || typeof data.owner_quarantined !== "boolean" || !Array.isArray(data.revocations))
+    throw new Error("invalid_revocation_tombstones");
+  if (data.artifact_ids.some((id) => typeof id !== "string" || !ID_RE.test(id)) ||
+      new Set(data.artifact_ids).size !== data.artifact_ids.length)
+    throw new Error("invalid_revocation_tombstones");
+  const allowed = [
+    path.join("state", "autoskill", "proposals", "Users", ownerId) + path.sep,
+    path.join("state", "autoskill", "SkillBank", "Users", ownerId) + path.sep,
+  ];
+  const seenPaths = new Set();
+  for (const item of data.relative_paths) {
+    if (typeof item !== "string" || !item || path.isAbsolute(item)) throw new Error("invalid_revocation_tombstones");
+    const absolute = path.resolve(root, item);
+    const relative = path.relative(path.resolve(root), absolute);
+    if (relative !== item || !allowed.some((prefix) => relative.startsWith(prefix)) || path.extname(relative).toLowerCase() !== ".json")
+      throw new Error("invalid_revocation_tombstones");
+    ensureInside(root, absolute);
+    if (seenPaths.has(relative)) throw new Error("invalid_revocation_tombstones");
+    seenPaths.add(relative);
+  }
+  const seenRevocations = new Set();
+  for (const entry of data.revocations) {
+    if (!ID_RE.test(String(entry?.revocation_id || "")) || !Number.isSafeInteger(entry?.consent_revision) || entry.consent_revision < 0 ||
+        seenRevocations.has(entry.revocation_id)) throw new Error("invalid_revocation_tombstones");
+    seenRevocations.add(entry.revocation_id);
+  }
+  return data;
+}
+
 function validateJournal(root, ownerId, journal) {
   if (!journal || journal.schema !== 1 || journal.owner_id !== ownerId || !ID_RE.test(String(journal.revocation_id || "")) ||
       !Number.isSafeInteger(journal.consent_revision) || journal.consent_revision < 0 ||
@@ -123,11 +154,8 @@ function validateJournal(root, ownerId, journal) {
 function writeTombstones(root, ownerId, journal) {
   const filePath = tombstonePath(root, ownerId);
   let current = { schema: 1, owner_id: ownerId, artifact_ids: [], relative_paths: [], owner_quarantined: false, revocations: [] };
-  current = readOptionalJson(filePath) || current;
-  if (current.schema !== 1 || current.owner_id !== ownerId || !Array.isArray(current.artifact_ids) ||
-      !Array.isArray(current.relative_paths) || typeof current.owner_quarantined !== "boolean" || !Array.isArray(current.revocations))
-    throw new Error("invalid_revocation_tombstones");
-  writeAtomic(filePath, {
+  current = validateTombstones(root, ownerId, readOptionalJson(filePath) || current);
+  const next = {
     schema: 1,
     owner_id: ownerId,
     artifact_ids: [...new Set([...current.artifact_ids, ...journal.blocked_artifact_ids])].sort(),
@@ -135,7 +163,9 @@ function writeTombstones(root, ownerId, journal) {
     owner_quarantined: current.owner_quarantined || journal.quarantine_owner,
     revocations: [...current.revocations.filter((entry) => entry.revocation_id !== journal.revocation_id),
       { revocation_id: journal.revocation_id, consent_revision: journal.consent_revision }],
-  });
+  };
+  validateTombstones(root, ownerId, next);
+  writeAtomic(filePath, next);
 }
 
 /** Create a durable, metadata-only journal from the deterministic policy plan. */
@@ -279,9 +309,7 @@ export function isArtifactRevoked({ root, ownerId, artifactId }) {
   const filePath = tombstonePath(path.resolve(root), owner);
   const data = readOptionalJson(filePath);
   if (!data) return false;
-  if (data.schema !== 1 || data.owner_id !== owner || !Array.isArray(data.artifact_ids) || !Array.isArray(data.relative_paths) ||
-      typeof data.owner_quarantined !== "boolean")
-    throw new Error("invalid_revocation_tombstones");
+  validateTombstones(path.resolve(root), owner, data);
   return data.owner_quarantined || data.artifact_ids.includes(String(artifactId || ""));
 }
 
@@ -294,8 +322,6 @@ export function isPathRevoked({ root, ownerId, artifactPath }) {
   const filePath = tombstonePath(base, owner);
   const data = readOptionalJson(filePath);
   if (!data) return false;
-  if (data.schema !== 1 || data.owner_id !== owner || !Array.isArray(data.artifact_ids) || !Array.isArray(data.relative_paths) ||
-      typeof data.owner_quarantined !== "boolean")
-    throw new Error("invalid_revocation_tombstones");
+  validateTombstones(base, owner, data);
   return data.owner_quarantined || data.relative_paths.includes(relative);
 }
