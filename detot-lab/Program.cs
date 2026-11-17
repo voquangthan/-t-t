@@ -244,7 +244,12 @@ app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRe
     if (!ComputerUsePolicy.CanObserve(request.Target))
         return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
     if (request.Target == "approved-applications")
-        return Results.Ok(new { applications = WindowsDesktopAutomation.ReadOpenApprovedApplications() });
+    {
+        var observation = WindowsDesktopAutomation.ObserveOpenApprovedApplications();
+        var message = WindowsDesktopAutomation.FormatApplicationObservation(observation);
+        if (message.Error is not null) return Results.Problem(message.Error, statusCode: 503);
+        return Results.Ok(new { observationStatus = message.Status, applications = observation.Applications });
+    }
     var repository = request.Target == "github-pull-requests"
         ? (await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken)).Repository
         : null;
@@ -1473,11 +1478,11 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
 {
     if (action == "read-approved-applications")
     {
-        var applications = WindowsDesktopAutomation.ReadOpenApprovedApplications();
-        var reply = applications.Count == 0
-            ? "Mình không thấy cửa sổ nào trong danh sách ứng dụng được phép quan sát."
-            : "Các ứng dụng đang mở: " + string.Join(", ", applications) + ".";
-        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action });
+        var observation = WindowsDesktopAutomation.ObserveOpenApprovedApplications();
+        var message = WindowsDesktopAutomation.FormatApplicationObservation(observation);
+        if (message.Error is not null) return Results.Problem(message.Error, statusCode: 503);
+        return Results.Ok(new { reply = message.Reply, toolUsed = true, computerUseAction = action,
+            computerUseObservationStatus = message.Status });
     }
 
     if (action is "open-vscode" or "open-workspace")

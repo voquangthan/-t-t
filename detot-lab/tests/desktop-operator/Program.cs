@@ -32,6 +32,33 @@ Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation ca
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+var emptyApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation([], available: true, partial: false);
+Check(emptyApplicationObservation.Status == "empty" && emptyApplicationObservation.Applications.Count == 0,
+    "a successful empty desktop observation is distinct from an error");
+var partialApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation(
+    ["Visual Studio Code"], available: true, partial: true);
+Check(partialApplicationObservation.Status == "partial" &&
+      partialApplicationObservation.Applications.SequenceEqual(["Visual Studio Code"]),
+    "partial desktop observations preserve discovered apps and disclose incomplete coverage");
+var unavailableApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation(
+    ["Visual Studio Code"], available: false, partial: false);
+Check(unavailableApplicationObservation.Status == "unavailable" &&
+      unavailableApplicationObservation.Applications.Count == 0,
+    "UI Automation failure is represented as unavailable, never as a successful empty result");
+var unavailableApplicationMessage = WindowsDesktopAutomation.FormatApplicationObservation(unavailableApplicationObservation);
+Check(unavailableApplicationMessage.Status == "unavailable" && unavailableApplicationMessage.Error is not null &&
+      unavailableApplicationMessage.Reply is null &&
+      !unavailableApplicationMessage.Error.Contains("không thấy", StringComparison.OrdinalIgnoreCase),
+    "an unavailable UIA observation becomes an error instead of a no-apps claim");
+var partialEmptyMessage = WindowsDesktopAutomation.FormatApplicationObservation(
+    WindowsDesktopAutomation.CreateApplicationObservation([], available: true, partial: true));
+Check(partialEmptyMessage.Status == "partial" && partialEmptyMessage.Reply is not null &&
+      partialEmptyMessage.Reply.Contains("không thể kết luận danh sách trống", StringComparison.OrdinalIgnoreCase),
+    "a partial empty result does not claim that no applications are open");
+var successfulEmptyMessage = WindowsDesktopAutomation.FormatApplicationObservation(emptyApplicationObservation);
+Check(successfulEmptyMessage.Status == "empty" && successfulEmptyMessage.Reply is not null &&
+      successfulEmptyMessage.Reply.Contains("không thấy ứng dụng nào", StringComparison.OrdinalIgnoreCase),
+    "only a successful complete empty observation may report no apps");
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");

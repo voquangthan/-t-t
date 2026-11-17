@@ -6,6 +6,9 @@ using FlaUI.UIA3;
 
 public static class WindowsDesktopAutomation
 {
+    public sealed record ApplicationObservation(string Status, IReadOnlyList<string> Applications);
+    public sealed record ApplicationObservationMessage(string Status, string? Reply, string? Error);
+
     private static readonly IReadOnlyDictionary<string, string> ApprovedApplications =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -18,19 +21,31 @@ public static class WindowsDesktopAutomation
         };
 
     public static IReadOnlyList<string> ReadOpenApprovedApplications()
+        => ObserveOpenApprovedApplications().Applications;
+
+    public static ApplicationObservation ObserveOpenApprovedApplications()
     {
 #if !WINDOWS
-        return [];
+        return CreateApplicationObservation([], available: false, partial: false);
 #else
-        if (!OperatingSystem.IsWindows()) return [];
+        if (!OperatingSystem.IsWindows()) return CreateApplicationObservation([], available: false, partial: false);
         try
         {
             using var automation = new UIA3Automation();
             var desktop = automation.GetDesktop();
             var openApplications = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            var hadInspectionErrors = false;
             foreach (var (processName, displayName) in ApprovedApplications)
             {
-                foreach (var process in System.Diagnostics.Process.GetProcessesByName(processName))
+                System.Diagnostics.Process[] processes;
+                try { processes = System.Diagnostics.Process.GetProcessesByName(processName); }
+                catch (Exception)
+                {
+                    hadInspectionErrors = true;
+                    continue;
+                }
+
+                foreach (var process in processes)
                 {
                     using (process)
                     {
@@ -42,18 +57,42 @@ public static class WindowsDesktopAutomation
                         }
                         catch (Exception)
                         {
-                            // Ignore processes that exit while UI Automation is inspecting the desktop.
+                            // Keep partial status because this process could not be inspected.
+                            hadInspectionErrors = true;
                         }
                     }
                 }
             }
-            return openApplications.ToArray();
+            return CreateApplicationObservation(openApplications, available: true, partial: hadInspectionErrors);
         }
         catch (Exception)
         {
-            return [];
+            return CreateApplicationObservation([], available: false, partial: false);
         }
 #endif
+    }
+
+    public static ApplicationObservation CreateApplicationObservation(IEnumerable<string> applications,
+        bool available, bool partial)
+    {
+        var names = applications.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (!available) return new("unavailable", []);
+        if (partial) return new("partial", names);
+        return new(names.Length == 0 ? "empty" : "available", names);
+    }
+
+    public static ApplicationObservationMessage FormatApplicationObservation(ApplicationObservation observation)
+    {
+        if (observation.Status == "unavailable")
+            return new("unavailable", null, "Không thể quan sát các ứng dụng desktop trong phiên này.");
+        if (observation.Status == "partial")
+            return new("partial", observation.Applications.Count == 0
+                ? "Chỉ quan sát được một phần ứng dụng desktop; không thể kết luận danh sách trống."
+                : "Chỉ quan sát được một phần ứng dụng desktop: " +
+                  string.Join(", ", observation.Applications) + ".", null);
+        if (observation.Status == "empty")
+            return new("empty", "Quan sát hoàn tất; không thấy ứng dụng nào trong danh sách được phép.", null);
+        return new("available", "Các ứng dụng đang mở: " + string.Join(", ", observation.Applications) + ".", null);
     }
 
     public static bool HasVisibleWindow(string processName)

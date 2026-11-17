@@ -22,6 +22,7 @@ type DesktopObservation = {
   needsUserLogin?: boolean;
   repository?: string;
   applications?: string[];
+  observationStatus?: "available" | "empty" | "partial" | "unavailable";
   pullRequests?: Array<{
     number: number;
     title: string;
@@ -134,7 +135,13 @@ export function DesktopActions() {
       const result = await response.json() as DesktopObservation;
       if (!response.ok || result.error) throw new Error(result.error ?? `Không đọc được ứng dụng đang mở (HTTP ${response.status}).`);
       setObservation(result);
-      setNotice("Chỉ đọc tên ứng dụng thuộc danh sách cho phép; không đọc tiêu đề hay nội dung cửa sổ.");
+      setNotice(result.observationStatus === "partial"
+        ? result.applications?.length
+          ? "Chỉ đọc được một phần ứng dụng thuộc danh sách cho phép; kết quả chưa đầy đủ."
+          : "Không thể kết luận danh sách ứng dụng trống vì một phần quan sát thất bại."
+        : result.observationStatus === "empty"
+          ? "Đã quan sát thành công; không thấy ứng dụng nào trong danh sách cho phép."
+          : "Chỉ đọc tên ứng dụng thuộc danh sách cho phép; không đọc tiêu đề hay nội dung cửa sổ.");
     } catch (cause) {
       setObservation(undefined);
       setError(cause instanceof Error ? cause.message : "Không đọc được ứng dụng đang mở.");
@@ -173,8 +180,11 @@ export function DesktopActions() {
       </div>
     </section>}
     {observation?.applications && <section className="desktop-workspace-card" aria-label="Ứng dụng đang mở">
-      <div className="overview-card-head"><h2>Ứng dụng đang mở</h2><span className="desktop-muted">Chỉ tên ứng dụng</span></div>
-      {observation.applications.length === 0 ? <p className="desktop-muted">Không thấy cửa sổ của ứng dụng trong danh sách được hỗ trợ.</p> :
+      <div className="overview-card-head"><h2>Ứng dụng đang mở</h2><span className="desktop-muted">{observation.observationStatus === "partial" ? "Kết quả một phần" : "Chỉ tên ứng dụng"}</span></div>
+      {observation.observationStatus === "partial" && <p className="desktop-check-error">Không thể kiểm tra một số ứng dụng; danh sách dưới đây chưa đầy đủ.</p>}
+      {observation.applications.length === 0 ? <p className="desktop-muted">{observation.observationStatus === "partial"
+        ? "Không thể kết luận danh sách trống vì một phần quan sát thất bại."
+        : "Quan sát hoàn tất; không thấy cửa sổ của ứng dụng trong danh sách được hỗ trợ."}</p> :
         <ul>{observation.applications.map(application => <li key={application}>{application}</li>)}</ul>}
       <p className="desktop-muted">Không đọc tiêu đề, văn bản, tab hoặc nội dung bên trong cửa sổ.</p>
     </section>}
