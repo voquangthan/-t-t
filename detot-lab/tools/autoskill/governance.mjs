@@ -52,7 +52,22 @@ export function planConsentRevocation({ artifacts, revokedScope }) {
   if (!revokedScope?.source || !revokedScope?.purpose || !revokedScope?.destination)
     throw new Error("invalid_revoked_scope");
   const items = Array.isArray(artifacts) ? artifacts : [];
-  const byId = new Map(items.map((item) => [item?.provenance?.artifact_id || item?.artifact_id, item]).filter(([id]) => Boolean(id)));
+  const idFor = (item) => item?.provenance?.artifact_id || item?.artifact_id;
+  const counts = new Map();
+  for (const item of items) {
+    const id = idFor(item);
+    if (id) counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  const duplicates = [...counts].filter(([, count]) => count > 1).map(([id]) => id).sort();
+  if (duplicates.length) return {
+    revoked_scope: { ...revokedScope },
+    actions: items.map((item, index) => ({ artifact_id: idFor(item) || `unidentified:${index}`, action: "quarantine", reason: "duplicate_artifact_id" })),
+    impacted_artifact_ids: [],
+    requires_review: true,
+    blocked: true,
+  };
+  const unidentified = items.map((item, index) => ({ item, index })).filter(({ item }) => !idFor(item));
+  const byId = new Map(items.map((item) => [idFor(item), item]).filter(([id]) => Boolean(id)));
   const impacted = new Set();
   for (const [id, item] of byId) {
     const provenance = item?.provenance || item;
@@ -68,7 +83,7 @@ export function planConsentRevocation({ artifacts, revokedScope }) {
       if (dependencies.some((dependency) => impacted.has(dependency))) { impacted.add(id); changed = true; }
     }
   }
-  const actions = [];
+  const actions = unidentified.map(({ index }) => ({ artifact_id: `unidentified:${index}`, action: "quarantine", reason: "artifact_id_missing" }));
   for (const [id, item] of byId) {
     if (!impacted.has(id)) {
       const policy = evaluateArtifactPolicy(item);
@@ -80,7 +95,7 @@ export function planConsentRevocation({ artifacts, revokedScope }) {
     else if (policy.decision === "UNKNOWN") actions.push({ artifact_id: id, action: "quarantine", reason: "revoked_dependency_or_unknown_lineage" });
     else actions.push({ artifact_id: id, action: "invalidate_and_delete", reason: policy.reason === "revoked_scope" ? policy.reason : "derived_from_revoked_artifact" });
   }
-  return { revoked_scope: { ...revokedScope }, actions, impacted_artifact_ids: [...impacted].sort(), requires_review: actions.some((item) => item.action === "quarantine" || item.action === "separate_verified_segments") };
+  return { revoked_scope: { ...revokedScope }, actions, impacted_artifact_ids: [...impacted].sort(), requires_review: actions.some((item) => item.action === "quarantine" || item.action === "separate_verified_segments"), blocked: false };
 }
 
 export function assertArtifactUsable(artifact) {

@@ -65,3 +65,9 @@ Do not report SELF-IMPROVEMENT PASS until all evidence above is replaced with ac
 - Synthetic verification: project governance/provenance/pipeline/integration tests **17/17 PASS**; pinned upstream adapter tests **79/79 PASS**.
 - Still blocked from full integration: the adapter has no trusted Backend consent lease callback bound to the authenticated owner, and there is no crash-safe deletion executor covering all managed copies. AutoSkill remains disabled. Do not claim governance or AutoSkill E2E PASS until those pieces and their revoke/restart/restore tests are implemented.
 - See `AUTOSKILL_GOVERNANCE.md` for architecture, boundaries, and required next work.
+
+### Revocation planner hardening — 17/11/2026
+
+- The pure planner now follows `source_ids` as well as `dependency_ids`, quarantines unidentified artifacts, and blocks the entire plan on duplicate artifact IDs rather than risking ambiguous deletion.
+- Repeated planning over the same synthetic graph is verified deterministic.
+- Governance/provenance/pipeline/integration tests now **18/18 PASS**; adapter remains **79/79 PASS** from the preceding checkpoint, with no adapter source changes in this follow-up.

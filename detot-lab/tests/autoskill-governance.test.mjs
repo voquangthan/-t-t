@@ -55,6 +55,20 @@ test("revocation traverses proposal to version and quarantines unknown descendan
   assert.equal(plan.actions.find((item) => item.artifact_id === "version-1").action, "invalidate_and_delete");
   assert.equal(plan.actions.find((item) => item.artifact_id === "cache-legacy").action, "quarantine");
   assert.equal(plan.requires_review, true);
+  assert.deepEqual(planConsentRevocation({ artifacts: [
+    { provenance: conversation }, { provenance: proposal }, { provenance: version }, { provenance: unknown },
+  ], revokedScope }), plan);
+});
+
+test("revocation plan quarantines unidentified artifacts and blocks ambiguous duplicate IDs", () => {
+  const missing = planConsentRevocation({ artifacts: [{}], revokedScope });
+  assert.equal(missing.actions[0].action, "quarantine");
+  assert.equal(missing.actions[0].reason, "artifact_id_missing");
+  const duplicate = source("same-id", "conversation");
+  const blocked = planConsentRevocation({ artifacts: [{ provenance: duplicate }, { provenance: duplicate }], revokedScope });
+  assert.equal(blocked.blocked, true);
+  assert.deepEqual(blocked.actions.map((item) => item.action), ["quarantine", "quarantine"]);
+  assert.deepEqual(blocked.impacted_artifact_ids, []);
 });
 
 test("mixed artifacts separate only hash backed independently verified segments", () => {
