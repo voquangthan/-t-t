@@ -8,8 +8,6 @@ public static class ComputerUseChatIntent
 
     private static readonly (string Action, Regex Pattern)[] Patterns =
     [
-        ("select-github-account:bottom", new(Prefix + @"(?:chọn|select)\s+(?:tài\s+khoản\s+)?(?:cái\s+)?(?:ở\s+)?(?:dưới|cuối|bottom)(?:\s+(?:trong\s+danh\s+sách|account))?" + Suffix, Options)),
-        ("select-github-account", new(Prefix + @"(?:chọn|select)\s+(?:tài\s+khoản\s+)?github\s+([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)" + Suffix, Options)),
         ("open-vscode", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:vs\s*code|visual\s+studio\s+code)" + Suffix, Options)),
         ("open-edge", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:microsoft\s+)?edge" + Suffix, Options)),
         ("open-workspace", new(Prefix + @"(?:mở|open)\s+(?:project\s+)?workspace" + Suffix, Options)),
@@ -28,7 +26,7 @@ public static class ComputerUseChatIntent
         {
             var match = pattern.Match(text);
             if (!match.Success) continue;
-            return action == "select-github-account" ? action + ":" + match.Groups[1].Value : action;
+            return action;
         }
         return null;
     }
@@ -41,10 +39,6 @@ public static class ComputerUseChatIntent
         _ => null
     };
 
-    public static string? GitHubAccountTargetForAction(string action) =>
-        action.StartsWith("select-github-account:", StringComparison.Ordinal)
-            ? action["select-github-account:".Length..]
-            : null;
 }
 
 public static class ComputerUseChatDispatcher
