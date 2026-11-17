@@ -24,7 +24,7 @@ const config = {
         enabled: false,
         hooks: { allowConversationAccess: false },
         config: {
-          userId: "detot-owner",
+          userId: "workspace-owner",
           runtimeMode: "embedded",
           reviewOnly: true,
           openclawSkillInstallMode: "openclaw_mirror",

@@ -776,7 +776,7 @@ index 04b75931..ed82e5b0 100644
  
  test("embedded runtime reads shared prompt pack templates for extraction and maintenance", async () => {
 diff --git a/AutoSkill4OpenClaw/adapter/index.js b/AutoSkill4OpenClaw/adapter/index.js
-index 478b036e..2c778953 100644
+index 478b036e..71754613 100644
 --- a/AutoSkill4OpenClaw/adapter/index.js
 +++ b/AutoSkill4OpenClaw/adapter/index.js
 @@ -2,6 +2,7 @@ import fs from "node:fs";
@@ -987,13 +987,45 @@ index 478b036e..2c778953 100644
      event_time: Number(data?.event_time ?? Date.now()) || Date.now(),
    };
  }
-@@ -1348,10 +1430,21 @@ function buildInjectionResult(cfg, text) {
+@@ -1348,10 +1430,53 @@ function buildInjectionResult(cfg, text) {
    return { appendSystemContext: content };
  }
  
 +async function getConsentGrant(authorizeConsent, stage) {
 +  if (typeof authorizeConsent !== "function") return null;
 +  try { return normalizeConsentGrant(await authorizeConsent(stage), stage); } catch (_) { return null; }
++}
++
++function createBackendConsentAuthorizer({
++  endpoint = process.env.DETOT_AUTOSKILL_CONSENT_URL,
++  token = process.env.OPENCLAW_GATEWAY_TOKEN,
++  expectedOwnerId = "",
++  fetchImpl = globalThis.fetch,
++  timeoutMs = 2500,
++} = {}) {
++  return async (stage) => {
++    if (!["capture", "analysis"].includes(stage) || !endpoint || !token || !expectedOwnerId || typeof fetchImpl !== "function") return null;
++    let url;
++    try { url = new URL(endpoint); } catch (_) { return null; }
++    if (!(["localhost", "127.0.0.1", "::1"].includes(url.hostname)) ||
++        !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
++        url.pathname !== "/api/internal/autoskill/consent") return null;
++    try {
++      const response = await fetchImpl(url, {
++        method: "POST",
++        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
++        body: JSON.stringify({ stage }),
++        redirect: "error",
++        signal: AbortSignal.timeout(Math.max(250, Math.min(5000, Number(timeoutMs) || 2500))),
++      });
++      if (!response?.ok) return null;
++      const body = await response.json();
++      if (body?.ownerId !== expectedOwnerId) return null;
++      return normalizeConsentGrant(body, stage);
++    } catch (_) {
++      return null;
++    }
++  };
 +}
 +
 +async function consentAllows(authorizeConsent, stage) {
@@ -1009,7 +1041,7 @@ index 478b036e..2c778953 100644
  
    const stageEmbeddedLiveSnapshot = async (event, ctx) => {
      if (cfg.runtimeMode !== "embedded") return;
-@@ -1369,6 +1462,12 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+@@ -1369,6 +1494,12 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
  
    return async (event, ctx) => {
      if (log?.info) log.info(`[${PLUGIN_ID}] before_prompt_build invoked`);
@@ -1022,7 +1054,7 @@ index 478b036e..2c778953 100644
      await stageEmbeddedLiveSnapshot(event, ctx);
      if (!cfg.skillRetrieval.enabled) {
        if (log?.info) {
-@@ -1388,6 +1487,12 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+@@ -1388,6 +1519,12 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
        if (log?.info) log.info(`[${PLUGIN_ID}] retrieval skipped no prompt or messages`);
        return;
      }
@@ -1035,7 +1067,7 @@ index 478b036e..2c778953 100644
      try {
        const out = await requestFn(
          cfg,
-@@ -1396,12 +1501,14 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
+@@ -1396,12 +1533,14 @@ function createBeforePromptBuildHandler(cfg, log, deps = {}) {
          log,
        );
        if (onRetrieval && payload?.session_id) {
@@ -1052,7 +1084,7 @@ index 478b036e..2c778953 100644
        if (!block.text) {
          if (log?.info) log.info(`[${PLUGIN_ID}] retrieval no result`);
          return;
-@@ -1505,15 +1612,28 @@ function createAgentEndHandler(cfg, log, deps = {}) {
+@@ -1505,15 +1644,28 @@ function createAgentEndHandler(cfg, log, deps = {}) {
    const embeddedProcessor = deps.embeddedProcessor;
    const consumeRetrieval = typeof deps.consumeRetrieval === "function" ? deps.consumeRetrieval : null;
    const clearRetrieval = typeof deps.clearRetrieval === "function" ? deps.clearRetrieval : null;
@@ -1084,7 +1116,7 @@ index 478b036e..2c778953 100644
      const usedSet = new Set(usedSkillIds.map((id) => asString(id).trim().toLowerCase()).filter(Boolean));
      const inferredUsedSkillIds = inferredUsedSkillIdsRaw.filter(
        (id) => !usedSet.has(asString(id).trim().toLowerCase()),
-@@ -1554,6 +1674,12 @@ function createAgentEndHandler(cfg, log, deps = {}) {
+@@ -1554,6 +1706,12 @@ function createAgentEndHandler(cfg, log, deps = {}) {
        return;
      }
      try {
@@ -1097,7 +1129,24 @@ index 478b036e..2c778953 100644
        await requestFn(cfg, "/autoskill/openclaw/hooks/agent_end", payload, log);
      } catch (_) {
        return;
-@@ -1627,7 +1753,7 @@ export default {
+@@ -1607,6 +1765,7 @@ export default {
+   register(api) {
+     const cfg = normalizeConfig(api.pluginConfig);
+     const log = api.logger ?? console;
++    const authorizeConsent = createBackendConsentAuthorizer({ expectedOwnerId: cfg.userId });
+     if (log?.info) {
+       log.info(
+         `[${PLUGIN_ID}] register runtime_mode=${cfg.runtimeMode} ` +
+@@ -1615,7 +1774,7 @@ export default {
+       );
+     }
+     const embeddedProcessor =
+-      cfg.runtimeMode === "embedded" ? createEmbeddedProcessor(cfg, api, log) : null;
++      cfg.runtimeMode === "embedded" ? createEmbeddedProcessor(cfg, api, log, { authorizeConsent }) : null;
+     const retrievalCache = createSessionRetrievalCache();
+     let messageReceivedInvoked = 0;
+     let beforePromptInvoked = 0;
+@@ -1627,7 +1786,7 @@ export default {
          log.info(`[${PLUGIN_ID}] hook first invocation name=message_received`);
        }
        if (log?.info) {
@@ -1106,21 +1155,38 @@ index 478b036e..2c778953 100644
          const channel = asString(event?.channel || event?.provider || ctx?.channel || ctx?.provider).trim();
          log.info(
            `[${PLUGIN_ID}] message_received invoked session=${sessionId || "<missing>"} channel=${channel || "<empty>"}`,
-@@ -1638,6 +1764,9 @@ export default {
+@@ -1638,6 +1797,10 @@ export default {
  
      const beforePromptBuildHandler = createBeforePromptBuildHandler(cfg, log, {
        embeddedProcessor,
++      authorizeConsent,
 +      clearRetrieval(sessionId, userId) {
 +        retrievalCache.clear(sessionId, userId);
 +      },
        onRetrieval(sessionId, snapshot, userId) {
          retrievalCache.remember(sessionId, snapshot, userId);
        },
+@@ -1652,6 +1815,7 @@ export default {
+ 
+     const agentEndHandler = createAgentEndHandler(cfg, log, {
+       embeddedProcessor,
++      authorizeConsent,
+       consumeRetrieval(sessionId, userId) {
+         return retrievalCache.consume(sessionId, userId);
+       },
+@@ -1725,6 +1889,7 @@ export {
+   clampInjectedContext,
+   createBeforePromptBuildHandler,
+   createAgentEndHandler,
++  createBackendConsentAuthorizer,
+   extractSelectedSkills,
+   normalizeConfig,
+   normalizeInjectionMode,
 diff --git a/AutoSkill4OpenClaw/adapter/index.test.mjs b/AutoSkill4OpenClaw/adapter/index.test.mjs
-index 5c78bff3..f789eea3 100644
+index 5c78bff3..1142a668 100644
 --- a/AutoSkill4OpenClaw/adapter/index.test.mjs
 +++ b/AutoSkill4OpenClaw/adapter/index.test.mjs
-@@ -5,10 +5,34 @@ import test from "node:test";
+@@ -5,10 +5,91 @@ import test from "node:test";
  import plugin, {
    buildEndPayload,
    createSessionRetrievalCache,
@@ -1128,6 +1194,7 @@ index 5c78bff3..f789eea3 100644
 -  createBeforePromptBuildHandler,
 +  createAgentEndHandler as createRawAgentEndHandler,
 +  createBeforePromptBuildHandler as createRawBeforePromptBuildHandler,
++  createBackendConsentAuthorizer,
    normalizeConfig,
  } from "./index.js";
 +import { CONSENT_REQUIREMENTS } from "./detot-provenance.mjs";
@@ -1144,6 +1211,62 @@ index 5c78bff3..f789eea3 100644
 +  return createRawBeforePromptBuildHandler(cfg, log, { async authorizeConsent(stage) { return consentGrant(stage); }, ...deps });
 +}
 +
++test("backend consent bridge is loopback-only, stage-scoped and fail-closed", async () => {
++  let calls = 0;
++  const fetchImpl = async (url, options) => {
++    calls += 1;
++    assert.equal(url.pathname, "/api/internal/autoskill/consent");
++    assert.equal(options.method, "POST");
++    assert.equal(options.redirect, "error");
++    assert.equal(options.headers.authorization, "Bearer synthetic-gateway-token");
++    assert.deepEqual(JSON.parse(options.body), { stage: "capture" });
++    return { ok: true, async json() { return { ...consentGrant("capture", 7), ownerId: "workspace-owner" }; } };
++  };
++  const authorize = createBackendConsentAuthorizer({
++    endpoint: "http://127.0.0.1:5183/api/internal/autoskill/consent",
++    token: "synthetic-gateway-token",
++    expectedOwnerId: "workspace-owner",
++    fetchImpl,
++  });
++  assert.deepEqual(await authorize("capture"), {
++    stage: "capture", revision: 7, requirements: CONSENT_REQUIREMENTS.capture,
++  });
++  assert.equal(await authorize("unsupported"), null);
++  assert.equal(calls, 1);
++
++  for (const endpoint of ["https://attacker.example/api/internal/autoskill/consent", "http://127.0.0.1:5183/api/consent"]) {
++    const denied = createBackendConsentAuthorizer({ endpoint, token: "synthetic-gateway-token", fetchImpl });
++    assert.equal(await denied("capture"), null);
++  }
++  const malformedGrant = createBackendConsentAuthorizer({
++    endpoint: "http://localhost:5183/api/internal/autoskill/consent",
++    token: "synthetic-gateway-token",
++    expectedOwnerId: "workspace-owner",
++    fetchImpl: async () => ({ ok: true, async json() { return consentGrant("analysis", 7); } }),
++  });
++  assert.equal(await malformedGrant("capture"), null);
++  const providerFailure = createBackendConsentAuthorizer({
++    endpoint: "http://localhost:5183/api/internal/autoskill/consent",
++    token: "synthetic-gateway-token",
++    expectedOwnerId: "workspace-owner",
++    fetchImpl: async () => { throw new Error("synthetic network failure"); },
++  });
++  assert.equal(await providerFailure("capture"), null);
++  const ownerMismatch = createBackendConsentAuthorizer({
++    endpoint: "http://localhost:5183/api/internal/autoskill/consent",
++    token: "synthetic-gateway-token",
++    expectedOwnerId: "another-owner",
++    fetchImpl: async () => ({ ok: true, async json() { return { ...consentGrant("capture", 7), ownerId: "workspace-owner" }; } }),
++  });
++  assert.equal(await ownerMismatch("capture"), null);
++  const missingOwnerBinding = createBackendConsentAuthorizer({
++    endpoint: "http://localhost:5183/api/internal/autoskill/consent",
++    token: "synthetic-gateway-token",
++    fetchImpl,
++  });
++  assert.equal(await missingOwnerBinding("capture"), null);
++});
++
 +const syntheticIndependentProvenance = {
 +  artifact_id: "skill:synthetic-approved",
 +  source_ids: ["docs:synthetic-runbook"],
@@ -1157,7 +1280,7 @@ index 5c78bff3..f789eea3 100644
  
  function makeLogger() {
    const entries = [];
-@@ -68,6 +92,7 @@ function sampleResult(overrides = {}) {
+@@ -68,6 +149,7 @@ function sampleResult(overrides = {}) {
          triggers: ["the user asks about release flow"],
          instructions: "List checks\nCall out rollback criteria\nKeep the answer concise",
          tags: ["release", "ops"],
@@ -1165,7 +1288,7 @@ index 5c78bff3..f789eea3 100644
        },
      ],
      ...overrides,
-@@ -99,6 +124,58 @@ test("before_prompt_build returns no-op when skill retrieval is disabled", async
+@@ -99,6 +181,58 @@ test("before_prompt_build returns no-op when skill retrieval is disabled", async
    assert(logger.entries.some((entry) => entry.message.includes("retrieval disabled")));
  });
  
@@ -1224,7 +1347,7 @@ index 5c78bff3..f789eea3 100644
  test("before_prompt_build skips external retrieval in embedded mirror mode", async () => {
    await withEnv(
      {
-@@ -350,6 +427,30 @@ test("before_prompt_build returns no-op when retrieval returns no skills", async
+@@ -350,6 +484,30 @@ test("before_prompt_build returns no-op when retrieval returns no skills", async
    assert(logger.entries.some((entry) => entry.message.includes("retrieval no result")));
  });
  
@@ -1255,7 +1378,7 @@ index 5c78bff3..f789eea3 100644
  test("before_prompt_build appends concise skill hints when retrieval succeeds", async () => {
    const logger = makeLogger();
    const cfg = makeConfig();
-@@ -439,6 +540,7 @@ test("before_prompt_build truncates injected context to the configured maxChars"
+@@ -439,6 +597,7 @@ test("before_prompt_build truncates injected context to the configured maxChars"
                "First long instruction sentence. ".repeat(12) +
                "\n" +
                "Second long instruction sentence. ".repeat(12),
@@ -1263,7 +1386,7 @@ index 5c78bff3..f789eea3 100644
            },
          ],
        });
-@@ -574,14 +676,13 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
+@@ -574,14 +733,13 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
    assert.equal(typeof before, "function");
    assert.equal(typeof end, "function");
  
@@ -1285,7 +1408,7 @@ index 5c78bff3..f789eea3 100644
    await before(
      { messages: [{ role: "user", content: "hello" }] },
      {},
-@@ -590,6 +691,7 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
+@@ -590,6 +748,7 @@ test("plugin logs first hook invocation for lifecycle diagnostics", async () =>
      { messages: [{ role: "user", content: "hello" }] },
      {},
    );
@@ -1293,7 +1416,7 @@ index 5c78bff3..f789eea3 100644
  
    assert(
      logger.entries.some((entry) => entry.message.includes("hook first invocation name=message_received")),
-@@ -700,7 +802,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
+@@ -700,7 +859,7 @@ test("normalizeConfig can switch to embedded runtime mode", async () => {
          extractOnAgentEnd: true,
        });
        assert.equal(cfg.runtimeMode, "embedded");
@@ -1302,7 +1425,7 @@ index 5c78bff3..f789eea3 100644
        assert.equal(cfg.embedded.sessionMaxTurns, 20);
        assert.equal(cfg.embedded.bm25TopK, 8);
        assert.deepEqual(cfg.embedded.modelInvocation.modes, [
-@@ -728,6 +830,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
+@@ -728,6 +887,34 @@ test("normalizeConfig defaults to embedded runtime mode", async () => {
    );
  });
  
@@ -1337,7 +1460,7 @@ index 5c78bff3..f789eea3 100644
  test("normalizeConfig supports embedded session max turns override", async () => {
    await withEnv(
      {
-@@ -784,7 +914,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
+@@ -784,7 +971,7 @@ test("normalizeConfig supports embedded model invocation env overrides", async (
        ]);
        assert.equal(cfg.embedded.modelInvocation.timeoutMs, 35000);
        assert.equal(cfg.embedded.modelInvocation.retries, 2);
@@ -1346,7 +1469,7 @@ index 5c78bff3..f789eea3 100644
        assert.equal(cfg.embedded.modelInvocation.manualBaseUrl, "http://127.0.0.1:8999/v1");
        assert.equal(cfg.embedded.modelInvocation.manualApiKey, "k-test");
        assert.equal(cfg.embedded.modelInvocation.manualModel, "m-test");
-@@ -825,7 +955,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
+@@ -825,7 +1012,7 @@ test("normalizeConfig supports embedded prompt pack path from env", async () =>
          extractOnAgentEnd: true,
        });
        assert.equal(cfg.runtimeMode, "embedded");
@@ -1355,7 +1478,7 @@ index 5c78bff3..f789eea3 100644
      },
    );
  });
-@@ -922,6 +1052,7 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
+@@ -922,6 +1109,7 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
    });
    const sent = [];
    const retrievalCache = new Map();
@@ -1363,7 +1486,7 @@ index 5c78bff3..f789eea3 100644
    const beforeHandler = createBeforePromptBuildHandler(cfg, logger, {
      async postJson() {
        return {
-@@ -934,11 +1065,13 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
+@@ -934,11 +1122,13 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
              name: "Release Checklist",
              description: "Checklist for release",
              score: 0.91,
@@ -1377,7 +1500,7 @@ index 5c78bff3..f789eea3 100644
        retrievalCache.set(sessionId, snapshot);
      },
    });
-@@ -975,10 +1108,14 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
+@@ -975,10 +1165,14 @@ test("agent_end forwards cached retrieval snapshot and explicit used_skill_ids",
    );
  
    assert.equal(sent.length, 1);
@@ -1392,7 +1515,7 @@ index 5c78bff3..f789eea3 100644
  });
  
  test("agent_end forwards inferred_used_skill_ids when explicit signal is absent", async () => {
-@@ -1003,6 +1140,7 @@ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent"
+@@ -1003,6 +1197,7 @@ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent"
              name: "Rollback Procedure",
              description: "Rollback deployment safely",
              score: 0.88,
@@ -1400,7 +1523,7 @@ index 5c78bff3..f789eea3 100644
            },
          ],
        };
-@@ -1049,6 +1187,38 @@ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent"
+@@ -1049,6 +1244,38 @@ test("agent_end forwards inferred_used_skill_ids when explicit signal is absent"
    assert.equal(sent[0].payload.used_skill_ids, undefined);
  });
  

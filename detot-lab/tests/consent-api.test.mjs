@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 const origin = process.env.DETOT_CONSENT_TEST_ORIGIN;
+const bridgeToken = process.env.DETOT_CONSENT_TEST_GATEWAY_TOKEN;
 const apiTest = origin ? test : test.skip;
+const bridgeApiTest = origin && bridgeToken ? test : test.skip;
 
 async function request(path, method = "GET", body) {
   const response = await fetch(new URL(path, origin), {
@@ -20,6 +22,46 @@ async function setConsent(source, purpose, destination, allowed) {
   });
   assert.equal(response.status, 200, `Could not set synthetic consent ${source}/${purpose}/${destination}`);
 }
+
+async function requestAutoSkillConsent(stage, authorization = bridgeToken) {
+  const response = await fetch(new URL("/api/internal/autoskill/consent", origin), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authorization ? { Authorization: `Bearer ${authorization}` } : {}),
+    },
+    body: JSON.stringify({ stage, ownerId: "attacker-selected-owner" }),
+  });
+  return { response, data: await response.json().catch(() => null) };
+}
+
+bridgeApiTest("AutoSkill bridge binds the authenticated owner, stage scope and current consent revision", async () => {
+  const deniedUnauthenticated = await requestAutoSkillConsent("capture", "wrong-token");
+  assert.equal(deniedUnauthenticated.response.status, 403);
+
+  const deniedCapture = await requestAutoSkillConsent("capture");
+  assert.equal(deniedCapture.response.status, 403);
+  assert.equal(deniedCapture.data.allowed, false);
+
+  await setConsent("chat_history", "skill_learning", "local_only", true);
+  const capture = await requestAutoSkillConsent("capture");
+  assert.equal(capture.response.status, 200);
+  assert.deepEqual(capture.data.requirements, [
+    { source: "chat_history", purpose: "skill_learning", destination: "local_only" },
+  ]);
+  assert.equal(Number.isSafeInteger(capture.data.revision), true);
+
+  const analysisWithoutModelGrant = await requestAutoSkillConsent("analysis");
+  assert.equal(analysisWithoutModelGrant.response.status, 403);
+  await setConsent("chat_history", "skill_learning", "DeepSeek", true);
+  const analysis = await requestAutoSkillConsent("analysis");
+  assert.equal(analysis.response.status, 200);
+  assert.equal(analysis.data.requirements.length, 2);
+
+  await setConsent("chat_history", "skill_learning", "DeepSeek", false);
+  const revoked = await requestAutoSkillConsent("analysis");
+  assert.equal(revoked.response.status, 403);
+});
 
 apiTest("backend denies Memory reads until the exact owner/source/purpose/destination grant exists", async () => {
   const policy = await request("/api/consent");

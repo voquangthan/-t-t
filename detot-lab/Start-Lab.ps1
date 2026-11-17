@@ -261,6 +261,7 @@ try {
     $gatewayProcess = Start-LabChild $node @($gateway, 'gateway', 'run') @{
         DEEPSEEK_API_KEY = $provider.Password.Trim()
         OPENCLAW_GATEWAY_TOKEN = $token
+        DETOT_AUTOSKILL_CONSENT_URL = "http://127.0.0.1:$WebPort/api/internal/autoskill/consent"
         OPENCLAW_STATE_DIR = $state
         OPENCLAW_CONFIG_PATH = $configPath
         XDG_CACHE_HOME = $openClawCache
@@ -310,6 +311,7 @@ try {
         DETOT_GATEWAY_PORT = [string]$GatewayPort
         DETOT_COPY_AUTHORITY_DIR = $authority
         DETOT_ENABLE_CALENDAR_TRIAL = if ($CalendarTrial) { 'true' } else { 'false' }
+        DETOT_AUTOSKILL_CONSENT_BRIDGE_ENABLED = if ($env:DETOT_AUTOSKILL_CONSENT_BRIDGE_ENABLED -ceq 'true') { 'true' } else { 'false' }
     }
     if ($isolatedPorts) {
         $backendVariables['DETOT_PRACTICE_DIRECTORY'] = Join-Path $runtimeDir 'practice'

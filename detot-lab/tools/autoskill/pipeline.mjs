@@ -329,11 +329,11 @@ function buildSkillMarkdown(candidate, skillId, version) {
 
 export function listProposals(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => listProposalsLocked({ root, ownerId }));
 }
 
-function listProposalsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner" } = {}) {
+function listProposalsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner" } = {}) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const ownerRoot = ensureInside(stagingRoot, path.join(stagingRoot, "state", "autoskill", "proposals", "Users", owner));
@@ -355,11 +355,11 @@ function listProposalsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-own
 
 export function evaluateProposal(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => evaluateProposalLocked({ ...options, root, ownerId }));
 }
 
-function evaluateProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, report }) {
+function evaluateProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner", proposalId, report }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
@@ -416,11 +416,11 @@ function evaluateProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-
 
 export function approveProposal(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => approveProposalLocked({ ...options, root, ownerId }));
 }
 
-function approveProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId }) {
+function approveProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner", proposalId }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
@@ -486,11 +486,11 @@ function approveProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-o
 
 export function rejectProposal(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => rejectProposalLocked({ ...options, root, ownerId }));
 }
 
-function rejectProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", proposalId, reason = "review_rejected" }) {
+function rejectProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner", proposalId, reason = "review_rejected" }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const id = requireId(proposalId, "proposal_id");
@@ -511,11 +511,11 @@ function rejectProposalLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-ow
 
 export function rollbackSkill(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => rollbackSkillLocked({ ...options, root, ownerId }));
 }
 
-function rollbackSkillLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", skillId, version }) {
+function rollbackSkillLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner", skillId, version }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const skill = requireId(skillId, "skill_id");
@@ -536,11 +536,11 @@ function rollbackSkillLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-own
 /** Create a fresh, inactive proposal from explicitly supplied verified independent source artifacts. */
 export function prepareSafeSkillRebuild(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => prepareSafeSkillRebuildLocked({ ...options, root, ownerId }));
 }
 
-function prepareSafeSkillRebuildLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", candidate, sourceArtifacts }) {
+function prepareSafeSkillRebuildLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner", candidate, sourceArtifacts }) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   if (!Array.isArray(sourceArtifacts) || sourceArtifacts.length === 0 || sourceArtifacts.length > 32)
@@ -674,11 +674,11 @@ function collectLegacyArtifactPaths(root, ownerId) {
 /** Dry-runs by default; apply only adds UNKNOWN/quarantine provenance to known owner-scoped records. */
 export function migrateLegacyArtifacts(options = {}) {
   const root = path.resolve(options.root || DEFAULT_STAGING_ROOT);
-  const ownerId = requireId(options.ownerId || "detot-owner", "owner_id");
+  const ownerId = requireId(options.ownerId || "workspace-owner", "owner_id");
   return withOwnerLockSync(root, ownerId, () => migrateLegacyArtifactsLocked({ ...options, root, ownerId }));
 }
 
-function migrateLegacyArtifactsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "detot-owner", apply = false } = {}) {
+function migrateLegacyArtifactsLocked({ root = DEFAULT_STAGING_ROOT, ownerId = "workspace-owner", apply = false } = {}) {
   const stagingRoot = path.resolve(root);
   const owner = requireId(ownerId, "owner_id");
   const files = collectLegacyArtifactPaths(stagingRoot, owner);
@@ -735,7 +735,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = path.resolve(args.root || DEFAULT_STAGING_ROOT);
   if (root !== path.resolve(DEFAULT_STAGING_ROOT)) throw new Error("cli_is_restricted_to_default_staging_root");
-  const ownerId = args.owner || "detot-owner";
+  const ownerId = args.owner || "workspace-owner";
   const command = args._[0];
   let result;
   if (command === "list") result = listProposals({ root, ownerId });

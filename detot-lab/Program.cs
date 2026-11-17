@@ -77,6 +77,7 @@ builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 
 var token = builder.Configuration["DETOT_GATEWAY_TOKEN"];
 if (string.IsNullOrWhiteSpace(token))
     throw new InvalidOperationException("DETOT_GATEWAY_TOKEN is required.");
+var autoSkillConsentBridgeEnabled = builder.Configuration.GetValue("DETOT_AUTOSKILL_CONSENT_BRIDGE_ENABLED", false);
 
 builder.Services.AddHttpClient("gateway", client =>
 {
@@ -158,7 +159,12 @@ var calendarLock = new object();
 var calendarTrialEnabled = builder.Configuration.GetValue<bool>("DETOT_ENABLE_CALENDAR_TRIAL");
 app.Use(async (context, next) =>
 {
-    var validHost = publicUri is null
+    var autoSkillBridgePath = context.Request.Path.Equals("/api/internal/autoskill/consent", StringComparison.OrdinalIgnoreCase);
+    var loopbackRequest = context.Connection.RemoteIpAddress is { } remoteAddress && System.Net.IPAddress.IsLoopback(remoteAddress);
+    var internalAutoSkillBridge = autoSkillBridgePath && loopbackRequest;
+    var validHost = internalAutoSkillBridge
+        ? context.Request.Host.Value == $"127.0.0.1:{webPort}" || context.Request.Host.Value == $"localhost:{webPort}"
+        : publicUri is null
         ? context.Request.Host.Value == $"127.0.0.1:{webPort}" || context.Request.Host.Value == $"localhost:{webPort}"
         : string.Equals(context.Request.Host.Value, publicUri.Authority, StringComparison.OrdinalIgnoreCase);
     if (!validHost)
@@ -176,6 +182,11 @@ app.Use(async (context, next) =>
         context.User = RemoteAccess.Principal(RemoteAccess.OwnerId);
         await next(context);
     }
+    else if (internalAutoSkillBridge)
+    {
+        // The narrow service route performs its own bearer and loopback checks.
+        await next(context);
+    }
     else
     {
         // The loopback-only listener sits behind the configured HTTPS proxy.
@@ -191,6 +202,19 @@ app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
 var memory = app.MapGroup("/api/memory");
 app.MapGet("/api/consent", (HttpContext context) => consentPolicy is null
     ? Results.StatusCode(503) : Results.Ok(consentPolicy.Get(MemoryOwner(context))));
+app.MapPost("/api/internal/autoskill/consent", (HttpContext context, AutoSkillConsentRequest check) =>
+{
+    if (!autoSkillConsentBridgeEnabled) return Results.NotFound();
+    if (!IsTrustedAutoSkillGateway(context, token)) return Results.StatusCode(403);
+    if (consentPolicy is null || check.Stage is not ("capture" or "analysis")) return Results.BadRequest();
+    ConsentPolicy.ConsentRequirement[] requirements = check.Stage == "capture"
+        ? [new("chat_history", "skill_learning", "local_only")]
+        : [new("chat_history", "skill_learning", "local_only"), new("chat_history", "skill_learning", "DeepSeek")];
+    var lease = consentPolicy.TryBegin(RemoteAccess.OwnerId, requirements, "autoskill_gateway");
+    if (lease is null) return Results.Json(new { allowed = false, stage = check.Stage }, statusCode: StatusCodes.Status403Forbidden);
+    return Results.Ok(new { allowed = true, stage = check.Stage, ownerId = lease.Owner,
+        revision = lease.Revision, requirements = lease.Requirements });
+});
 app.MapGet("/api/weather", async (HttpContext context, CancellationToken cancellationToken) =>
 {
     if (weatherIntelligence is null) return Results.StatusCode(503);
@@ -1096,6 +1120,17 @@ static string MemoryOwner(HttpContext context) =>
     context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ??
     throw new InvalidOperationException("Authenticated workspace identity is missing.");
 
+static bool IsTrustedAutoSkillGateway(HttpContext context, string expectedToken)
+{
+    if (context.Connection.RemoteIpAddress is not { } remoteAddress || !System.Net.IPAddress.IsLoopback(remoteAddress)) return false;
+    const string prefix = "Bearer ";
+    var supplied = context.Request.Headers.Authorization.ToString();
+    if (!supplied.StartsWith(prefix, StringComparison.Ordinal)) return false;
+    var suppliedBytes = System.Text.Encoding.UTF8.GetBytes(supplied[prefix.Length..]);
+    var expectedBytes = System.Text.Encoding.UTF8.GetBytes(expectedToken);
+    return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(suppliedBytes, expectedBytes);
+}
+
 static bool IsLocalMutation(HttpContext context) =>
     context.Request.Headers.Origin == $"{context.Request.Scheme}://{context.Request.Host.Value}";
 
@@ -1342,6 +1377,7 @@ record MemoryEdit(string? Text, string? Category, Guid RequestId, int Version);
 record MemoryReview(string Action, string? Text);
 record ConsentEdit(string? Source, string? Purpose, string? Destination, bool Allowed, Guid RequestId);
 record ConsentCheck(ConsentPolicy.ConsentRequirement[]? Requirements, Guid RequestId);
+record AutoSkillConsentRequest(string? Stage);
 record WeatherLocationEdit(string? City);
 record WeatherFeedbackEdit(string? Decision);
 record MemoryCalendarReminder(int Version, Guid RequestId, DateTimeOffset Start, DateTimeOffset End,
