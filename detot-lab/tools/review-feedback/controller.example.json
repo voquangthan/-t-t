@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "execute_advisory_revise": false,
+  "approved_task_ids": [],
+  "poll_seconds": 20,
+  "allowed_paths": [
+    ".github/workflows/",
+    "detot-lab/tools/review-feedback/",
+    "detot-lab/tests/review-feedback/",
+    "detot-lab/docs/REVIEW_FEEDBACK_LOOP.md"
+  ]
+}

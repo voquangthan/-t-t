@@ -48,3 +48,26 @@ CHECKPOINT: short summary
 ## Verification boundary
 
 Unit and integration fixtures validate review parsing, identity/SHA gates, idempotency, branch/base checks, permission failure, timeout/restart and revision limits. They do not prove the Work trigger or a real GitHub reviewer comment. Full acceptance requires a real PR update, a real Work-trigger review from the configured login at the current SHA, and observation of the listener accepting it exactly once.
+
+## GitHub Actions boundary
+
+- `.github/workflows/review-feedback-ci.yml` runs the listener regression suite for `pull_request` events with `contents: read`, a pinned checkout action, no persisted checkout credentials, and no secrets. The workflow tests PR code on a GitHub-hosted runner; it never runs on a self-hosted personal machine.
+- `.github/workflows/review-event-signal.yml` records only the PR number, event type, event ID and actor ID for top-level comments/review submissions. It does not check out PR code, log review text, or treat a signal as an approval. A local controller must fetch the current PR and event from GitHub and revalidate the current SHA and identity.
+- GitHub only runs `issue_comment` workflows when the workflow definition exists on the default branch. Until the PR is merged by an authorized human, the event-signal workflow is present in this branch but cannot receive top-level comment events. The PR CI workflow can run against this branch's PR revisions.
+- These workflows use no OpenAI API and do not access a local ChatGPT/Codex login. Codex CLI execution remains local and manual; no runner, service, or startup task is installed or enabled.
+- The current Work comments on PR #1 are top-level comments from the PR owner's GitHub identity. They are advisory only; no independent publisher attestation is configured. Therefore they cannot grant `PASS` or stage advancement, and an unattended Codex controller must remain disabled until a verifiable independent identity/source is established.
+
+## Manual local controller
+
+The controller is a foreground, opt-in process. It has no service, Task Scheduler entry, or automatic startup hook. It serializes all tasks with one lock, checkpoints under `.local/review-loop/controller/`, and stops with Ctrl+C or `controller.mjs stop --task <id>`. A stale lock is not removed automatically; inspect the recorded PID before manual cleanup.
+
+Copy `tools/review-feedback/controller.example.json` to `.local/review-loop/controller.json`. Keep `enabled` and `execute_advisory_revise` false until an operator has approved a task ID and its path scope. The default allowlist contains only review-loop tooling, tests, docs, and workflow files. The listener still requires a separate, independently verified reviewer identity; the current PR-owner comments are not accepted as such.
+
+```powershell
+node tools/review-feedback/controller.mjs start --task <approved-task-id>
+node tools/review-feedback/controller.mjs stop --task <approved-task-id>
+```
+
+Execution additionally requires the explicit `--execute` option and `execute_advisory_revise: true`. Before Codex starts, the controller requires a clean `codex/*` checkout at the reviewed SHA. It creates a disposable clone containing tracked source only, removes its Git remote and global credential configuration, and passes no GitHub/API tokens to Codex. Codex receives review text as quoted, untrusted advisory data, runs with the workspace-write sandbox and ephemeral session, and cannot push from the scratch clone. The controller checks changed paths, runs regression tests, applies only the allowlisted patch to the original clean checkout, commits, and pushes without force. It never merges. Any `PASS` stops at human confirmation; the controller never advances a stage.
+
+The scratch clone reduces access to ignored lab state; the operating system and Codex sandbox remain part of the security boundary. Do not enable advisory execution until the host's sandbox policy and the task allowlist have been reviewed. No real Codex-triggered revision has been executed in this checkout.

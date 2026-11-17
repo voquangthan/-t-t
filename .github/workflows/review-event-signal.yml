@@ -1,0 +1,52 @@
+name: Review event signal
+run-name: "Review signal PR #${{ github.event.issue.number || github.event.pull_request.number }}"
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: none
+  issues: read
+  pull-requests: read
+
+jobs:
+  record-signal:
+    if: github.event.issue.pull_request || github.event.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Record minimal event metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          REPOSITORY: ${{ github.repository }}
+          SUMMARY_PATH: ${{ github.step_summary }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const event = JSON.parse(fs.readFileSync(process.env.EVENT_PATH, 'utf8'));
+          const eventObject = process.env.EVENT_NAME === 'issue_comment' ? event.comment : event.review;
+          const pullNumber = Number(event.issue?.number ?? event.pull_request?.number);
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(process.env.REPOSITORY || '') ||
+              !Number.isSafeInteger(pullNumber) || pullNumber < 1 ||
+              !Number.isSafeInteger(Number(eventObject?.user?.id)) ||
+              !Number.isSafeInteger(Number(eventObject?.id))) {
+            throw new Error('invalid_review_event_envelope');
+          }
+          const lines = [
+            '# Review event received',
+            '',
+            `- Repository: ${process.env.REPOSITORY}`,
+            `- Pull request: ${pullNumber}`,
+            `- Event: ${process.env.EVENT_NAME}`,
+            `- Event ID: ${Number(eventObject.id)}`,
+            `- Actor ID: ${Number(eventObject.user.id)}`,
+            '',
+            'This is an advisory event signal. The local controller must fetch current PR state and independently verify identity, SHA, and authorization. Comment text is intentionally omitted.',
+            '',
+          ].join('\n');
+          fs.appendFileSync(process.env.SUMMARY_PATH, lines, { encoding: 'utf8', mode: 0o600 });
+          NODE
