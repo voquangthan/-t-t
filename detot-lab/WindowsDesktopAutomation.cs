@@ -17,6 +17,18 @@ public static class WindowsDesktopAutomation
             ["WindowsTerminal"] = "Windows Terminal"
         };
 
+    private static readonly IReadOnlyDictionary<string, string> WindowTitleApplications =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Code"] = "Visual Studio Code",
+            ["msedge"] = "Microsoft Edge",
+            ["explorer"] = "File Explorer",
+            ["devenv"] = "Visual Studio",
+            ["notepad"] = "Notepad"
+        };
+
+    public sealed record WindowTitle(string Application, string Title);
+
     public static IReadOnlyList<string> ReadOpenApprovedApplications()
     {
 #if !WINDOWS
@@ -54,6 +66,64 @@ public static class WindowsDesktopAutomation
             return [];
         }
 #endif
+    }
+
+    public static IReadOnlyList<WindowTitle> ReadOpenApprovedWindowTitles()
+    {
+#if !WINDOWS
+        return [];
+#else
+        if (!OperatingSystem.IsWindows()) return [];
+        try
+        {
+            using var automation = new UIA3Automation();
+            var desktop = automation.GetDesktop();
+            var candidates = new List<(string ProcessName, string Title)>();
+            foreach (var processName in WindowTitleApplications.Keys)
+            {
+                foreach (var process in System.Diagnostics.Process.GetProcessesByName(processName))
+                {
+                    using (process)
+                    {
+                        try
+                        {
+                            var windows = desktop.FindAllChildren(cf =>
+                                cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
+                            foreach (var window in windows)
+                                candidates.Add((processName, window.Properties.Name.Value));
+                        }
+                        catch (Exception)
+                        {
+                            // Ignore processes or UI Automation providers that disappear during inspection.
+                        }
+                    }
+                }
+            }
+            return FilterApprovedWindowTitles(candidates);
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+#endif
+    }
+
+    public static IReadOnlyList<WindowTitle> FilterApprovedWindowTitles(
+        IEnumerable<(string ProcessName, string Title)> candidates)
+    {
+        var results = new List<WindowTitle>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (processName, rawTitle) in candidates)
+        {
+            if (!WindowTitleApplications.TryGetValue(processName, out var application) ||
+                string.IsNullOrWhiteSpace(rawTitle)) continue;
+
+            var title = new string(rawTitle.Where(character => !char.IsControl(character)).ToArray()).Trim();
+            if (title.Length == 0) continue;
+            if (title.Length > 160) title = title[..160];
+            if (seen.Add(application + "\0" + title)) results.Add(new(application, title));
+        }
+        return results;
     }
 
     public static bool HasVisibleWindow(string processName)

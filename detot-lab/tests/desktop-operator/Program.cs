@@ -30,6 +30,7 @@ Check(nonWindowActionResponse.WindowVerified is null,
     "chat response preserves unavailable window-verification status for other actions");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
+Check(ComputerUsePolicy.CanObserve("approved-window-titles"), "approved window-title observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
@@ -46,6 +47,22 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-git
     "a direct PR and CI inspection request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Xem ứng dụng đang mở") == "read-approved-applications",
     "a direct approved-app observation request is recognized");
+Check(ComputerUseChatIntent.DetectDirectRequest("Đọc tiêu đề các cửa sổ đang mở") == "read-approved-window-titles",
+    "a direct approved-window-title observation request is recognized");
+Check(ComputerUseChatIntent.ObservationTargetForAction("read-approved-window-titles") == "approved-window-titles",
+    "window title inspection maps only to its dedicated observation permission");
+var filteredWindowTitles = WindowsDesktopAutomation.FilterApprovedWindowTitles(
+[
+    ("Code", "  project - Visual Studio Code "),
+    ("msedge", "Page\nTitle - Microsoft Edge"),
+    ("powershell", "unapproved secret window"),
+    ("notepad", "  "),
+    ("Code", "project - Visual Studio Code")
+]);
+Check(filteredWindowTitles.Count == 2 && filteredWindowTitles[0].Application == "Visual Studio Code" &&
+      filteredWindowTitles[0].Title == "project - Visual Studio Code" &&
+      filteredWindowTitles[1].Title == "PageTitle - Microsoft Edge",
+    "window-title observation filters unapproved processes, empty titles, control characters, and duplicates");
 Check(ComputerUseChatIntent.DetectDirectRequest("Làm sao để mở Edge?") is null,
     "a how-to question does not launch an application");
 Check(ComputerUseChatIntent.DetectDirectRequest("Trong ví dụ này: mở Edge") is null,
@@ -288,6 +305,15 @@ if (args.Contains("--vscode-open-smoke", StringComparer.Ordinal))
     var result = DesktopOperator.OpenKnownApplication("vscode");
     if (!result.Succeeded) throw new InvalidOperationException("VS Code launch smoke failed.");
     Check(result.WindowVerified == true, "Windows UI Automation confirms the allowlisted VS Code window");
+}
+
+if (args.Contains("--window-title-smoke", StringComparer.Ordinal))
+{
+    var windows = WindowsDesktopAutomation.ReadOpenApprovedWindowTitles();
+    Console.WriteLine($"Approved window titles observed: {windows.Count}");
+    foreach (var window in windows) Console.WriteLine($"{window.Application}: {window.Title}");
+    Check(windows.Any(window => window.Application == "Visual Studio Code"),
+        "Windows UI Automation reads the title of an already-open allowlisted VS Code window");
 }
 
 static void RunGit(string directory, params string[] arguments)
