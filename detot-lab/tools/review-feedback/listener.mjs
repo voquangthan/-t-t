@@ -177,7 +177,8 @@ export class ReviewFeedbackListener {
     const commitSha = this.gitHead();
     if (commitSha !== state.commit_sha) throw safeError("quality_gate_sha_or_state_mismatch");
     const result = await this.qualityGateRunner(gate);
-    return this.#recordQualityGate(taskId, { gate, commitSha, command: result.command, exitCode: result.exitCode, evidenceText: result.output });
+    await this.#recordQualityGate(taskId, { gate, commitSha, command: result.command, exitCode: result.exitCode, evidenceText: result.output });
+    return this.pollOnce(taskId);
   }
 
   #recordQualityGate(taskId, { gate, commitSha, command, exitCode, evidenceText }) {
@@ -195,11 +196,6 @@ export class ReviewFeedbackListener {
         recorded_at: this.now().toISOString(),
       };
       state.quality_gate_evidence[gate] = evidence;
-      if (state.last_feedback?.verdict === "PASS" && this.qualityGatesPass(state, state.commit_sha)) {
-        state.review_status = "PASS";
-        state.stage_advance_allowed = true;
-        state.checkpoint = { ...state.checkpoint, status: "review_and_quality_gates_passed", updated_at: this.now().toISOString() };
-      }
       atomicWrite(this.taskPath(taskId), state);
       this.audit(taskId, { event: "quality_gate_recorded", gate, commit_sha: commitSha, output_sha256: evidence.output_sha256 });
       return state;
@@ -222,7 +218,7 @@ export class ReviewFeedbackListener {
       const token = this.tokenProvider();
       if (!token) throw safeError("github_authentication_unavailable");
       const pull = await this.api(`/repos/${this.config.repository}/pulls/${state.pr_number}`, token);
-      if (pull?.base?.ref !== this.config.baseBranch || pull?.head?.ref !== state.branch || pull?.head?.sha !== commitSha) {
+      if (pull?.state !== "open" || pull?.merged === true || pull?.base?.ref !== this.config.baseBranch || pull?.head?.ref !== state.branch || pull?.head?.sha !== commitSha) {
         throw safeError("new_head_not_verified_on_remote");
       }
       state.review_attempts += 1;
@@ -299,6 +295,7 @@ export class ReviewFeedbackListener {
     if (now.getTime() >= Date.parse(state.checkpoint.expires_at)) {
       const noReviewerResponse = state.last_processed_review_id === null;
       state.review_status = noReviewerResponse ? "REVIEW_CHANNEL_UNAVAILABLE" : "TIMEOUT";
+      state.stage_advance_allowed = false;
       state.checkpoint = {
         ...state.checkpoint,
         status: noReviewerResponse ? "review_channel_unavailable" : "timeout",
@@ -324,6 +321,7 @@ export class ReviewFeedbackListener {
       const permission = await this.api(`/repos/${this.config.repository}/collaborators/${encodeURIComponent(this.config.reviewerLogin)}/permission`, token);
       if (!ALLOWED_REVIEW_PERMISSIONS.has(permission?.permission)) return this.unavailable(taskId, state, "reviewer_repository_permission_insufficient");
       const pull = await this.api(`/repos/${this.config.repository}/pulls/${state.pr_number}`, token);
+      if (pull?.state !== "open" || pull?.merged === true) return this.unavailable(taskId, state, "pull_request_not_open");
       if (pull?.base?.ref !== this.config.baseBranch || pull?.head?.ref !== state.branch || !String(state.branch).startsWith("codex/")) {
         return this.unavailable(taskId, state, "pull_request_target_or_branch_mismatch");
       }
@@ -338,10 +336,12 @@ export class ReviewFeedbackListener {
           this.audit(taskId, { event: "head_changed_review_invalidated", commit_sha: state.commit_sha, remote_head_sha: pull.head.sha || null });
           return state;
         }
+        state.quality_gate_evidence = {};
         return this.unavailable(taskId, state, "pull_request_head_sha_mismatch");
       }
       const events = await this.reviewEvents(state, token);
       const latestPull = await this.api(`/repos/${this.config.repository}/pulls/${state.pr_number}`, token);
+      if (latestPull?.state !== "open" || latestPull?.merged === true) return this.unavailable(taskId, state, "pull_request_not_open");
       if (latestPull?.head?.sha !== state.commit_sha || this.gitHead() !== state.commit_sha) {
         state.review_status = "PENDING";
         state.stage_advance_allowed = false;
@@ -352,7 +352,6 @@ export class ReviewFeedbackListener {
         this.audit(taskId, { event: "head_changed_review_invalidated", commit_sha: state.commit_sha, remote_head_sha: latestPull?.head?.sha || null });
         return state;
       }
-      if (state.review_status === "PASS") return state;
       const processed = new Set(state.processed_review_ids);
       let changed = false;
       for (const event of events) {
@@ -379,6 +378,9 @@ export class ReviewFeedbackListener {
           continue;
         }
         const verifiedPull = await this.api(`/repos/${this.config.repository}/pulls/${state.pr_number}`, token);
+        if (verifiedPull?.state !== "open" || verifiedPull?.merged === true) {
+          return this.unavailable(taskId, state, "pull_request_not_open");
+        }
         if (verifiedPull?.head?.sha !== parsed.commitSha || this.gitHead() !== parsed.commitSha) {
           state.review_status = "PENDING";
           state.stage_advance_allowed = false;
@@ -409,9 +411,18 @@ export class ReviewFeedbackListener {
           state.checkpoint = { ...state.checkpoint, status: gatesPass ? "review_and_quality_gates_passed" : "review_passed_quality_gates_pending", updated_at: now.toISOString() };
         }
         this.audit(taskId, { event: "review_accepted", review_id: event.id, verdict: parsed.verdict, commit_sha: parsed.commitSha, status: state.review_status });
-        if (FINAL_STATUSES.has(state.review_status) || state.review_status === "REVISE" || state.review_status === "PASS_PENDING_GATES") break;
+        if (state.review_status === "BLOCKED" || state.review_status === "REVISE_LIMIT") break;
       }
       state.processed_review_ids = [...processed].slice(-1000);
+      if (state.last_feedback?.verdict === "PASS" && state.last_feedback.commit_sha === state.commit_sha && this.qualityGatesPass(state, state.commit_sha)) {
+        if (state.review_status !== "PASS" || !state.stage_advance_allowed) {
+          state.review_status = "PASS";
+          state.stage_advance_allowed = true;
+          state.checkpoint = { ...state.checkpoint, status: "review_and_quality_gates_passed", updated_at: this.now().toISOString() };
+          changed = true;
+          this.audit(taskId, { event: "stage_advance_authorized", review_id: state.last_feedback.review_id, commit_sha: state.commit_sha });
+        }
+      }
       if (changed) atomicWrite(this.taskPath(taskId), state);
       return state;
     } catch (error) {
@@ -440,6 +451,7 @@ export class ReviewFeedbackListener {
     if (!FINAL_STATUSES.has(state.review_status)) {
       const noReviewerResponse = state.last_processed_review_id === null;
       state.review_status = noReviewerResponse ? "REVIEW_CHANNEL_UNAVAILABLE" : "TIMEOUT";
+      state.stage_advance_allowed = false;
       state.checkpoint = {
         ...state.checkpoint,
         status: noReviewerResponse ? "review_channel_unavailable" : "timeout",

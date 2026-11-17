@@ -23,6 +23,10 @@ function verifiedReviewer() { return { login: reviewer, id: 12345, type: "User" 
 function setup({ head = sha("a"), comments = [], reviews = [], apiStatus = 200, reviewerProfile = { login: reviewer, id: 12345, type: "User" }, permission = "write", pullAuthorId = 99999, now = new Date("2026-11-17T10:00:00Z"), gates = requiredGates } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "detot-review-loop-"));
   let currentHead = head;
+  let remoteHead = head;
+  let currentTime = now;
+  let pullState = "open";
+  let merged = false;
   let fixtureComments = comments;
   let fixtureReviews = reviews;
   const calls = [];
@@ -33,7 +37,7 @@ function setup({ head = sha("a"), comments = [], reviews = [], apiStatus = 200, 
     if (route === "/user") return response(200, { login: "voquangthan" });
     if (route === "/users/work-reviewer") return response(200, reviewerProfile);
     if (route === "/repos/voquangthan/-t-t/collaborators/work-reviewer/permission") return response(200, { permission });
-    if (route === "/repos/voquangthan/-t-t/pulls/42") return response(200, { user: { login: "pr-author", id: pullAuthorId }, base: { ref: "main" }, head: { ref: "codex/review", sha: currentHead } });
+    if (route === "/repos/voquangthan/-t-t/pulls/42") return response(200, { user: { login: "pr-author", id: pullAuthorId }, state: pullState, merged, base: { ref: "main" }, head: { ref: "codex/review", sha: remoteHead } });
     if (route.endsWith("/issues/42/comments")) return response(200, fixtureComments);
     if (route.endsWith("/pulls/42/reviews")) return response(200, fixtureReviews);
     return response(404, {});
@@ -44,13 +48,16 @@ function setup({ head = sha("a"), comments = [], reviews = [], apiStatus = 200, 
     config: { repository: "voquangthan/-t-t", reviewer_login: reviewer, reviewer_id: 12345, reviewer_type: "User", base_branch: "main", timeout_minutes: 10 },
     fetchImpl,
     gitHead: () => currentHead,
-    now: () => now,
+    now: () => currentTime,
     tokenProvider: () => "synthetic-test-token",
     qualityGateRunner: async (gate) => ({ command: `fixture:${gate}`, exitCode: 0, output: `${gate} passed for ${currentHead}` }),
   });
   const env = {
     root, listener, calls,
-    setHead(value) { currentHead = value; },
+    setHead(value) { currentHead = value; remoteHead = value; },
+    setRemoteHead(value) { remoteHead = value; },
+    setNow(value) { currentTime = value; },
+    setPullState(value, isMerged = false) { pullState = value; merged = isMerged; },
     setComments(value) { fixtureComments = value; },
     setReviews(value) { fixtureReviews = value; },
     async init({ required = gates, minutes = 10 } = {}) {
@@ -140,7 +147,7 @@ test("BLOCKED stops batch processing and permanently clears advance flag", async
   } finally { env.close(); }
 });
 
-test("PASS followed by BLOCKED in one fetched batch stops at PASS and leaves later event untouched", async () => {
+test("PASS followed by BLOCKED in one fetched batch ends blocked with no advance", async () => {
   const env = setup({ comments: [
     { id: 20, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" },
     { id: 21, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("BLOCKED", sha("a")), created_at: "2026-11-17T10:02:00Z" },
@@ -148,9 +155,39 @@ test("PASS followed by BLOCKED in one fetched batch stops at PASS and leaves lat
   try {
     await env.init(); await env.passGates();
     const state = await env.listener.pollOnce("task-1");
-    assert.equal(state.review_status, "PASS");
-    assert.equal(state.stage_advance_allowed, true);
-    assert.deepEqual(state.processed_review_ids, ["issue:20"]);
+    assert.equal(state.review_status, "BLOCKED");
+    assert.equal(state.stage_advance_allowed, false);
+    assert.deepEqual(state.processed_review_ids, ["issue:20", "issue:21"]);
+  } finally { env.close(); }
+});
+
+test("BLOCKED arriving on a later poll revokes an already passing state", async () => {
+  const env = setup({ comments: [{ id: 22, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await env.init(); await env.passGates();
+    assert.equal((await env.listener.pollOnce("task-1")).review_status, "PASS");
+    env.setComments([
+      { id: 22, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" },
+      { id: 23, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("BLOCKED", sha("a"), "stop"), created_at: "2026-11-17T10:02:00Z" },
+    ]);
+    const state = await env.listener.pollOnce("task-1");
+    assert.equal(state.review_status, "BLOCKED");
+    assert.equal(state.stage_advance_allowed, false);
+  } finally { env.close(); }
+});
+
+test("BLOCKED arriving while PASS awaits gates overrides the stale verdict", async () => {
+  const env = setup({ comments: [{ id: 24, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await env.init();
+    assert.equal((await env.listener.pollOnce("task-1")).review_status, "PASS_PENDING_GATES");
+    env.setComments([
+      { id: 24, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" },
+      { id: 25, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("BLOCKED", sha("a"), "stop"), created_at: "2026-11-17T10:02:00Z" },
+    ]);
+    const state = await env.listener.pollOnce("task-1");
+    assert.equal(state.review_status, "BLOCKED");
+    assert.equal(state.stage_advance_allowed, false);
   } finally { env.close(); }
 });
 
@@ -182,6 +219,87 @@ test("HEAD moving while review events are fetched invalidates the review before 
     assert.equal(state.review_status, "PENDING");
     assert.equal(state.stage_advance_allowed, false);
     assert.ok(fs.readFileSync(env.listener.auditPath("task-1"), "utf8").includes("head_changed_review_invalidated"));
+  } finally { env.close(); }
+});
+
+test("run-gate cannot promote stale PASS when only remote head changed", async () => {
+  const env = setup({ comments: [{ id: 32, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await env.init();
+    assert.equal((await env.listener.pollOnce("task-1")).review_status, "PASS_PENDING_GATES");
+    env.setRemoteHead(sha("b"));
+    const state = await env.listener.runQualityGate("task-1", requiredGates[0]);
+    assert.equal(state.review_status, "REVIEW_CHANNEL_UNAVAILABLE");
+    assert.equal(state.stage_advance_allowed, false);
+    assert.deepEqual(state.quality_gate_evidence, {});
+  } finally { env.close(); }
+});
+
+test("PR closing while a gate process runs cannot grant stage advance", async () => {
+  const env = setup({ comments: [{ id: 36, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await env.init();
+    assert.equal((await env.listener.pollOnce("task-1")).review_status, "PASS_PENDING_GATES");
+    env.listener.qualityGateRunner = async (gate) => {
+      env.setPullState("closed");
+      return { command: gate, exitCode: 0, output: "passed" };
+    };
+    const state = await env.listener.runQualityGate("task-1", requiredGates[0]);
+    assert.equal(state.review_status, "REVIEW_CHANNEL_UNAVAILABLE");
+    assert.equal(state.stage_advance_allowed, false);
+  } finally { env.close(); }
+});
+
+test("deadline expiring during a gate run revokes rather than grants stage advance", async () => {
+  const env = setup({ comments: [{ id: 37, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await env.init({ minutes: 1 });
+    assert.equal((await env.listener.pollOnce("task-1")).review_status, "PASS_PENDING_GATES");
+    env.listener.qualityGateRunner = async (gate) => {
+      env.setNow(new Date("2026-11-17T10:02:00Z"));
+      return { command: gate, exitCode: 0, output: "passed" };
+    };
+    const state = await env.listener.runQualityGate("task-1", requiredGates[0]);
+    assert.equal(state.review_status, "TIMEOUT");
+    assert.equal(state.stage_advance_allowed, false);
+  } finally { env.close(); }
+});
+
+test("closed or merged PR cannot accept feedback, including a close during polling", async () => {
+  const closed = setup({ comments: [{ id: 33, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await closed.init(); await closed.passGates(); closed.setPullState("closed");
+    const state = await closed.listener.pollOnce("task-1");
+    assert.equal(state.review_status, "REVIEW_CHANNEL_UNAVAILABLE");
+    assert.equal(state.checkpoint.reason, "pull_request_not_open");
+    assert.equal(state.stage_advance_allowed, false);
+  } finally { closed.close(); }
+
+  const closing = setup({ comments: [{ id: 34, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await closing.init(); await closing.passGates();
+    const original = closing.listener.fetchImpl;
+    closing.listener.fetchImpl = async (url, options) => {
+      const result = await original(url, options);
+      if (new URL(url).pathname.endsWith("/issues/42/comments")) closing.setPullState("closed");
+      return result;
+    };
+    const state = await closing.listener.pollOnce("task-1");
+    assert.equal(state.review_status, "REVIEW_CHANNEL_UNAVAILABLE");
+    assert.equal(state.stage_advance_allowed, false);
+  } finally { closing.close(); }
+});
+
+test("timeout after PASS always revokes stage advance even if remote head also moved", async () => {
+  const env = setup({ comments: [{ id: 35, user: verifiedReviewer(), author_association: "COLLABORATOR", body: reviewBody("PASS", sha("a")), created_at: "2026-11-17T10:01:00Z" }] });
+  try {
+    await env.init({ minutes: 1 }); await env.passGates();
+    assert.equal((await env.listener.pollOnce("task-1")).review_status, "PASS");
+    env.setRemoteHead(sha("b"));
+    env.setNow(new Date("2026-11-17T10:02:00Z"));
+    const state = await env.listener.pollOnce("task-1");
+    assert.equal(state.review_status, "TIMEOUT");
+    assert.equal(state.stage_advance_allowed, false);
   } finally { env.close(); }
 });
 
@@ -306,6 +424,18 @@ test("state persists task IDs and gate evidence without credentials or raw outpu
     assert.ok(!raw.includes("passed for"));
     assert.equal(JSON.parse(raw).task_id, "task-1");
     assert.equal(JSON.parse(raw).quality_gate_evidence[requiredGates[0]].commit_sha, sha("a"));
+  } finally { env.close(); }
+});
+
+test("missing trusted reviewer keeps gate evidence but never grants stage advance", async () => {
+  const env = setup();
+  try {
+    await env.init();
+    env.listener.config = { ...env.listener.config, reviewerLogin: "", reviewerId: null, reviewerType: "" };
+    const state = await env.listener.runQualityGate("task-1", requiredGates[0]);
+    assert.equal(state.review_status, "REVIEW_CHANNEL_UNAVAILABLE");
+    assert.equal(state.stage_advance_allowed, false);
+    assert.equal(state.quality_gate_evidence[requiredGates[0]].commit_sha, sha("a"));
   } finally { env.close(); }
 });
 
