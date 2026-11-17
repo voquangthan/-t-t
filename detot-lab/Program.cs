@@ -211,12 +211,15 @@ app.MapGet("/api/desktop/status", async (HttpContext context, CancellationToken 
         context.Connection.RemoteIpAddress)) return Results.NotFound();
     return Results.Ok(await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken));
 });
+app.MapGet("/api/desktop/permissions", (HttpContext context) =>
+    !DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress) ? Results.NotFound() : Results.Ok(ComputerUsePolicy.Describe()));
 app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionRequest request,
     CancellationToken cancellationToken) =>
 {
     if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
         context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
-    if (request.Action is not ("open-workspace" or "open-github" or "open-edge" or "open-vscode"))
+    if (!ComputerUsePolicy.CanNavigate(request.Action) || ComputerUsePolicy.CanWrite(request.Action))
         return Results.BadRequest(new { error = "Hành động không được hỗ trợ." });
 
     DesktopOperator.ActionResult result;
@@ -238,8 +241,10 @@ app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRe
 {
     if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
         context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
-    if (request.Target is not ("github-account" or "github-pull-requests"))
+    if (!ComputerUsePolicy.CanObserve(request.Target))
         return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
+    if (request.Target == "approved-applications")
+        return Results.Ok(new { applications = WindowsDesktopAutomation.ReadOpenApprovedApplications() });
     var repository = request.Target == "github-pull-requests"
         ? (await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken)).Repository
         : null;

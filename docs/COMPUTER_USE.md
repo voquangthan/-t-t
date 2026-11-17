@@ -4,11 +4,11 @@ The Computer Use page is available only when the Backend is running locally on W
 
 ## Permission boundaries
 
-- **Observe:** read the current Git branch, whether tracked files changed, the sanitized GitHub `origin`, the GitHub login in the dedicated Edge profile, and up to three recent public pull-request/check summaries.
+- **Observe:** read the current Git branch, whether tracked files changed, the sanitized GitHub `origin`, approved application names, the GitHub login in the dedicated Edge profile, and up to three recent public pull-request/check summaries. Application observation returns process identities only; it never reads window titles or control text.
 - **Navigate:** open the workspace in Explorer, open VS Code, launch the dedicated Edge profile, or open the configured repository's PR list.
-- **Write:** no write actions are exposed. The adapter cannot run shell commands, read file contents, select or sign in to an account, edit a PR, commit, push, or merge.
+- **Write:** no write actions are exposed. A backend policy separately classifies observation and navigation targets and denies all write actions. The adapter cannot run shell commands or project code, read file contents, select or sign in to an account, edit a PR, commit, push, or merge.
 
-Windows application launch is a fixed allowlist. FlaUI UIA3 checks only whether a top-level window exists; it does not return window titles or inspect controls. Edge navigation and GitHub reads use Playwright Core from the locked OpenClaw runtime dependency.
+Windows application launch and observation use fixed allowlists. FlaUI UIA3 checks approved process identities and whether a top-level window exists; it does not return window titles or inspect controls. Edge navigation and GitHub reads use Playwright Core from the locked OpenClaw runtime dependency.
 
 ## GitHub profile
 

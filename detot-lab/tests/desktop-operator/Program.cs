@@ -16,6 +16,19 @@ Check(!DesktopOperator.IsAvailable(true, false, IPAddress.Parse("192.0.2.2")), "
 Check(!DesktopOperator.IsAvailable(false, false, IPAddress.Loopback), "non-Windows host is denied");
 Check(!DesktopOperator.OpenKnownApplication("arbitrary" ).Succeeded, "unlisted applications are denied");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
+Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
+Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
+Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
+Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
+Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
+Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
+var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUsePolicy.Describe());
+Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
+    "the exposed permission description keeps code execution disabled");
+Check(WindowsDesktopAutomation.ReadOpenApprovedApplications().All(name =>
+        name is "Visual Studio Code" or "Microsoft Edge" or "File Explorer" or "Visual Studio" or "Notepad" or "Windows Terminal"),
+    "application observation returns only approved app identities");
 Check(DesktopOperator.SafeGitHubUrl("https://github.com/voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
     "HTTPS GitHub remote is canonicalized");
 Check(DesktopOperator.SafeGitHubUrl("git@github.com:voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
@@ -60,8 +73,7 @@ Console.WriteLine($"Desktop Operator checks: {checks}/{checks} PASS");
 var node = FindExecutable("node.exe");
 if (node is not null)
 {
-    var adapterRoot = Path.Combine(Path.GetTempPath(), "detot-desktop-adapter-" + Guid.NewGuid().ToString("N"));
-    Directory.CreateDirectory(adapterRoot);
+    var adapterRoot = CreateIsolatedTestDirectory("desktop-adapter");
     var script = Path.Combine(adapterRoot, "fake-edge-reader.mjs");
     var profile = Path.Combine(adapterRoot, "profile");
     var moduleRoot = Path.Combine(adapterRoot, "playwright-core");
@@ -105,7 +117,7 @@ if (args.Contains("--github-read-smoke", StringComparer.Ordinal))
     if (node is null) throw new InvalidOperationException("node.exe is required for the Playwright smoke test.");
     var repositoryRoot = DesktopOperator.FindRepositoryRoot(AppContext.BaseDirectory)
         ?? throw new InvalidOperationException("repository root unavailable");
-    var profile = Path.Combine(Path.GetTempPath(), "detot-edge-read-smoke-" + Guid.NewGuid().ToString("N"));
+    var profile = CreateIsolatedTestDirectory("edge-read-smoke");
     var adapter = new PlaywrightEdgeAdapter(node,
         Path.Combine(repositoryRoot, "detot-lab", "tools", "computer-use", "edge-reader.mjs"), profile,
         Path.Combine(repositoryRoot, "detot-lab", "tests", "runtime-candidate", "node_modules", "playwright-core"));
@@ -145,4 +157,12 @@ static string? FindExecutable(string name)
         if (File.Exists(candidate)) return candidate;
     }
     return null;
+}
+
+static string CreateIsolatedTestDirectory(string purpose)
+{
+    var root = Path.Combine(AppContext.BaseDirectory, ".computer-use-test-data");
+    var directory = Path.Combine(root, purpose + "-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    return directory;
 }
