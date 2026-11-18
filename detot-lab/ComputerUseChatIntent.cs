@@ -119,7 +119,7 @@ public sealed record ComputerUseAgentAction(string Operation, string? TargetId =
             "open_application" => targetId is null && application is not null && Applications.Contains(application) && value is null && direction is null,
             "open_workspace_item" => targetId is null && application is null && value is { Length: > 0 and <= 512 } &&
                 DesktopOperator.IsSafeWorkspaceRelativePath(value) && direction is null,
-            "activate_window" or "click" or "select_tab" or "expand" or "collapse" => ValidTarget(targetId) && application is null && value is null && direction is null,
+            "activate_window" or "click" or "select_tab" or "select" or "expand" or "collapse" => ValidTarget(targetId) && application is null && value is null && direction is null,
             "type_text" => ValidTarget(targetId) && application is null && value is { Length: > 0 and <= 512 } &&
                 !value.Contains('\r') && !value.Contains('\n') && !value.Contains('\0') && direction is null,
             "scroll" => ValidTarget(targetId) && application is null && value is null && direction is ("up" or "down"),

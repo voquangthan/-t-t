@@ -121,6 +121,22 @@ Check(collapsedMenuActions.Contains("expand-element", StringComparer.Ordinal) &&
           supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "LeafNode")
           .Contains("expand-element", StringComparer.Ordinal),
     "expand/collapse is advertised only for known navigation controls in a verified state");
+var safeListSelection = ComputerUsePolicy.AllowedUiActions("ListItem", true, false, false,
+    supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false);
+var safeTreeSelection = ComputerUsePolicy.AllowedUiActions("TreeItem", true, false, false,
+    supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false);
+Check(safeListSelection.Contains("select-element", StringComparer.Ordinal) &&
+      safeTreeSelection.Contains("select-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("RadioButton", true, false, false,
+          supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false).Contains("select-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element") &&
+      !ComputerUsePolicy.RequiresUiApproval("TreeItem", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("RadioButton", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("ComboBox", "select-element"),
+    "direct selection is limited to list/tree navigation and never changes checkbox/radio/combobox choices");
 var keyEventOrder = new List<string>();
 ComputerUsePolicy.PressAndRelease("Tab", key => keyEventOrder.Add("down:" + key), key => keyEventOrder.Add("up:" + key));
 Check(keyEventOrder.SequenceEqual(["down:Tab", "up:Tab"]), "a key action always emits a matching release");

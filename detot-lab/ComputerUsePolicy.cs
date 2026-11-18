@@ -81,7 +81,7 @@ public static class ComputerUsePolicy
         if (!enabled || offscreen) return [];
         var actions = new List<string>();
         if (controlType == "Hyperlink" && supportsInvoke) actions.Add("click-element");
-        if (controlType == "TabItem" && supportsSelection) actions.Add("select-element");
+        if (supportsSelection && (controlType is "TabItem" or "ListItem" or "TreeItem")) actions.Add("select-element");
         if (!isPassword && controlType == "Edit" && supportsValue && !valueReadOnly) actions.Add("type-text");
         if (supportsScroll) actions.Add("scroll-element");
         if (controlType == "Edit") actions.Add("press-key");
@@ -140,10 +140,11 @@ public static class ComputerUsePolicy
 
     public static bool RequiresUiApproval(string controlType, string action, string? key = null) =>
         action == "press-key" ? !CanPressKeyOn(controlType, key) :
-        (action is "click-element" or "double-click-element" or "select-element") && (controlType switch
+        action == "select-element" ? controlType is not ("TabItem" or "ListItem" or "TreeItem") :
+        (action is "click-element" or "double-click-element") && (controlType switch
         {
             "Button" or "MenuItem" or "CheckBox" or "RadioButton" when action == "click-element" => true,
-            "ListItem" or "TreeItem" when action is "select-element" or "double-click-element" => true,
+            "ListItem" or "TreeItem" when action == "double-click-element" => true,
             _ => false
         });
 
@@ -158,9 +159,9 @@ public static class ComputerUsePolicy
     {
         observe = new[] { "approved-applications", "desktop-ui", "github-account", "github-pull-requests" },
         navigate = new[] { "open-workspace", "open-workspace-item (existing items under workspace only)", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader" },
-        interact = new[] { "activate-window", "select-element (TabItem only)", "type-text (revalidated non-password Edit only)", "scroll-element", "press-key (ArrowLeft/ArrowRight/Home/End on Edit only)", "click-element (Hyperlink only)", "expand/collapse-element (MenuItem/ComboBox/TreeItem navigation only)" },
+        interact = new[] { "activate-window", "select-element (TabItem/ListItem/TreeItem only)", "type-text (revalidated non-password Edit only)", "scroll-element", "press-key (ArrowLeft/ArrowRight/Home/End on Edit only)", "click-element (Hyperlink only)", "expand/collapse-element (MenuItem/ComboBox/TreeItem navigation only)" },
         readOnlyApplications = new[] { "Windows Settings", "Task Manager" },
-        approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "select/double-click ListItem/TreeItem", "keys on RadioButton/ComboBox/selection controls", "keyboard-submit" },
+        approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "select on CheckBox/RadioButton/ComboBox or unknown control types", "double-click ListItem/TreeItem", "keys on RadioButton/ComboBox/selection controls", "keyboard-submit" },
         interactionRequirements = new[] { "fresh-observation-target-id", "same-interactive-session", "revalidate-target-before-action" },
         accountSelection = Array.Empty<string>(),
         write = Array.Empty<string>(),

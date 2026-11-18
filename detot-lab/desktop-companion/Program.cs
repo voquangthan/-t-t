@@ -423,8 +423,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     {
         "Button" or "MenuItem" => ["click-element"],
         "CheckBox" or "RadioButton" => ["click-element", "press-key"],
-        "ListItem" or "TreeItem" => ["select-element", "double-click-element", "press-key"],
-        "ComboBox" => ["press-key"],
+        "ListItem" or "TreeItem" => ["double-click-element", "press-key"],
+        "ComboBox" => ["select-element", "press-key"],
         _ => []
     };
 
