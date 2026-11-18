@@ -268,6 +268,8 @@ var scopedTreeSelectionRequest = DesktopCompanionProtocol.SerializeRequest("sele
     uiTargetId, expectedName: "Tài liệu", expectedControlType: "TreeItem");
 var scopedWindowRequest = DesktopCompanionProtocol.SerializeRequest("activate-window", Guid.NewGuid().ToString("N"),
     uiTargetId, expectedName: "Visual Studio Code", expectedControlType: "Window");
+var scopedScrollRequest = DesktopCompanionProtocol.SerializeRequest("scroll-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, direction: "down", expectedName: "Hướng dẫn", expectedControlType: "Document");
 Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
       parsedScopedSelection is { ExpectedName: "Lịch", ExpectedControlType: "TabItem" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedHyperlinkRequest, out var parsedScopedHyperlink) &&
@@ -278,6 +280,8 @@ Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var p
       parsedScopedTreeSelection is { ExpectedName: "Tài liệu", ExpectedControlType: "TreeItem" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedWindowRequest, out var parsedScopedWindow) &&
       parsedScopedWindow is { ExpectedName: "Visual Studio Code", ExpectedControlType: "Window" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedScrollRequest, out var parsedScopedScroll) &&
+      parsedScopedScroll is { ExpectedName: "Hướng dẫn", ExpectedControlType: "Document", Direction: "down" } &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Hyperlink") &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Edit") &&
       !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, "x", null, "Tìm kiếm", "TabItem") &&
@@ -518,6 +522,7 @@ var selectListScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn da
 var selectTreeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn cây Tài liệu");
 var typeFieldScope = ComputerUseTaskAuthorization.FromCurrentMessage("Nhập tìm kiếm tài liệu vào ô Tìm kiếm");
 var activateWindowScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chuyển sang cửa sổ Visual Studio Code");
+var scrollDocumentScope = ComputerUseTaskAuthorization.FromCurrentMessage("Cuộn xuống trong tài liệu Hướng dẫn");
 var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
 Check(unrelatedScope is null &&
       !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
@@ -546,8 +551,11 @@ Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cá
       typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "tìm kiếm tài liệu")) &&
       !typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "khác")) &&
       activateWindowScope is { TargetControlType: "Window", TargetLabel: "Visual Studio Code" } &&
-      activateWindowScope.Allows(new("activate_window", TargetId: "0123456789abcdef0123456789abcdef")),
-    "named list selection, text entry, and window activation bind one label and exact allowed value");
+      activateWindowScope.Allows(new("activate_window", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      scrollDocumentScope is { TargetControlType: "Document", TargetLabel: "Hướng dẫn", RequestedValue: "down" } &&
+      scrollDocumentScope.Allows(new("scroll", TargetId: "0123456789abcdef0123456789abcdef", Direction: "down")) &&
+      !scrollDocumentScope.Allows(new("scroll", TargetId: "0123456789abcdef0123456789abcdef", Direction: "up")),
+    "named list selection, text entry, window activation, and scroll direction bind exact requested scope");
 var tabTargetId = "1123456789abcdef0123456789abcdef";
 var tabTarget = new ComputerUseObservedTarget("TabItem", "Lịch", new(StringComparer.Ordinal) { "select-element" });
 var tabTurnState = new ComputerUseTurnState();

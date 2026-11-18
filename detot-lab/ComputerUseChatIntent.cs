@@ -61,7 +61,8 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
         if (action.Operation != "open_application" && action.Application is not null) return false;
         if (action.Operation == "open_workspace_item" && action.Value != RequestedValue) return false;
         if (action.Operation == "type_text" && action.Value != RequestedValue) return false;
-        if (action.Operation is not ("open_workspace_item" or "type_text" or "observe") && RequestedValue is not null) return false;
+        if (action.Operation == "scroll" && action.Direction != RequestedValue) return false;
+        if (action.Operation is not ("open_workspace_item" or "type_text" or "scroll" or "observe") && RequestedValue is not null) return false;
         return true;
     }
 
@@ -77,6 +78,7 @@ public static class ComputerUseTaskAuthorization
         ("select_tab", "TabItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+tab\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("select", "ListItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+(?:mục\s+)?(?:trong\s+)?danh\s+sách\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("select", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+(?:mục\s+)?(?:trong\s+)?cây\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
+        ("scroll", "Document", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:cuộn|scroll)\s+(?<direction>lên|xuống|up|down)\s+(?:trong|in)\s+(?:tài\s+liệu|document)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("expand", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở\s+rộng|expand)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("collapse", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:thu\s+gọn|collapse)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("click", "Hyperlink", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:bấm|nhấn|click)\s+(?:vào\s+)?(?:link|liên\s+kết)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled))
@@ -123,8 +125,13 @@ public static class ComputerUseTaskAuthorization
             var match = pattern.Match(message);
             if (!match.Success) continue;
             var label = match.Groups["label"].Value.Trim();
+            var direction = match.Groups["direction"].Success
+                ? match.Groups["direction"].Value.Equals("lên", StringComparison.OrdinalIgnoreCase) ||
+                  match.Groups["direction"].Value.Equals("up", StringComparison.OrdinalIgnoreCase) ? "up" : "down"
+                : null;
             return label.Length is > 0 and <= 96
-                ? new("named-ui-" + operation, ["observe", operation], TargetLabel: label, TargetControlType: controlType)
+                ? new("named-ui-" + operation, ["observe", operation], RequestedValue: direction,
+                    TargetLabel: label, TargetControlType: controlType)
                 : null;
         }
         var intent = ComputerUseChatIntent.DetectDirectRequest(message);

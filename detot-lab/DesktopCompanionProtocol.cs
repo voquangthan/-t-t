@@ -78,12 +78,12 @@ public static class DesktopCompanionProtocol
         string? expectedName = null, string? expectedControlType = null)
     {
         if ((expectedName is null) != (expectedControlType is null)) return false;
-        if (action is "activate-window" or "select-element" or "expand-element" or "collapse-element" or "click-element" or "type-text")
+        if (action is "activate-window" or "select-element" or "expand-element" or "collapse-element" or "click-element" or "type-text" or "scroll-element")
         {
             if (expectedName is null || expectedControlType is null) return false;
         }
         if (expectedName is not null && (expectedName.Length is 0 or > 96 || expectedName.Any(char.IsControl) ||
-            expectedControlType is not ("Window" or "TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Edit") ||
+            expectedControlType is not ("Window" or "TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Edit" or "Document") ||
             (action switch
             {
                 "activate-window" => expectedControlType != "Window",
@@ -91,6 +91,7 @@ public static class DesktopCompanionProtocol
                 "expand-element" or "collapse-element" => expectedControlType != "TreeItem",
                 "click-element" => expectedControlType != "Hyperlink",
                 "type-text" => expectedControlType != "Edit",
+                "scroll-element" => expectedControlType != "Document",
                 _ => true
             }))) return false;
         if (TargetActions.Contains(action) && (targetId is null || !Guid.TryParseExact(targetId, "N", out _))) return false;
