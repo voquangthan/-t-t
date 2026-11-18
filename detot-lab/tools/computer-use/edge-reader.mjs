@@ -28,6 +28,7 @@ async function ensureEdge() {
   context = await chromium.launchPersistentContext(profileRoot, {
     channel: "msedge",
     headless: false,
+    chromiumSandbox: true,
     acceptDownloads: false,
     args: ["--no-first-run", "--disable-extensions"],
   });

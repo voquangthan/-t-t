@@ -10,7 +10,9 @@
     <Compile Remove="tests/memory-audit/**/*.cs" />
     <Compile Remove="tests/weather/**/*.cs" />
     <Compile Remove="tests/desktop-operator/**/*.cs" />
+    <Compile Remove="desktop-companion/**/*.cs" />
     <Content Remove="tests/**" />
+    <Content Remove="desktop-companion/**" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="FlaUI.UIA3" Version="5.0.0" Condition="'$(OS)' == 'Windows_NT'" />

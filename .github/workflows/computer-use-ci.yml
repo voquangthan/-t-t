@@ -37,6 +37,9 @@ jobs:
       - name: Build Backend
         run: dotnet build detot-lab/Detot.Lab.csproj --verbosity minimal -p:NuGetAudit=false
 
+      - name: Build Desktop Companion
+        run: dotnet build detot-lab/desktop-companion/DesktopCompanion.csproj --verbosity minimal -p:NuGetAudit=false
+
       - name: Run Desktop Operator regression
         run: dotnet run --project detot-lab/tests/desktop-operator/DesktopOperator.Tests.csproj -p:NuGetAudit=false
 

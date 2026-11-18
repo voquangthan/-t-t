@@ -124,6 +124,51 @@ module.exports = {
   }
 });
 
+test("opening Edge uses only the dedicated profile and keeps Chromium sandbox enabled", async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "detot-edge-open-"));
+  const moduleRoot = path.join(temporary, "playwright-core");
+  const profile = path.join(temporary, "isolated-profile");
+  const capture = path.join(temporary, "launch.json");
+  await fs.mkdir(moduleRoot);
+  await fs.writeFile(path.join(moduleRoot, "package.json"), JSON.stringify({ main: "index.js" }));
+  await fs.writeFile(path.join(moduleRoot, "index.js"), `
+const fs = require("node:fs");
+module.exports = {
+  chromium: { launchPersistentContext: async (userDataDir, options) => {
+    fs.writeFileSync(process.env.DETOT_TEST_LAUNCH_CAPTURE, JSON.stringify({ userDataDir, options }));
+    return { pages: () => [{ url: () => "about:blank" }], close: async () => {} };
+  } },
+  request: { newContext: async () => ({ dispose: async () => {} }) },
+};
+`);
+  try {
+    const script = fileURLToPath(new URL("../../tools/computer-use/edge-reader.mjs", import.meta.url));
+    const childEnvironment = Object.fromEntries(["SystemRoot", "WINDIR", "TEMP", "TMP"]
+      .filter(key => process.env[key])
+      .map(key => [key, process.env[key]]));
+    childEnvironment.DETOT_PLAYWRIGHT_CORE = moduleRoot;
+    childEnvironment.DETOT_DESKTOP_EDGE_PROFILE = profile;
+    childEnvironment.DETOT_TEST_LAUNCH_CAPTURE = capture;
+    const child = spawnSync(process.execPath, [script], {
+      input: `${JSON.stringify({ id: 1, action: "open-edge" })}\n${JSON.stringify({ action: "shutdown" })}\n`,
+      encoding: "utf8",
+      timeout: 5000,
+      env: childEnvironment,
+    });
+    assert.equal(child.status, 0, child.stderr);
+    const response = JSON.parse(child.stdout.trim().split(/\r?\n/u)[0]);
+    assert.equal(response.result.opened, true);
+    const launch = JSON.parse(await fs.readFile(capture, "utf8"));
+    assert.equal(launch.userDataDir, profile);
+    assert.equal(launch.options.channel, "msedge");
+    assert.equal(launch.options.headless, false);
+    assert.equal(launch.options.chromiumSandbox, true);
+    assert.deepEqual(launch.options.args, ["--no-first-run", "--disable-extensions"]);
+  } finally {
+    await fs.rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("check-run pagination is disclosed when the per-request result is truncated", () => {
   const runs = Array.from({ length: 30 }, (_, index) => ({ name: `Check ${index}`, status: "completed", conclusion: "success" }));
   const result = summarizeCheckRuns({ total_count: 34, check_runs: runs });
