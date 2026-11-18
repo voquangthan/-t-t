@@ -208,9 +208,10 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     var isPassword = SafeBoolean(() => node.Element.Properties.IsPassword.ValueOrDefault);
                     var enabled = SafeBoolean(() => node.Element.Properties.IsEnabled.ValueOrDefault);
                     var offscreen = SafeBoolean(() => node.Element.Properties.IsOffscreen.ValueOrDefault);
+                    var safeSelectionContainer = IsSafeSelectionContext(node.Element, controlType);
                     var allowed = ComputerUsePolicy.IsReadOnlyDesktopApplication(processName)
                         ? Array.Empty<string>()
-                        : GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword);
+                        : GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword, safeSelectionContainer);
                     var elementId = NewTargetId();
                     elementIds[node.Element] = elementId;
                     uiTargets[elementId] = new(node.Element, item.Handle, item.ProcessId, sessionId, controlType,
@@ -230,7 +231,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         isPassword,
                         bounds = SafeBounds(node.Element),
                         allowedActions = allowed,
-                        approvalRequiredActions = GetApprovalActions(controlType)
+                        approvalRequiredActions = GetApprovalActions(controlType,
+                            node.Element.Patterns.SelectionItem.IsSupported, safeSelectionContainer)
                     });
                 }
             }
@@ -299,11 +301,13 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var freshAllowedActions = currentControlType == "Window"
             ? new[] { "activate-window" }
             : GetAllowedUiActions(target.Element, currentControlType, currentlyEnabled,
-                currentlyOffscreen, passwordKnown ? isPassword : true);
+                currentlyOffscreen, passwordKnown ? isPassword : true,
+                IsSafeSelectionContext(target.Element, currentControlType));
         if (!freshAllowedActions.Contains(request.Action, StringComparer.Ordinal) ||
             (request.Action == "press-key" && !ComputerUsePolicy.CanPressKeyOn(currentControlType, request.Value)))
             return new { succeeded = false,
-                status = IsApprovalRequired(currentControlType, request.Action, request.Value) ? "approval_required" : "action_not_allowed",
+                status = IsApprovalRequired(currentControlType, request.Action, request.Value,
+                    IsSafeSelectionContext(target.Element, currentControlType)) ? "approval_required" : "action_not_allowed",
                 verification = "not_run" };
         try
         {
@@ -401,7 +405,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     }
 
     private static string[] GetAllowedUiActions(AutomationElement element, string controlType,
-        bool enabled, bool offscreen, bool isPassword)
+        bool enabled, bool offscreen, bool isPassword, bool safeSelectionContainer)
     {
         try
         {
@@ -414,22 +418,53 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             return ComputerUsePolicy.AllowedUiActions(controlType, enabled, offscreen, isPassword,
                 element.Patterns.Invoke.IsSupported, element.Patterns.SelectionItem.IsSupported,
                 valueSupported, valueReadOnly, element.Patterns.Scroll.IsSupported,
-                expandCollapseSupported, expandCollapseState);
+                expandCollapseSupported, expandCollapseState, safeSelectionContainer);
         }
         catch { return []; }
     }
 
-    private static string[] GetApprovalActions(string controlType) => controlType switch
+    private static bool IsSafeSelectionContext(AutomationElement element, string controlType)
+    {
+        try
+        {
+            if (!element.Patterns.SelectionItem.IsSupported ||
+                !element.Patterns.SelectionItem.Pattern.SelectionContainer.TryGetValue(out var container) || container is null)
+                return false;
+            if (ContainsComboBoxAncestor(element) || ContainsComboBoxAncestor(container)) return false;
+            var containerType = SafeControlType(container);
+            if (containerType == "Unknown") return false;
+            return ComputerUsePolicy.IsSafeSelectionContext(controlType, containerType, insideComboBox: false);
+        }
+        catch { return false; }
+    }
+
+    private static bool ContainsComboBoxAncestor(AutomationElement element)
+    {
+        AutomationElement? current = element;
+        for (var depth = 0; current is not null && depth < 32; depth++)
+        {
+            var controlType = SafeControlType(current);
+            if (ComputerUsePolicy.IsUnsafeSelectionAncestor(controlType)) return true;
+            if (controlType == "Window") return false;
+            current = current.Parent;
+        }
+        return current is not null;
+    }
+
+    private static string[] GetApprovalActions(string controlType, bool supportsSelection, bool safeSelectionContainer) => controlType switch
     {
         "Button" or "MenuItem" => ["click-element"],
-        "CheckBox" or "RadioButton" => ["click-element", "press-key"],
+        "CheckBox" or "RadioButton" => ["click-element", "press-key", "select-element"],
+        "ListItem" or "TreeItem" when !safeSelectionContainer => ["select-element", "double-click-element", "press-key"],
         "ListItem" or "TreeItem" => ["double-click-element", "press-key"],
         "ComboBox" => ["select-element", "press-key"],
+        _ when supportsSelection && !safeSelectionContainer => ["select-element"],
         _ => []
     };
 
-    private static bool IsApprovalRequired(string controlType, string action, string? key = null) =>
-        ComputerUsePolicy.RequiresUiApproval(controlType, action, key);
+    private static bool IsApprovalRequired(string controlType, string action, string? key = null,
+        bool safeSelectionContainer = false) =>
+        ComputerUsePolicy.RequiresUiApproval(controlType, action, key, safeSelectionContainer);
 
     private bool IsWindowStillPresent(nint handle, int expectedProcessId)
     {

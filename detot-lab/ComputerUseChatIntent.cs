@@ -50,6 +50,129 @@ public static class ComputerUseChatIntent
 
 }
 
+public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperations, string? Application = null,
+    string? ObservationTarget = null, string? RequestedValue = null)
+{
+    public bool Allows(ComputerUseAgentAction action)
+    {
+        if (!AllowedOperations.Contains(action.Operation, StringComparer.Ordinal)) return false;
+        if (action.Operation == "open_application" && action.Application != Application) return false;
+        if (action.Operation != "open_application" && action.Application is not null) return false;
+        if (action.Operation == "open_workspace_item" && action.Value != RequestedValue) return false;
+        if (action.Operation != "open_workspace_item" && RequestedValue is not null && action.Operation != "observe") return false;
+        return true;
+    }
+}
+
+public static class ComputerUseTaskAuthorization
+{
+    private static readonly Regex WorkspaceItemRequest = new(
+        @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở|open)\s+(?:tệp|file|thư\s+mục|folder)\s+(?<path>[^\r\n""'`<>]{1,512}?)\s*[.!?]*\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    public static bool ShouldExposeTool(ComputerUseTaskScope? scope, bool interactionConsent,
+        bool observationConsent) => scope is not null && interactionConsent && observationConsent;
+
+    public static bool ShouldDispatchToolCall(ComputerUseTaskScope? scope, string? toolName) =>
+        scope is not null && toolName == "detot_computer_use";
+
+    public static ComputerUseTaskScope? FromCurrentMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message) || message.Length > 640 || message.Contains('\n') || message.Contains('\r') ||
+            message.Contains('`') || message.Contains('"') || message.Contains('\'')) return null;
+        var itemMatch = WorkspaceItemRequest.Match(message);
+        if (itemMatch.Success)
+        {
+            var path = itemMatch.Groups["path"].Value.Trim();
+            if (path.Length is > 0 and <= 512 && DesktopOperator.IsSafeWorkspaceRelativePath(path))
+                return new("open-workspace-item", ["observe", "open_workspace_item"], RequestedValue: path);
+            return null;
+        }
+        var intent = ComputerUseChatIntent.DetectDirectRequest(message);
+        if (intent is null) return null;
+        var observationTarget = ComputerUseChatIntent.ObservationTargetForAction(intent);
+        if (observationTarget is not null)
+            return new(intent, ["observe"], ObservationTarget: observationTarget);
+
+        var application = intent switch
+        {
+            "open-edge" => "edge", "open-vscode" => "vscode", "open-workspace" => "workspace",
+            "open-github" => "github", "open-settings" => "settings", "open-task-manager" => "task-manager",
+            "open-word" => "word", "open-excel" => "excel", "open-powerpoint" => "powerpoint",
+            "open-pdf-reader" => "pdf-reader", _ => null
+        };
+        if (application is null) return null;
+        string[] operations = intent == "open-workspace" ? ["observe", "open_workspace"] : ["observe", "open_application"];
+        return new(intent, operations, application);
+    }
+
+    public static bool HasUsableObservation(string? status, bool hasTarget) => status switch
+    {
+        "available" or "partial" => hasTarget,
+        "empty" => true,
+        _ => false
+    };
+
+    public static bool IsActionVerified(string? status, bool succeeded, string? verification) =>
+        status != "approval_required" && succeeded && verification == "verified";
+}
+
+public sealed class ComputerUseTurnState
+{
+    private readonly Dictionary<string, HashSet<string>> observedTargets = new(StringComparer.Ordinal);
+    public bool RequiresObservation { get; private set; } = true;
+    public bool Stopped { get; private set; }
+    public bool CanAcceptModelCompletion => !Stopped;
+
+    public bool RecordObservation(string? status, IReadOnlyDictionary<string, HashSet<string>> targets)
+    {
+        if (Stopped || !ComputerUseTaskAuthorization.HasUsableObservation(status, targets.Count > 0))
+        {
+            Stop();
+            return false;
+        }
+        observedTargets.Clear();
+        foreach (var (id, actions) in targets) observedTargets[id] = new(actions, StringComparer.Ordinal);
+        RequiresObservation = false;
+        return true;
+    }
+
+    public bool CanAct(ComputerUseAgentAction action)
+    {
+        if (Stopped || action.Operation == "observe") return !Stopped;
+        if (RequiresObservation) return false;
+        if (action.TargetId is null) return true;
+        return observedTargets.TryGetValue(action.TargetId, out var actions) &&
+            actions.Contains(RequiredObservedAction(action.Operation));
+    }
+
+    public bool RecordAction(string? status, bool succeeded, string? verification)
+    {
+        if (Stopped || !ComputerUseTaskAuthorization.IsActionVerified(status, succeeded, verification))
+        {
+            Stop();
+            return false;
+        }
+        RequiresObservation = true;
+        observedTargets.Clear();
+        return true;
+    }
+
+    public void Stop()
+    {
+        Stopped = true;
+        RequiresObservation = true;
+        observedTargets.Clear();
+    }
+
+    private static string RequiredObservedAction(string operation) => operation switch
+    {
+        "activate_window" => "activate-window", "click" => "click-element", "select_tab" or "select" => "select-element",
+        "expand" => "expand-element", "collapse" => "collapse-element", "type_text" => "type-text",
+        "scroll" => "scroll-element", "press_key" => "press-key", _ => ""
+    };
+}
+
 public static class ComputerUseChatDispatcher
 {
     public sealed record DispatchResult<T>(bool Dispatched, string? Action, T? Value) where T : class;

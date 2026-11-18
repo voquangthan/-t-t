@@ -76,12 +76,14 @@ public static class ComputerUsePolicy
 
     public static string[] AllowedUiActions(string controlType, bool enabled, bool offscreen, bool isPassword,
         bool supportsInvoke, bool supportsSelection, bool supportsValue, bool valueReadOnly, bool supportsScroll,
-        bool supportsExpandCollapse = false, string? expandCollapseState = null)
+        bool supportsExpandCollapse = false, string? expandCollapseState = null,
+        bool safeSelectionContainer = false)
     {
         if (!enabled || offscreen) return [];
         var actions = new List<string>();
         if (controlType == "Hyperlink" && supportsInvoke) actions.Add("click-element");
-        if (supportsSelection && (controlType is "TabItem" or "ListItem" or "TreeItem")) actions.Add("select-element");
+        if (supportsSelection && safeSelectionContainer && (controlType is "TabItem" or "ListItem" or "TreeItem"))
+            actions.Add("select-element");
         if (!isPassword && controlType == "Edit" && supportsValue && !valueReadOnly) actions.Add("type-text");
         if (supportsScroll) actions.Add("scroll-element");
         if (controlType == "Edit") actions.Add("press-key");
@@ -92,6 +94,22 @@ public static class ComputerUsePolicy
         }
         return actions.ToArray();
     }
+
+    public static bool IsSafeSelectionContext(string controlType, string? selectionContainerControlType,
+        bool insideComboBox) => !insideComboBox && ((controlType, selectionContainerControlType) switch
+        {
+            ("TabItem", "Tab") => true,
+            ("ListItem", "List") => true,
+            ("TreeItem", "Tree") => true,
+            _ => false
+        });
+
+    public static bool IsUnsafeSelectionAncestor(string? controlType) =>
+        controlType is null or "Unknown" or "ComboBox";
+
+    public static bool CanSelectInContext(string controlType, string action, bool safeSelectionContainer) =>
+        action != "select-element" ||
+        controlType is ("TabItem" or "ListItem" or "TreeItem") && safeSelectionContainer;
 
     public static IReadOnlyList<BoundedNode<T>> CollectBoundedDescendants<T>(T root, int limit, int depthLimit,
         Func<T, int, T?> childAt, out bool truncated) where T : class
@@ -138,9 +156,10 @@ public static class ComputerUsePolicy
 
     public sealed record BoundedNode<T>(T Element, T Parent, int Depth) where T : class;
 
-    public static bool RequiresUiApproval(string controlType, string action, string? key = null) =>
+    public static bool RequiresUiApproval(string controlType, string action, string? key = null,
+        bool safeSelectionContainer = false) =>
         action == "press-key" ? !CanPressKeyOn(controlType, key) :
-        action == "select-element" ? controlType is not ("TabItem" or "ListItem" or "TreeItem") :
+        action == "select-element" ? !CanSelectInContext(controlType, action, safeSelectionContainer) :
         (action is "click-element" or "double-click-element") && (controlType switch
         {
             "Button" or "MenuItem" or "CheckBox" or "RadioButton" when action == "click-element" => true,

@@ -1042,11 +1042,13 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     return existing.Message == calendarInput ? CalendarReply(existing) : Results.Conflict();
             }
         }
-        var computerUseAgentEnabled = !practicing && !miniPractice && !calendarRequest && reminderTask is null &&
+        var computerUseTaskScope = ComputerUseTaskAuthorization.FromCurrentMessage(request.Message);
+        var computerUseAgentEnabled = ComputerUseTaskAuthorization.ShouldExposeTool(computerUseTaskScope,
+                consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "local_only"),
+                consentPolicy.IsAllowed(owner, "desktop_ui", "direct_request", "DeepSeek")) &&
+            !practicing && !miniPractice && !calendarRequest && reminderTask is null &&
             request.DocumentContext is null && visionImages.Length == 0 &&
-            DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null, context.Connection.RemoteIpAddress) &&
-            consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "local_only") &&
-            consentPolicy.IsAllowed(owner, "desktop_ui", "direct_request", "DeepSeek");
+            DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null, context.Connection.RemoteIpAddress);
         if (computerUseAgentEnabled)
             tools.Add(new
             {
@@ -1108,9 +1110,11 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var calls = first.RootElement.GetProperty("output").EnumerateArray()
             .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
         if (computerUseAgentEnabled && calls.Any(item => item.TryGetProperty("name", out var name) &&
-            name.ValueKind == JsonValueKind.String && name.GetString() == "detot_computer_use"))
+            name.ValueKind == JsonValueKind.String &&
+            ComputerUseTaskAuthorization.ShouldDispatchToolCall(computerUseTaskScope, name.GetString())))
             return await ContinueComputerUseTurn(first.RootElement, gateway, tools, gatewayInstructions,
-                owner, request.RequestId, desktopCompanion, consentPolicy, desktopRepositoryRoot, cancellationToken);
+                owner, request.RequestId, desktopCompanion, consentPolicy, desktopRepositoryRoot,
+                computerUseTaskScope!, cancellationToken);
         if (reminderTask is { } selectedTask && calls.Length == 1 &&
             calls[0].GetProperty("name").GetString() == "detot_memory_calendar_reminder")
         {
@@ -1294,14 +1298,15 @@ static async Task<JsonDocument> CallGateway(HttpClient client, object body, Canc
 
 static async Task<IResult> ContinueComputerUseTurn(JsonElement initialResponse, HttpClient gateway,
     List<object> tools, string instructions, string owner, Guid? requestId, DesktopCompanionClient companion,
-    ConsentPolicy consent, string? workspaceRoot, CancellationToken cancellationToken)
+    ConsentPolicy consent, string? workspaceRoot, ComputerUseTaskScope taskScope,
+    CancellationToken cancellationToken)
 {
     const int maxToolCalls = 8;
     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
     deadline.CancelAfter(TimeSpan.FromSeconds(90));
     var documents = new List<JsonDocument>();
     var current = initialResponse;
-    var needsObservation = true;
+    var turnState = new ComputerUseTurnState();
     try
     {
         for (var step = 0; step <= maxToolCalls; step++)
@@ -1322,6 +1327,8 @@ static async Task<IResult> ContinueComputerUseTurn(JsonElement initialResponse, 
             using var arguments = JsonDocument.Parse(argumentJson);
             if (!ComputerUseAgentAction.TryParse(arguments.RootElement, out var action) || action is null)
                 return Results.Ok(new { reply = "Mình dừng vì yêu cầu thao tác không nằm trong danh sách được phép.", toolUsed = true });
+            if (!taskScope.Allows(action))
+                return Results.Ok(new { reply = "Mình dừng vì thao tác được yêu cầu vượt quá phạm vi công việc bạn nêu.", toolUsed = true });
 
             var requirements = new[]
             {
@@ -1336,22 +1343,37 @@ static async Task<IResult> ContinueComputerUseTurn(JsonElement initialResponse, 
             using var stepCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 deadline.Token, lease.CancellationToken);
 
-            string toolOutput;
-            if (action.Operation != "observe" && needsObservation)
+            if (!turnState.CanAct(action))
             {
-                toolOutput = JsonSerializer.Serialize(new { status = "observe_required", succeeded = false,
-                    message = "Observe the desktop now; do not retry the action with an old target." });
+                var reply = action.Operation == "observe" ? "Mình dừng vì lượt thao tác đã bị chặn." :
+                    turnState.RequiresObservation
+                        ? "Mình dừng vì chưa có quan sát giao diện mới và hợp lệ; chưa thực hiện thao tác."
+                        : "Mình dừng vì mục tiêu không có trong quan sát gần nhất hoặc không được phép cho thao tác này.";
+                return Results.Ok(new { reply, toolUsed = true });
+            }
+
+            var toolOutput = await ExecuteComputerUseAgentAction(action, companion, workspaceRoot, stepCancellation.Token);
+            if (!consent.IsCurrent(lease))
+                return Results.Json(new { error = "Quyền Computer Use đã bị thu hồi trong lúc thao tác; đã dừng lượt." }, statusCode: 403);
+            using var toolResult = JsonDocument.Parse(toolOutput);
+            var toolStatus = ReadComputerUseString(toolResult.RootElement, "status");
+            if (action.Operation == "observe")
+            {
+                var targets = CollectObservedTargets(toolResult.RootElement);
+                if (!turnState.RecordObservation(toolStatus, targets))
+                    return Results.Ok(new { reply = "Mình chưa thể quan sát giao diện đáng tin cậy nên đã dừng; chưa thực hiện thao tác nào.",
+                        toolUsed = true, observationStatus = toolStatus ?? "unavailable" });
             }
             else
             {
-                toolOutput = await ExecuteComputerUseAgentAction(action, companion, workspaceRoot, stepCancellation.Token);
-                if (!consent.IsCurrent(lease))
-                    return Results.Json(new { error = "Quyền Computer Use đã bị thu hồi trong lúc thao tác; đã dừng lượt." }, statusCode: 403);
-                needsObservation = action.Operation != "observe";
-                using var toolResult = JsonDocument.Parse(toolOutput);
-                if (ReadComputerUseString(toolResult.RootElement, "status") == "approval_required")
+                var succeeded = toolResult.RootElement.TryGetProperty("succeeded", out var succeededValue) && succeededValue.ValueKind == JsonValueKind.True;
+                var verification = ReadComputerUseString(toolResult.RootElement, "verification");
+                if (toolStatus == "approval_required")
                     return Results.Ok(new { reply = "Thao tác này cần bạn duyệt trước khi thực hiện. Mình chưa thực hiện thao tác đó.",
                         toolUsed = true, approvalRequired = true });
+                if (!turnState.RecordAction(toolStatus, succeeded, verification))
+                    return Results.Ok(new { reply = "Thao tác chưa được Backend xác minh thành công nên mình đã dừng. Không có bước tiếp theo nào được thực hiện.",
+                        toolUsed = true, actionStatus = toolStatus ?? "unknown", verification = verification ?? "not_verified" });
             }
 
             if (!current.TryGetProperty("id", out var responseIdValue) || responseIdValue.ValueKind != JsonValueKind.String ||
@@ -1379,6 +1401,30 @@ static async Task<IResult> ContinueComputerUseTurn(JsonElement initialResponse, 
     {
         foreach (var document in documents) document.Dispose();
     }
+}
+
+static Dictionary<string, HashSet<string>> CollectObservedTargets(JsonElement observation)
+{
+    var targets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+    if (observation.TryGetProperty("windows", out var windows) && windows.ValueKind == JsonValueKind.Array)
+        foreach (var window in windows.EnumerateArray())
+        {
+            var id = ReadComputerUseString(window, "windowId");
+            if (!Guid.TryParseExact(id, "N", out _)) continue;
+            targets[id!] = new(StringComparer.Ordinal) { "activate-window" };
+        }
+    if (observation.TryGetProperty("elements", out var elements) && elements.ValueKind == JsonValueKind.Array)
+        foreach (var element in elements.EnumerateArray())
+        {
+            var id = ReadComputerUseString(element, "elementId");
+            if (!Guid.TryParseExact(id, "N", out _)) continue;
+            var allowed = element.TryGetProperty("allowedActions", out var actions) && actions.ValueKind == JsonValueKind.Array
+                ? actions.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                    .Select(item => item.GetString()).Where(item => item is not null).Cast<string>().ToHashSet(StringComparer.Ordinal)
+                : new HashSet<string>(StringComparer.Ordinal);
+            targets[id!] = allowed;
+        }
+    return targets;
 }
 
 static async Task<string> ExecuteComputerUseAgentAction(ComputerUseAgentAction action,

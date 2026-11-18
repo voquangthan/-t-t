@@ -123,20 +123,36 @@ Check(collapsedMenuActions.Contains("expand-element", StringComparer.Ordinal) &&
     "expand/collapse is advertised only for known navigation controls in a verified state");
 var safeListSelection = ComputerUsePolicy.AllowedUiActions("ListItem", true, false, false,
     supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
-    supportsScroll: false);
+    supportsScroll: false, safeSelectionContainer: true);
 var safeTreeSelection = ComputerUsePolicy.AllowedUiActions("TreeItem", true, false, false,
     supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
-    supportsScroll: false);
+    supportsScroll: false, safeSelectionContainer: true);
 Check(safeListSelection.Contains("select-element", StringComparer.Ordinal) &&
       safeTreeSelection.Contains("select-element", StringComparer.Ordinal) &&
       !ComputerUsePolicy.AllowedUiActions("RadioButton", true, false, false,
           supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
           supportsScroll: false).Contains("select-element", StringComparer.Ordinal) &&
-      !ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element") &&
-      !ComputerUsePolicy.RequiresUiApproval("TreeItem", "select-element") &&
+      !ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element", safeSelectionContainer: true) &&
+      !ComputerUsePolicy.RequiresUiApproval("TreeItem", "select-element", safeSelectionContainer: true) &&
       ComputerUsePolicy.RequiresUiApproval("RadioButton", "select-element") &&
-      ComputerUsePolicy.RequiresUiApproval("ComboBox", "select-element"),
-    "direct selection is limited to list/tree navigation and never changes checkbox/radio/combobox choices");
+      ComputerUsePolicy.RequiresUiApproval("ComboBox", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element") &&
+      ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: false) &&
+      ComputerUsePolicy.IsSafeSelectionContext("TreeItem", "Tree", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: true) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", "ComboBox", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("TreeItem", "Tree", insideComboBox: true) &&
+      new[] { "ListItem", "List", "ComboBox", "Window" }.Any(ComputerUsePolicy.IsUnsafeSelectionAncestor),
+    "selection is permitted only for a proven list/tree/tab container outside ComboBox ancestry");
+Check(ComputerUsePolicy.IsSafeSelectionContext("TabItem", "Tab", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", null, insideComboBox: false) &&
+      !ComputerUsePolicy.CanSelectInContext("ListItem", "select-element", safeSelectionContainer: false),
+    "unknown or changed selection containers fail closed at action time");
+var safeAtObservation = ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: false);
+var unsafeAtAction = ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: true);
+Check(safeAtObservation && !unsafeAtAction &&
+      ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element", safeSelectionContainer: unsafeAtAction),
+    "selection is denied when its ComboBox ancestry changes between observation and execution");
 var keyEventOrder = new List<string>();
 ComputerUsePolicy.PressAndRelease("Tab", key => keyEventOrder.Add("down:" + key), key => keyEventOrder.Add("up:" + key));
 Check(keyEventOrder.SequenceEqual(["down:Tab", "up:Tab"]), "a key action always emits a matching release");
@@ -447,6 +463,49 @@ using (var extraAgentAction = JsonDocument.Parse("{\"operation\":\"observe\",\"s
 using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text\",\"targetId\":\"stale\",\"value\":\"hello\"}"))
     Check(!ComputerUseAgentAction.TryParse(badTargetAgentAction.RootElement, out _),
         "agent Computer Use rejects non-opaque or malformed UI target IDs");
+var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay trời thế nào?");
+var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
+var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
+var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
+Check(unrelatedScope is null &&
+      !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
+      !unrelatedFakeGatewayCalls.Any(name => ComputerUseTaskAuthorization.ShouldDispatchToolCall(unrelatedScope, name)),
+    "unrelated chat exposes no UI labels and cannot dispatch a fake tool call even when both consent grants exist");
+Check(openEdgeScope is { } scopedEdge && scopedEdge.Allows(new("observe")) &&
+      ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: true, observationConsent: true) &&
+      scopedEdge.Allows(new("open_application", Application: "edge")) &&
+      !scopedEdge.Allows(new("open_application", Application: "vscode")) &&
+      !scopedEdge.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "detot_computer_use") &&
+      !ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "other_tool"),
+    "a direct desktop request authorizes only its matching application and required observation");
+Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
+      openFileScope.Allows(new("observe")) &&
+      openFileScope.Allows(new("open_workspace_item", Value: "docs/audit.txt")) &&
+      !openFileScope.Allows(new("open_workspace_item", Value: "docs/other.txt")) &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Mở file ../private.txt") is null,
+    "workspace navigation scope binds the exact safe relative path requested by the current user message");
+var failedObserveState = new ComputerUseTurnState();
+Check(!failedObserveState.RecordObservation("unavailable", new Dictionary<string, HashSet<string>>()) &&
+      !failedObserveState.CanAct(new("open_application", Application: "edge")) &&
+      !failedObserveState.CanAcceptModelCompletion,
+    "failed observation stops the turn before actions or model success claims");
+var failedActionState = new ComputerUseTurnState();
+Check(failedActionState.RecordObservation("available", new Dictionary<string, HashSet<string>>
+      { ["0123456789abcdef0123456789abcdef"] = ["click-element"] }) &&
+      failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !failedActionState.RecordAction("not_verified", false, "not_verified") &&
+      !failedActionState.RecordObservation("available", new Dictionary<string, HashSet<string>>()) &&
+      !failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !failedActionState.CanAcceptModelCompletion,
+    "an unverified action cannot be followed by observe/action or accepted as model completion");
+var verifiedActionState = new ComputerUseTurnState();
+Check(verifiedActionState.RecordObservation("available", new Dictionary<string, HashSet<string>>
+      { ["0123456789abcdef0123456789abcdef"] = ["click-element"] }) &&
+      verifiedActionState.RecordAction("completed", true, "verified") &&
+      !verifiedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      verifiedActionState.CanAct(new("observe")),
+    "a verified action invalidates old targets and requires a new observation before another action");
 var agentConsentRoot = Path.Combine(Path.GetTempPath(), "detot-computer-use-consent-" + Guid.NewGuid().ToString("N"));
 try
 {
