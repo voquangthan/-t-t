@@ -264,6 +264,8 @@ var scopedHyperlinkRequest = DesktopCompanionProtocol.SerializeRequest("click-el
     uiTargetId, expectedName: "Tài liệu hướng dẫn", expectedControlType: "Hyperlink");
 var scopedTextRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"),
     uiTargetId, "tìm kiếm tài liệu", expectedName: "Tìm kiếm", expectedControlType: "Edit");
+var scopedTreeSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Tài liệu", expectedControlType: "TreeItem");
 var scopedWindowRequest = DesktopCompanionProtocol.SerializeRequest("activate-window", Guid.NewGuid().ToString("N"),
     uiTargetId, expectedName: "Visual Studio Code", expectedControlType: "Window");
 Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
@@ -272,6 +274,8 @@ Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var p
       parsedScopedHyperlink is { ExpectedName: "Tài liệu hướng dẫn", ExpectedControlType: "Hyperlink" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedTextRequest, out var parsedScopedText) &&
       parsedScopedText is { ExpectedName: "Tìm kiếm", ExpectedControlType: "Edit", Value: "tìm kiếm tài liệu" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedTreeSelectionRequest, out var parsedScopedTreeSelection) &&
+      parsedScopedTreeSelection is { ExpectedName: "Tài liệu", ExpectedControlType: "TreeItem" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedWindowRequest, out var parsedScopedWindow) &&
       parsedScopedWindow is { ExpectedName: "Visual Studio Code", ExpectedControlType: "Window" } &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Hyperlink") &&
@@ -511,6 +515,7 @@ var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge �
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
 var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
 var selectListScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn danh sách Báo cáo tháng");
+var selectTreeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn cây Tài liệu");
 var typeFieldScope = ComputerUseTaskAuthorization.FromCurrentMessage("Nhập tìm kiếm tài liệu vào ô Tìm kiếm");
 var activateWindowScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chuyển sang cửa sổ Visual Studio Code");
 var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
@@ -535,6 +540,8 @@ Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
 Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cáo tháng" } &&
       selectListScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&
       !selectListScope.Allows(new("select_tab", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      selectTreeScope is { TargetControlType: "TreeItem", TargetLabel: "Tài liệu" } &&
+      selectTreeScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&
       typeFieldScope is { TargetControlType: "Edit", TargetLabel: "Tìm kiếm", RequestedValue: "tìm kiếm tài liệu" } &&
       typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "tìm kiếm tài liệu")) &&
       !typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "khác")) &&

@@ -87,7 +87,7 @@ public static class DesktopCompanionProtocol
             (action switch
             {
                 "activate-window" => expectedControlType != "Window",
-                "select-element" => expectedControlType is not ("TabItem" or "ListItem"),
+                "select-element" => expectedControlType is not ("TabItem" or "ListItem" or "TreeItem"),
                 "expand-element" or "collapse-element" => expectedControlType != "TreeItem",
                 "click-element" => expectedControlType != "Hyperlink",
                 "type-text" => expectedControlType != "Edit",
