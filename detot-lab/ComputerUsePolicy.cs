@@ -11,6 +11,7 @@ public static class ComputerUsePolicy
     private static readonly HashSet<string> NavigationActions = new(StringComparer.Ordinal)
     {
         "open-workspace",
+        "open-workspace-item",
         "open-github",
         "open-edge",
         "open-vscode",
@@ -71,7 +72,7 @@ public static class ComputerUsePolicy
     public static object Describe() => new
     {
         observe = new[] { "approved-applications", "desktop-ui", "github-account", "github-pull-requests" },
-        navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader" },
+        navigate = new[] { "open-workspace", "open-workspace-item (existing items under workspace only)", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader" },
         interact = new[] { "activate-window", "select-element", "type-text", "scroll-element", "press-key (navigation keys only)", "click-element (Hyperlink/TabItem only)" },
         readOnlyApplications = new[] { "Windows Settings", "Task Manager" },
         approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "double-click-element on ListItem/TreeItem", "keyboard-submit" },

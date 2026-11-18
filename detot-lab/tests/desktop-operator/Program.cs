@@ -115,6 +115,11 @@ var companionRequest = DesktopCompanionProtocol.SerializeRequest("open-vscode", 
 Check(DesktopCompanionProtocol.TryParseRequest(companionRequest, out var parsedCompanionRequest) &&
       parsedCompanionRequest?.Action == "open-vscode",
     "Desktop Companion protocol accepts a fixed action and opaque request ID");
+var workspaceItemRequest = DesktopCompanionProtocol.SerializeRequest("open-workspace-item", Guid.NewGuid().ToString("N"), value: "docs/audit.txt");
+Check(DesktopCompanionProtocol.TryParseRequest(workspaceItemRequest, out var parsedWorkspaceItem) &&
+      parsedWorkspaceItem?.Value == "docs/audit.txt" &&
+      !DesktopCompanionProtocol.IsValidArguments("open-workspace-item", null, "../private.txt", null),
+    "Explorer navigation accepts only a relative workspace item path");
 Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"open-edge\",\"requestId\":\"00000000000000000000000000000000\",\"command\":\"whoami\"}", out _) &&
       !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"run-shell\",\"requestId\":\"00000000000000000000000000000000\"}", out _),
     "Desktop Companion rejects injected properties and unknown actions");
@@ -419,7 +424,9 @@ var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUs
 Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
     "the exposed permission description keeps code execution disabled");
 Check(WindowsDesktopAutomation.ReadOpenApprovedApplications().All(name =>
-        name is "Visual Studio Code" or "Microsoft Edge" or "File Explorer" or "Visual Studio" or "Notepad" or "Windows Terminal"),
+        name is "Visual Studio Code" or "Microsoft Edge" or "File Explorer" or "Visual Studio" or "Notepad" or "Windows Terminal" or
+            "Windows Settings (read-only)" or "Task Manager (read-only)" or "Microsoft Word" or "Microsoft Excel" or
+            "Microsoft PowerPoint" or "PDF Reader"),
     "application observation returns only approved app identities");
 Check(DesktopOperator.SafeGitHubUrl("https://github.com/voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
     "HTTPS GitHub remote is canonicalized");
@@ -446,6 +453,16 @@ try
     Directory.CreateDirectory(Path.Combine(repo, "nested", "folder"));
     Check(DesktopOperator.FindRepositoryRoot(Path.Combine(repo, "nested", "folder")) == repo,
         "repository root is discovered from a nested path");
+    Directory.CreateDirectory(Path.Combine(repo, "documents"));
+    File.WriteAllText(Path.Combine(repo, "documents", "audit.txt"), "synthetic workspace item\n");
+    Check(DesktopOperator.ResolveWorkspaceItemPath(repo, "documents/audit.txt") == Path.Combine(repo, "documents", "audit.txt") &&
+          DesktopOperator.ResolveWorkspaceItemPath(repo, "documents") == Path.Combine(repo, "documents"),
+        "only existing workspace files and folders resolve for Explorer navigation");
+    Check(DesktopOperator.ResolveWorkspaceItemPath(repo, "../outside.txt") is null &&
+          DesktopOperator.ResolveWorkspaceItemPath(repo, Path.Combine(temporaryRoot, "outside.txt")) is null &&
+          DesktopOperator.ResolveWorkspaceItemPath(repo, "missing.txt") is null &&
+          !DesktopOperator.IsSafeWorkspaceRelativePath("documents/../outside.txt"),
+        "workspace navigation rejects traversal, rooted paths, and missing items");
     var status = await DesktopOperator.ReadWorkspaceStatusAsync(repo);
     Check(status.Available && status.Branch == "main", "read-only Git inspection returns the current branch");
     Check(status.HasTrackedChanges == true, "staged tracked change is detected without returning its path");

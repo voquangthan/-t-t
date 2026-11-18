@@ -150,6 +150,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key"
                 => InteractWithUi(request),
             "open-workspace" => OpenWorkspace(),
+            "open-workspace-item" => OpenWorkspaceItem(request.Value!),
             "open-edge" => OpenEdge("about:blank", "about:blank"),
             "open-github" => await OpenRepositoryPullsAsync(cancellationToken),
             "open-vscode" => OpenVsCode(),
@@ -658,6 +659,81 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var snapshot = WaitForExplorerWorkspace(TimeSpan.FromSeconds(8));
         return new { succeeded = snapshot.WorkspaceVerified, windowVerified = snapshot.WindowFound,
             workspaceVerified = snapshot.WorkspaceVerified, sessionId = snapshot.SessionId };
+    }
+
+    private object OpenWorkspaceItem(string relativePath)
+    {
+        var fullPath = DesktopOperator.ResolveWorkspaceItemPath(workspace, relativePath);
+        if (fullPath is null) return new { succeeded = false, status = "workspace_item_denied", windowVerified = false };
+        var isDirectory = Directory.Exists(fullPath);
+        try
+        {
+            var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+            start.ArgumentList.Add(isDirectory ? fullPath : $"/select,{fullPath}");
+            Process.Start(start);
+            var snapshot = WaitForExplorerItem(fullPath, isDirectory, TimeSpan.FromSeconds(8));
+            return new { succeeded = snapshot.ItemVerified, status = snapshot.ItemVerified ? "verified" : "item_not_verified",
+                windowVerified = snapshot.WindowFound, itemVerified = snapshot.ItemVerified,
+                itemName = Path.GetFileName(fullPath), itemType = isDirectory ? "directory" : "file",
+                sessionId = snapshot.SessionId };
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return new { succeeded = false, status = "launch_failed", windowVerified = false, itemVerified = false,
+                errorType = error.GetType().Name };
+        }
+    }
+
+    private sealed record ExplorerItemSnapshot(bool WindowFound, bool ItemVerified, int? SessionId);
+
+    private ExplorerItemSnapshot WaitForExplorerItem(string expectedPath, bool isDirectory, TimeSpan duration)
+    {
+        var until = DateTime.UtcNow + duration;
+        ExplorerItemSnapshot snapshot = new(false, false, null);
+        var expectedLocation = isDirectory ? expectedPath : Path.GetDirectoryName(expectedPath)!;
+        var expectedName = Path.GetFileName(expectedPath);
+        do
+        {
+            try
+            {
+                using var automation = new UIA3Automation();
+                foreach (var process in Process.GetProcessesByName("explorer"))
+                {
+                    using (process)
+                    {
+                        var session = SafeSessionId(process);
+                        if (session != Process.GetCurrentProcess().SessionId) continue;
+                        var windows = automation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
+                        foreach (var window in windows)
+                        {
+                            var addressPaths = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit)).Select(edit =>
+                            {
+                                try { return edit.Patterns.Value.Pattern.Value.Value; }
+                                catch { return null; }
+                            });
+                            var locationVerified = addressPaths.Any(path => path is not null && string.Equals(
+                                path.TrimEnd(['\\', '/']), expectedLocation.TrimEnd(['\\', '/']), StringComparison.OrdinalIgnoreCase));
+                            if (!locationVerified) continue;
+                            if (isDirectory)
+                            {
+                                snapshot = new(true, true, session);
+                                return snapshot;
+                            }
+                            var fileItems = window.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
+                                .Concat(window.FindAllDescendants(cf => cf.ByControlType(ControlType.DataItem)));
+                            var selected = fileItems.Any(item =>
+                                string.Equals(SafeName(item), expectedName, StringComparison.OrdinalIgnoreCase) &&
+                                SafeBoolean(() => item.Patterns.SelectionItem.Pattern.IsSelected.ValueOrDefault));
+                            snapshot = new(true, selected, session);
+                            if (selected) return snapshot;
+                        }
+                    }
+                }
+            }
+            catch { }
+            Thread.Sleep(250);
+        } while (DateTime.UtcNow < until);
+        return snapshot;
     }
 
     private object OpenApprovedApplication(string action)

@@ -221,6 +221,9 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
     if (ComputerUsePolicy.CanInteract(request.Action) &&
         !DesktopCompanionProtocol.IsValidArguments(request.Action!, request.TargetId, request.Text, request.Direction))
         return Results.BadRequest(new { error = "ID mục tiêu hoặc tham số thao tác UI không hợp lệ." });
+    if (request.Action == "open-workspace-item" &&
+        DesktopOperator.ResolveWorkspaceItemPath(desktopRepositoryRoot, request.Text) is null)
+        return Results.BadRequest(new { error = "Chỉ mở được file hoặc thư mục tồn tại bên trong workspace được cấu hình." });
 
     switch (request.Action)
     {

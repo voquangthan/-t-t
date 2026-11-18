@@ -34,6 +34,40 @@ public static class DesktopOperator
         return null;
     }
 
+    public static bool IsSafeWorkspaceRelativePath(string? relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Length > 512 ||
+            Path.IsPathRooted(relativePath) || relativePath.Contains(':') || relativePath.Contains('\0')) return false;
+        var segments = relativePath.Replace('\\', '/').Split('/');
+        return segments.Length > 0 && segments.All(segment => segment.Length > 0 && segment is not ("." or ".."));
+    }
+
+    public static string? ResolveWorkspaceItemPath(string? workspaceRoot, string? relativePath)
+    {
+        if (workspaceRoot is null || !Directory.Exists(workspaceRoot) || !IsSafeWorkspaceRelativePath(relativePath)) return null;
+        try
+        {
+            var root = Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var target = Path.GetFullPath(Path.Combine(root, relativePath!.Replace('\\', Path.DirectorySeparatorChar)
+                .Replace('/', Path.DirectorySeparatorChar)));
+            var prefix = root + Path.DirectorySeparatorChar;
+            if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                (!File.Exists(target) && !Directory.Exists(target))) return null;
+
+            var current = root;
+            foreach (var segment in Path.GetRelativePath(root, target).Split(Path.DirectorySeparatorChar))
+            {
+                current = Path.Combine(current, segment);
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return null;
+            }
+            return target;
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     public static async Task<WorkspaceStatus> ReadWorkspaceStatusAsync(string? repositoryRoot,
         CancellationToken cancellationToken = default)
     {

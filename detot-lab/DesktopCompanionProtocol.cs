@@ -11,7 +11,8 @@ public static class DesktopCompanionProtocol
         "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
         "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
         "select-element", "type-text", "scroll-element", "press-key", "open-settings",
-        "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader"
+        "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader",
+        "open-workspace-item"
     };
     private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
         { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key" };
@@ -82,6 +83,10 @@ public static class DesktopCompanionProtocol
         else if (action == "press-key")
         {
             if (value is null || !NavigationKeys.Contains(value) || direction is not null) return false;
+        }
+        else if (action == "open-workspace-item")
+        {
+            if (value is null || !DesktopOperator.IsSafeWorkspaceRelativePath(value) || direction is not null) return false;
         }
         else if (value is not null) return false;
         if (action == "scroll-element") return direction is "up" or "down";
