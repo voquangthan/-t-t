@@ -78,14 +78,15 @@ public static class DesktopCompanionProtocol
         string? expectedName = null, string? expectedControlType = null)
     {
         if ((expectedName is null) != (expectedControlType is null)) return false;
-        if (action is "select-element" or "expand-element" or "collapse-element" or "click-element" or "type-text")
+        if (action is "activate-window" or "select-element" or "expand-element" or "collapse-element" or "click-element" or "type-text")
         {
             if (expectedName is null || expectedControlType is null) return false;
         }
         if (expectedName is not null && (expectedName.Length is 0 or > 96 || expectedName.Any(char.IsControl) ||
-            expectedControlType is not ("TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Edit") ||
+            expectedControlType is not ("Window" or "TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Edit") ||
             (action switch
             {
+                "activate-window" => expectedControlType != "Window",
                 "select-element" => expectedControlType is not ("TabItem" or "ListItem"),
                 "expand-element" or "collapse-element" => expectedControlType != "TreeItem",
                 "click-element" => expectedControlType != "Hyperlink",

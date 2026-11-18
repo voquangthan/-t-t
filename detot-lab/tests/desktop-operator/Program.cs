@@ -264,12 +264,16 @@ var scopedHyperlinkRequest = DesktopCompanionProtocol.SerializeRequest("click-el
     uiTargetId, expectedName: "Tài liệu hướng dẫn", expectedControlType: "Hyperlink");
 var scopedTextRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"),
     uiTargetId, "tìm kiếm tài liệu", expectedName: "Tìm kiếm", expectedControlType: "Edit");
+var scopedWindowRequest = DesktopCompanionProtocol.SerializeRequest("activate-window", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Visual Studio Code", expectedControlType: "Window");
 Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
       parsedScopedSelection is { ExpectedName: "Lịch", ExpectedControlType: "TabItem" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedHyperlinkRequest, out var parsedScopedHyperlink) &&
       parsedScopedHyperlink is { ExpectedName: "Tài liệu hướng dẫn", ExpectedControlType: "Hyperlink" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedTextRequest, out var parsedScopedText) &&
       parsedScopedText is { ExpectedName: "Tìm kiếm", ExpectedControlType: "Edit", Value: "tìm kiếm tài liệu" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedWindowRequest, out var parsedScopedWindow) &&
+      parsedScopedWindow is { ExpectedName: "Visual Studio Code", ExpectedControlType: "Window" } &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Hyperlink") &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Edit") &&
       !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, "x", null, "Tìm kiếm", "TabItem") &&
@@ -508,6 +512,7 @@ var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file d
 var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
 var selectListScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn danh sách Báo cáo tháng");
 var typeFieldScope = ComputerUseTaskAuthorization.FromCurrentMessage("Nhập tìm kiếm tài liệu vào ô Tìm kiếm");
+var activateWindowScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chuyển sang cửa sổ Visual Studio Code");
 var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
 Check(unrelatedScope is null &&
       !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
@@ -532,8 +537,10 @@ Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cá
       !selectListScope.Allows(new("select_tab", TargetId: "0123456789abcdef0123456789abcdef")) &&
       typeFieldScope is { TargetControlType: "Edit", TargetLabel: "Tìm kiếm", RequestedValue: "tìm kiếm tài liệu" } &&
       typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "tìm kiếm tài liệu")) &&
-      !typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "khác")),
-    "named list selection and text entry bind one control label and exact user-provided value");
+      !typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "khác")) &&
+      activateWindowScope is { TargetControlType: "Window", TargetLabel: "Visual Studio Code" } &&
+      activateWindowScope.Allows(new("activate_window", TargetId: "0123456789abcdef0123456789abcdef")),
+    "named list selection, text entry, and window activation bind one label and exact allowed value");
 var tabTargetId = "1123456789abcdef0123456789abcdef";
 var tabTarget = new ComputerUseObservedTarget("TabItem", "Lịch", new(StringComparer.Ordinal) { "select-element" });
 var tabTurnState = new ComputerUseTurnState();
@@ -576,6 +583,19 @@ using (var overLimitNamedObservation = MakeObservationFixture([1], controlCount:
 using (var partialNamedObservation = MakeObservationFixture([1], partialStatus: true))
     Check(ComputerUseObservationFilter.Select(partialNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
         "partial observation status cannot be treated as proof of a unique named target");
+using (var namedWindowObservation = JsonDocument.Parse("""
+    {"observationStatus":"available","truncated":false,"windows":[
+      {"windowId":"0123456789abcdef0123456789abcdef","title":"Visual Studio Code","allowedActions":["activate-window"]},
+      {"windowId":"1123456789abcdef0123456789abcdef","title":"Edge","allowedActions":["activate-window"]}
+    ],"elements":[]}
+    """))
+{
+    var selection = ComputerUseObservationFilter.Select(namedWindowObservation.RootElement, activateWindowScope!);
+    Check(selection.Status == "ok" && selection.Elements.Length == 1 &&
+          selection.Elements[0].GetProperty("elementId").GetString() == "0123456789abcdef0123456789abcdef" &&
+          selection.WindowIds.SequenceEqual(["0123456789abcdef0123456789abcdef"]),
+        "named window activation resolves exactly one observed top-level window instead of an arbitrary UI element");
+}
 using (var cappedUnscopedObservation = MakeObservationFixture([]))
 {
     var selection = ComputerUseObservationFilter.Select(cappedUnscopedObservation.RootElement,

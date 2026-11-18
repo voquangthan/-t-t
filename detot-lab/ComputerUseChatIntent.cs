@@ -73,6 +73,7 @@ public static class ComputerUseTaskAuthorization
 {
     private static readonly (string Operation, string ControlType, Regex Pattern)[] NamedUiRequests =
     [
+        ("activate_window", "Window", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chuyển|đổi|focus|activate)\s+(?:sang\s+)?(?:cửa\s+sổ|window)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("select_tab", "TabItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+tab\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("select", "ListItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+(?:mục\s+)?(?:trong\s+)?danh\s+sách\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("expand", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở\s+rộng|expand)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
@@ -172,9 +173,20 @@ public static class ComputerUseObservationFilter
         var sourceTruncated = !observation.TryGetProperty("truncated", out var truncatedValue) ||
             truncatedValue.ValueKind != JsonValueKind.False;
         var sourcePartial = string.Equals(Read(observation, "observationStatus"), "partial", StringComparison.Ordinal);
-        var controls = observation.TryGetProperty("elements", out var elements) && elements.ValueKind == JsonValueKind.Array
-            ? elements.EnumerateArray().Take(CompanionElementLimit + 1).Select(element => element.Clone()).ToArray()
-            : [];
+        var controls = scope.TargetControlType == "Window"
+            ? observation.TryGetProperty("windows", out var windows) && windows.ValueKind == JsonValueKind.Array
+                ? windows.EnumerateArray().Take(CompanionElementLimit + 1).Select(window => JsonSerializer.SerializeToElement(new
+                    {
+                        elementId = Read(window, "windowId"), windowId = Read(window, "windowId"), controlType = "Window",
+                        name = Read(window, "title"), nameTruncated = false, isPassword = false,
+                        allowedActions = window.TryGetProperty("allowedActions", out var actions) && actions.ValueKind == JsonValueKind.Array
+                            ? actions.EnumerateArray().Where(action => action.ValueKind == JsonValueKind.String).Select(action => action.GetString()!).ToArray()
+                            : Array.Empty<string>()
+                    })).ToArray()
+                : []
+            : observation.TryGetProperty("elements", out var elements) && elements.ValueKind == JsonValueKind.Array
+                ? elements.EnumerateArray().Take(CompanionElementLimit + 1).Select(element => element.Clone()).ToArray()
+                : [];
         if (scope.TargetLabel is not null)
         {
             if (sourceTruncated || sourcePartial || controls.Length > CompanionElementLimit)
