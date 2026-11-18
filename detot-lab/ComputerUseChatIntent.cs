@@ -11,7 +11,9 @@ public static class ComputerUseChatIntent
     [
         ("open-vscode", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:vs\s*code|visual\s+studio\s+code)" + Suffix, Options)),
         ("open-edge", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:microsoft\s+)?edge" + Suffix, Options)),
-        ("open-workspace", new(Prefix + @"(?:mở|open)\s+(?:project\s+)?workspace" + Suffix, Options)),
+        // File Explorer is intentionally limited to the configured workspace. This makes a
+        // natural request useful without turning the Companion into an arbitrary path launcher.
+        ("open-workspace", new(Prefix + @"(?:mở|open)\s+(?:(?:project\s+)?workspace|(?:file\s+)?explorer|trình\s+quản\s+lý\s+tệp)" + Suffix, Options)),
         ("open-github", new(Prefix + @"(?:mở|open)\s+(?:(?:repository|repo)\s+)?github" + Suffix, Options)),
         ("open-settings", new(Prefix + @"(?:mở|open|launch)\s+(?:windows\s+)?settings(?:\s+(?:windows|của\s+windows))?" + Suffix, Options)),
         ("open-task-manager", new(Prefix + @"(?:mở|open|launch)\s+(?:windows\s+)?task\s+manager" + Suffix, Options)),

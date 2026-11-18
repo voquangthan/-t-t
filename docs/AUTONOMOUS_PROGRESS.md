@@ -1,12 +1,13 @@
 # Đệ Tốt Pro — checkpoint
 
-## Universal Windows Computer Use — named target revalidation pending remote CI (18/11/2026)
+## Universal Windows Computer Use — P1 protocol and CI review passed (19/11/2026)
 
-- Local commit `876f971` binds named UI actions to one target from the complete bounded 72-control observation before reducing the model payload. A source marked `partial`/truncated, a duplicate name, or an unreadable/changing live name/type now stops before interaction.
-- The Backend supplies the exact scope-derived label/type through the authenticated named-pipe protocol; Companion validates it immediately before invoking the UI action. Direct protocol actions for click/select/expand/collapse require this trusted pair.
-- Local evidence: `git diff --check` and GitHub Reader tests 11/11 PASS. The local runner has no .NET SDK, so C# build/operator tests require Windows CI.
-- Remote verification is currently blocked: GitHub connector returned HTTP 403 `account suspended`, while direct Git remote access cannot resolve `github.com`. The branch must not be pushed or marked CI/Work-reviewed until those external services recover.
-- Follow-on local commits `68ef991`, `6d6715c`, `19fda78`, and `c4f9b11` extend the same scoped path with ListItem/TreeItem selection, one non-password Edit text value, one exact top-level Window activation, and directional scrolling in one named Document. These additions remain pending the same C# CI and interactive Windows evidence.
+- The named-target interaction chain is now complete on `codex/universal-windows-ui`: Backend scope → authenticated named pipe → Companion live revalidation. Click/select/expand/collapse/text/scroll actions carry both the exact accessible label and control type; missing, duplicate, partial, truncated, unreadable, changed, disabled, offscreen, expired, or cross-session targets stop before interaction.
+- The direct local API follows the same protocol contract. A caller cannot bypass revalidation by posting only a target ID. Companion returns a refreshed observation after an attempted action and does not report success unless its operation-specific postcondition is observed.
+- PR #4 HEAD `249d27cec0303b46e06f29eda89d9230c241f405` has Windows Regression CI **success** (run `44332092497`) and ChatGPT Work **PASS** for that exact SHA. The review was verified through the GitHub App `chatgpt-codex-connector`; stale REVISE comments for earlier commits are not treated as current.
+- Local regression still available in this runner: `git diff --check` PASS and GitHub Reader tests 11/11 PASS. The local runner has no .NET SDK; C# compilation/operator tests are established by the successful Windows CI rather than claimed locally.
+- P1 now covers bounded UI observation, low-risk window activation, Tab/List/Tree selection in safe containers, navigation-only tree expansion/collapse, non-password Edit value entry, named Document scrolling, and Hyperlink invocation. Dangerous buttons, menu commands, account/settings changes, submits, arbitrary keys, file writes, shell commands and code execution remain blocked or require a future explicit approval path.
+- **Next scope:** P2 application adapters, starting with a read-only File Explorer observer and a workspace-only open path. Preserve P1 behavior and do not claim Windows UI E2E until the interactive smoke proves a real action and verified postcondition.
 
 ## Memory Core V2 — M2 Semantic Memory
 

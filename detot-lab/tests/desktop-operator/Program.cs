@@ -474,6 +474,9 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở Edge đi") == "open-edge",
     "a direct chat request maps to an allowlisted Edge action");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đệ Tốt, mở VS Code giúp t") == "open-vscode",
     "a direct chat request maps to an allowlisted VS Code action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở File Explorer") == "open-workspace" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở trình quản lý tệp") == "open-workspace",
+    "File Explorer requests open only the configured workspace rather than an arbitrary path");
 Check(ComputerUseChatIntent.DetectDirectRequest("Mở Windows Settings") == "open-settings" &&
       ComputerUseChatIntent.DetectDirectRequest("Open Task Manager") == "open-task-manager" &&
       ComputerUseChatIntent.DetectDirectRequest("Mở Word") == "open-word" &&
