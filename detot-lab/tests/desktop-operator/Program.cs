@@ -3,6 +3,7 @@ using System.IO.Pipes;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.DataProtection;
 
 var checks = 0;
 void Check(bool condition, string name)
@@ -387,6 +388,34 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở GitHub") is { } openGithub
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") is { } readGitHub &&
       ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(readGitHub)),
     "chat observation intents remain within the observation permission set");
+using (var validAgentAction = JsonDocument.Parse("{\"operation\":\"click\",\"targetId\":\"0123456789abcdef0123456789abcdef\"}"))
+    Check(ComputerUseAgentAction.TryParse(validAgentAction.RootElement, out var parsedAgentAction) &&
+          parsedAgentAction is { Operation: "click", TargetId: "0123456789abcdef0123456789abcdef" },
+        "agent Computer Use accepts only a typed action with an opaque target ID");
+using (var arbitraryAgentAction = JsonDocument.Parse("{\"operation\":\"run_shell\",\"value\":\"whoami\"}"))
+    Check(!ComputerUseAgentAction.TryParse(arbitraryAgentAction.RootElement, out _),
+        "agent Computer Use rejects arbitrary execution operations");
+using (var extraAgentAction = JsonDocument.Parse("{\"operation\":\"observe\",\"shell\":\"whoami\"}"))
+    Check(!ComputerUseAgentAction.TryParse(extraAgentAction.RootElement, out _),
+        "agent Computer Use rejects arguments outside its strict schema");
+using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text\",\"targetId\":\"stale\",\"value\":\"hello\"}"))
+    Check(!ComputerUseAgentAction.TryParse(badTargetAgentAction.RootElement, out _),
+        "agent Computer Use rejects non-opaque or malformed UI target IDs");
+var agentConsentRoot = Path.Combine(Path.GetTempPath(), "detot-computer-use-consent-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var agentConsent = new ConsentPolicy(agentConsentRoot, new EphemeralDataProtectionProvider());
+    var agentConsentSnapshot = agentConsent.Get("synthetic-owner");
+    Check(agentConsentSnapshot.Options.Any(option => option.Source == "computer_use" && option.Destination == "local_only") &&
+          agentConsentSnapshot.Options.Any(option => option.Source == "desktop_ui" && option.Destination == "DeepSeek") &&
+          !agentConsent.IsAllowed("synthetic-owner", "computer_use", "direct_request", "local_only") &&
+          !agentConsent.IsAllowed("synthetic-owner", "desktop_ui", "direct_request", "DeepSeek"),
+        "agent interaction and external UI observation permissions are explicit and disabled by default");
+}
+finally
+{
+    if (Directory.Exists(agentConsentRoot)) Directory.Delete(agentConsentRoot, recursive: true);
+}
 var computerUseExecutions = 0;
 Task<string> FakeComputerUseExecutor(string action)
 {

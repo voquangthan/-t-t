@@ -55,6 +55,8 @@ public sealed class ConsentPolicy
         new("google_weather_alerts", "Cảnh báo chính thức NCHMF qua Google", "proactive_analysis", "Phân tích chủ động", "external_service", "Tra cứu cảnh báo theo địa điểm đã chọn", "Cho phép gửi tọa độ Open-Meteo đã trả về cho thành phố/khu vực bạn tự chọn (không phải GPS hiện tại) tới Google Public Alerts để lấy cảnh báo chính thức từ NCHMF. Không gửi nội dung này tới DeepSeek; kết quả chỉ giữ tạm trong RAM tối đa 5 phút, không ghi vào file."),
         new("proactive_feedback", "Phản hồi gợi ý", "skill_learning", "Học từ phản hồi", "local_only", "Lưu phản hồi thời tiết cục bộ", "Cho phép đếm phản hồi hữu ích/bỏ qua và lưu gợi ý đã bỏ qua trên máy. Dữ liệu không gửi tới DeepSeek."),
         new("device_status", "Trạng thái thiết bị", "proactive_analysis", "Phân tích chủ động", "local_only", "Kiểm tra thiết bị cục bộ", "Chưa có bộ quan sát thiết bị; cấp quyền này chưa kích hoạt việc quét máy."),
+        new("computer_use", "Điều khiển Windows", "direct_request", "Yêu cầu trực tiếp", "local_only", "Cho phép Đệ Tốt thao tác giao diện", "Cho phép Chat dùng các hành động UI đã giới hạn khi bạn yêu cầu thao tác trên máy. Hành động cần duyệt vẫn bị chặn; không chạy lệnh hoặc mã tùy ý."),
+        new("desktop_ui", "Giao diện Windows", "direct_request", "Yêu cầu trực tiếp", "DeepSeek", "Gửi quan sát giao diện cho DeepSeek", "Cho phép gửi tên cửa sổ và nhãn accessibility cần thiết tới DeepSeek trong lượt Computer Use bạn yêu cầu. Không gửi ảnh màn hình, mật khẩu, cookie hoặc token."),
     ];
 
     private readonly object gate = new();

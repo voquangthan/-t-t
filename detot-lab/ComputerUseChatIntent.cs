@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 
 public static class ComputerUseChatIntent
 {
@@ -82,4 +83,53 @@ public static class ComputerUseChatDispatcher
             ? new(true, null)
             : new(false, authorizationFailure);
     }
+}
+
+public sealed record ComputerUseAgentAction(string Operation, string? TargetId = null,
+    string? Application = null, string? Value = null, string? Direction = null)
+{
+    private static readonly HashSet<string> Applications = new(StringComparer.Ordinal)
+        { "edge", "vscode", "workspace", "settings", "task-manager", "word", "excel", "powerpoint", "pdf-reader", "github" };
+
+    public static bool TryParse(JsonElement arguments, out ComputerUseAgentAction? action)
+    {
+        action = null;
+        if (arguments.ValueKind != JsonValueKind.Object) return false;
+        var properties = arguments.EnumerateObject().ToArray();
+        if (properties.Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
+            properties.Any(property => property.Name is not ("operation" or "targetId" or "application" or "value" or "direction")) ||
+            !arguments.TryGetProperty("operation", out var operationValue) || operationValue.ValueKind != JsonValueKind.String)
+            return false;
+
+        string? Read(string name)
+        {
+            if (!arguments.TryGetProperty(name, out var value)) return null;
+            return value.ValueKind == JsonValueKind.String ? value.GetString() : "\0invalid";
+        }
+        var operation = operationValue.GetString();
+        var targetId = Read("targetId");
+        var application = Read("application");
+        var value = Read("value");
+        var direction = Read("direction");
+        if (new[] { targetId, application, value, direction }.Any(item => item == "\0invalid")) return false;
+
+        var valid = operation switch
+        {
+            "observe" or "open_workspace" => targetId is null && application is null && value is null && direction is null,
+            "open_application" => targetId is null && application is not null && Applications.Contains(application) && value is null && direction is null,
+            "open_workspace_item" => targetId is null && application is null && value is { Length: > 0 and <= 512 } &&
+                DesktopOperator.IsSafeWorkspaceRelativePath(value) && direction is null,
+            "activate_window" or "click" or "select_tab" => ValidTarget(targetId) && application is null && value is null && direction is null,
+            "type_text" => ValidTarget(targetId) && application is null && value is { Length: > 0 and <= 512 } &&
+                !value.Contains('\r') && !value.Contains('\n') && !value.Contains('\0') && direction is null,
+            "scroll" => ValidTarget(targetId) && application is null && value is null && direction is ("up" or "down"),
+            "press_key" => ValidTarget(targetId) && application is null && value is ("ArrowLeft" or "ArrowRight" or "Home" or "End") && direction is null,
+            _ => false
+        };
+        if (!valid) return false;
+        action = new(operation!, targetId, application, value, direction);
+        return true;
+    }
+
+    private static bool ValidTarget(string? targetId) => targetId is not null && Guid.TryParseExact(targetId, "N", out _);
 }
