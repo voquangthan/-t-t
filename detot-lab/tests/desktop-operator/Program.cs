@@ -83,6 +83,10 @@ Check(ComputerUsePolicy.IsReadOnlyDesktopApplication("SystemSettings") &&
     "Settings and Task Manager stay observation-only while app activation remains available");
 Check(ComputerUsePolicy.CanInteract("press-key") && !ComputerUsePolicy.CanInteract("run-shell"),
     "UI interaction exposes a fixed key action while arbitrary commands stay denied");
+Check(ComputerUsePolicy.CanInteract("expand-element") && ComputerUsePolicy.CanInteract("collapse-element") &&
+      !ComputerUsePolicy.RequiresUiApproval("MenuItem", "expand-element") &&
+      ComputerUsePolicy.RequiresUiApproval("MenuItem", "click-element"),
+    "menu expansion is a bounded navigation action while selecting menu commands stays gated");
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
@@ -99,6 +103,24 @@ Check(safeUiActions.SequenceEqual(["click-element"]) &&
       !ComputerUsePolicy.CanPressKeyOn("Edit", "ArrowDown") &&
       ComputerUsePolicy.RequiresUiApproval("RadioButton", "press-key", "ArrowDown"),
     "key navigation is limited to non-selection edit controls; radio and combo key effects require approval");
+var collapsedMenuActions = ComputerUsePolicy.AllowedUiActions("MenuItem", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Collapsed");
+var expandedComboActions = ComputerUsePolicy.AllowedUiActions("ComboBox", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Expanded");
+Check(collapsedMenuActions.Contains("expand-element", StringComparer.Ordinal) &&
+      !collapsedMenuActions.Contains("collapse-element", StringComparer.Ordinal) &&
+      expandedComboActions.Contains("collapse-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("Button", true, false, false,
+          supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Collapsed")
+          .Contains("expand-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("MenuItem", true, false, false,
+          supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "LeafNode")
+          .Contains("expand-element", StringComparer.Ordinal),
+    "expand/collapse is advertised only for known navigation controls in a verified state");
 var keyEventOrder = new List<string>();
 ComputerUsePolicy.PressAndRelease("Tab", key => keyEventOrder.Add("down:" + key), key => keyEventOrder.Add("up:" + key));
 Check(keyEventOrder.SequenceEqual(["down:Tab", "up:Tab"]), "a key action always emits a matching release");
@@ -175,9 +197,13 @@ Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"type-text\",\"req
 Check(DesktopCompanionProtocol.TryParseRequest(
         DesktopCompanionProtocol.SerializeRequest("press-key", Guid.NewGuid().ToString("N"), uiTargetId, "ArrowDown"), out var keyRequest) &&
       keyRequest?.Value == "ArrowDown" &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeRequest("expand-element", Guid.NewGuid().ToString("N"), uiTargetId), out var expandRequest) &&
+      expandRequest?.Action == "expand-element" &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeRequest("collapse-element", Guid.NewGuid().ToString("N"), uiTargetId), out var collapseRequest) &&
+      collapseRequest?.Action == "collapse-element" &&
       !DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
       !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, new string('x', 513), null),
-    "UIA input enforces the navigation-key allowlist and text size bound");
+    "UIA input enforces navigation keys, stateful menu actions, and text size bounds");
 var cappedUiResponse = DesktopCompanionProtocol.SerializeResponse(Guid.NewGuid().ToString("N"), new { data = new string('x', 32 * 1024) });
 Check(cappedUiResponse.Length < 1024 && cappedUiResponse.Contains("response_too_large", StringComparison.Ordinal),
     "desktop IPC caps oversized UI observations to a bounded protocol error");
@@ -392,6 +418,10 @@ using (var validAgentAction = JsonDocument.Parse("{\"operation\":\"click\",\"tar
     Check(ComputerUseAgentAction.TryParse(validAgentAction.RootElement, out var parsedAgentAction) &&
           parsedAgentAction is { Operation: "click", TargetId: "0123456789abcdef0123456789abcdef" },
         "agent Computer Use accepts only a typed action with an opaque target ID");
+using (var validExpandAction = JsonDocument.Parse("{\"operation\":\"expand\",\"targetId\":\"0123456789abcdef0123456789abcdef\"}"))
+    Check(ComputerUseAgentAction.TryParse(validExpandAction.RootElement, out var parsedExpandAction) &&
+          parsedExpandAction is { Operation: "expand", TargetId: "0123456789abcdef0123456789abcdef" },
+        "agent Computer Use accepts a bounded observed-target menu expansion");
 using (var arbitraryAgentAction = JsonDocument.Parse("{\"operation\":\"run_shell\",\"value\":\"whoami\"}"))
     Check(!ComputerUseAgentAction.TryParse(arbitraryAgentAction.RootElement, out _),
         "agent Computer Use rejects arbitrary execution operations");

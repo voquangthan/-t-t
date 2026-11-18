@@ -147,7 +147,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         {
             "observe-applications" => ObserveApplications(),
             "observe-desktop-ui" => ObserveDesktopUi(),
-            "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key"
+            "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key" or "expand-element" or "collapse-element"
                 => InteractWithUi(request),
             "open-workspace" => OpenWorkspace(),
             "open-workspace-item" => OpenWorkspaceItem(request.Value!),
@@ -369,6 +369,14 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     ComputerUsePolicy.PressAndRelease(key, value => Keyboard.Press(value), value => Keyboard.Release(value));
                     verified = false;
                     break;
+                case "expand-element":
+                    target.Element.Patterns.ExpandCollapse.Pattern.Expand();
+                    verified = target.Element.Patterns.ExpandCollapse.Pattern.State.ValueOrDefault == ExpandCollapseState.Expanded;
+                    break;
+                case "collapse-element":
+                    target.Element.Patterns.ExpandCollapse.Pattern.Collapse();
+                    verified = target.Element.Patterns.ExpandCollapse.Pattern.State.ValueOrDefault == ExpandCollapseState.Collapsed;
+                    break;
                 default:
                     return new { succeeded = false, status = "action_not_allowed", verification = "not_run" };
             }
@@ -399,9 +407,14 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         {
             var valueSupported = element.Patterns.Value.IsSupported;
             var valueReadOnly = valueSupported && element.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
+            var expandCollapseSupported = element.Patterns.ExpandCollapse.IsSupported;
+            var expandCollapseState = expandCollapseSupported
+                ? element.Patterns.ExpandCollapse.Pattern.State.ValueOrDefault.ToString()
+                : null;
             return ComputerUsePolicy.AllowedUiActions(controlType, enabled, offscreen, isPassword,
                 element.Patterns.Invoke.IsSupported, element.Patterns.SelectionItem.IsSupported,
-                valueSupported, valueReadOnly, element.Patterns.Scroll.IsSupported);
+                valueSupported, valueReadOnly, element.Patterns.Scroll.IsSupported,
+                expandCollapseSupported, expandCollapseState);
         }
         catch { return []; }
     }

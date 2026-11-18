@@ -12,10 +12,10 @@ public static class DesktopCompanionProtocol
         "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
         "select-element", "type-text", "scroll-element", "press-key", "open-settings",
         "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader",
-        "open-workspace-item"
+        "open-workspace-item", "expand-element", "collapse-element"
     };
     private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
-        { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key" };
+        { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key", "expand-element", "collapse-element" };
     private static readonly HashSet<string> NavigationKeys = new(StringComparer.Ordinal)
         { "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" };
 
