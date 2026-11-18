@@ -3,6 +3,7 @@ using System.IO.Pipes;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.DataProtection;
 
 var checks = 0;
 void Check(bool condition, string name)
@@ -82,6 +83,10 @@ Check(ComputerUsePolicy.IsReadOnlyDesktopApplication("SystemSettings") &&
     "Settings and Task Manager stay observation-only while app activation remains available");
 Check(ComputerUsePolicy.CanInteract("press-key") && !ComputerUsePolicy.CanInteract("run-shell"),
     "UI interaction exposes a fixed key action while arbitrary commands stay denied");
+Check(ComputerUsePolicy.CanInteract("expand-element") && ComputerUsePolicy.CanInteract("collapse-element") &&
+      !ComputerUsePolicy.RequiresUiApproval("MenuItem", "expand-element") &&
+      ComputerUsePolicy.RequiresUiApproval("MenuItem", "click-element"),
+    "menu expansion is a bounded navigation action while selecting menu commands stays gated");
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
@@ -98,6 +103,73 @@ Check(safeUiActions.SequenceEqual(["click-element"]) &&
       !ComputerUsePolicy.CanPressKeyOn("Edit", "ArrowDown") &&
       ComputerUsePolicy.RequiresUiApproval("RadioButton", "press-key", "ArrowDown"),
     "key navigation is limited to non-selection edit controls; radio and combo key effects require approval");
+var collapsedMenuActions = ComputerUsePolicy.AllowedUiActions("MenuItem", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Collapsed");
+var expandedComboActions = ComputerUsePolicy.AllowedUiActions("ComboBox", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Expanded");
+Check(collapsedMenuActions.Contains("expand-element", StringComparer.Ordinal) &&
+      !collapsedMenuActions.Contains("collapse-element", StringComparer.Ordinal) &&
+      expandedComboActions.Contains("collapse-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("Button", true, false, false,
+          supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Collapsed")
+          .Contains("expand-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("MenuItem", true, false, false,
+          supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "LeafNode")
+          .Contains("expand-element", StringComparer.Ordinal),
+    "expand/collapse is advertised only for known navigation controls in a verified state");
+var safeListSelection = ComputerUsePolicy.AllowedUiActions("ListItem", true, false, false,
+    supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, safeSelectionContainer: true);
+var safeTreeSelection = ComputerUsePolicy.AllowedUiActions("TreeItem", true, false, false,
+    supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, safeSelectionContainer: true);
+Check(safeListSelection.Contains("select-element", StringComparer.Ordinal) &&
+      safeTreeSelection.Contains("select-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("RadioButton", true, false, false,
+          supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false).Contains("select-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element", safeSelectionContainer: true) &&
+      !ComputerUsePolicy.RequiresUiApproval("TreeItem", "select-element", safeSelectionContainer: true) &&
+      ComputerUsePolicy.RequiresUiApproval("RadioButton", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("ComboBox", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element") &&
+      ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: false) &&
+      ComputerUsePolicy.IsSafeSelectionContext("TreeItem", "Tree", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: true) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", "ComboBox", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("TreeItem", "Tree", insideComboBox: true) &&
+      new[] { "ListItem", "List", "ComboBox", "Window" }.Any(ComputerUsePolicy.IsUnsafeSelectionAncestor),
+    "selection is permitted only for a proven list/tree/tab container outside ComboBox ancestry");
+Check(ComputerUsePolicy.IsSafeSelectionContext("TabItem", "Tab", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", null, insideComboBox: false) &&
+      !ComputerUsePolicy.CanSelectInContext("ListItem", "select-element", safeSelectionContainer: false),
+    "unknown or changed selection containers fail closed at action time");
+Check(ComputerUsePolicy.MatchesExpectedUiTarget("TabItem", "Lịch", "TabItem", "Lịch") &&
+      !ComputerUsePolicy.MatchesExpectedUiTarget("TabItem", "Gmail", "TabItem", "Lịch") &&
+      !ComputerUsePolicy.MatchesExpectedUiTarget("Hyperlink", null, "Hyperlink", "Help"),
+    "a UI target is valid only while its live readable name and control type still match the authorized scope");
+var sameLabelActionCount = 0;
+var changedLabelActionCount = 0;
+var unreadableLabelActionCount = 0;
+var sameLabelRan = ComputerUsePolicy.TryRunExpectedUiAction("TabItem", "Lịch",
+    () => (true, "TabItem", "Lịch"), () => { sameLabelActionCount++; return "ran"; }, out var sameLabelResult, out _);
+var changedLabelRan = ComputerUsePolicy.TryRunExpectedUiAction("Hyperlink", "Docs",
+    () => (true, "Hyperlink", "Other link"), () => { changedLabelActionCount++; return "ran"; }, out _, out var changedLabelStatus);
+var unreadableLabelRan = ComputerUsePolicy.TryRunExpectedUiAction("TabItem", "Lịch",
+    () => (false, "TabItem", (string?)null), () => { unreadableLabelActionCount++; return "ran"; }, out _, out var unreadableLabelStatus);
+Check(sameLabelRan && sameLabelResult == "ran" && sameLabelActionCount == 1 &&
+      !changedLabelRan && changedLabelActionCount == 0 && changedLabelStatus == "target_stale" &&
+      !unreadableLabelRan && unreadableLabelActionCount == 0 && unreadableLabelStatus == "target_state_unavailable",
+    "live label/type revalidation runs immediately before the action and rejects changed or unreadable targets");
+var safeAtObservation = ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: false);
+var unsafeAtAction = ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: true);
+Check(safeAtObservation && !unsafeAtAction &&
+      ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element", safeSelectionContainer: unsafeAtAction),
+    "selection is denied when its ComboBox ancestry changes between observation and execution");
 var keyEventOrder = new List<string>();
 ComputerUsePolicy.PressAndRelease("Tab", key => keyEventOrder.Add("down:" + key), key => keyEventOrder.Add("up:" + key));
 Check(keyEventOrder.SequenceEqual(["down:Tab", "up:Tab"]), "a key action always emits a matching release");
@@ -174,9 +246,29 @@ Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"type-text\",\"req
 Check(DesktopCompanionProtocol.TryParseRequest(
         DesktopCompanionProtocol.SerializeRequest("press-key", Guid.NewGuid().ToString("N"), uiTargetId, "ArrowDown"), out var keyRequest) &&
       keyRequest?.Value == "ArrowDown" &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeRequest("expand-element", Guid.NewGuid().ToString("N"), uiTargetId,
+          expectedName: "Tài liệu", expectedControlType: "TreeItem"), out var expandRequest) &&
+      expandRequest?.Action == "expand-element" &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeRequest("collapse-element", Guid.NewGuid().ToString("N"), uiTargetId,
+          expectedName: "Tài liệu", expectedControlType: "TreeItem"), out var collapseRequest) &&
+      collapseRequest?.Action == "collapse-element" &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null) &&
+      !DesktopCompanionProtocol.IsValidArguments("expand-element", uiTargetId, null, null) &&
+      !DesktopCompanionProtocol.IsValidArguments("click-element", uiTargetId, null, null) &&
       !DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
       !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, new string('x', 513), null),
-    "UIA input enforces the navigation-key allowlist and text size bound");
+    "UIA input enforces navigation keys, stateful menu actions, and text size bounds");
+var scopedSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Lịch", expectedControlType: "TabItem");
+var scopedHyperlinkRequest = DesktopCompanionProtocol.SerializeRequest("click-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Tài liệu hướng dẫn", expectedControlType: "Hyperlink");
+Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
+      parsedScopedSelection is { ExpectedName: "Lịch", ExpectedControlType: "TabItem" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedHyperlinkRequest, out var parsedScopedHyperlink) &&
+      parsedScopedHyperlink is { ExpectedName: "Tài liệu hướng dẫn", ExpectedControlType: "Hyperlink" } &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Hyperlink") &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", null),
+    "the authenticated Companion protocol carries a bounded backend-authorized target label/type pair and rejects mismatches");
 var cappedUiResponse = DesktopCompanionProtocol.SerializeResponse(Guid.NewGuid().ToString("N"), new { data = new string('x', 32 * 1024) });
 Check(cappedUiResponse.Length < 1024 && cappedUiResponse.Contains("response_too_large", StringComparison.Ordinal),
     "desktop IPC caps oversized UI observations to a bounded protocol error");
@@ -387,6 +479,138 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở GitHub") is { } openGithub
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") is { } readGitHub &&
       ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(readGitHub)),
     "chat observation intents remain within the observation permission set");
+using (var validAgentAction = JsonDocument.Parse("{\"operation\":\"click\",\"targetId\":\"0123456789abcdef0123456789abcdef\"}"))
+    Check(ComputerUseAgentAction.TryParse(validAgentAction.RootElement, out var parsedAgentAction) &&
+          parsedAgentAction is { Operation: "click", TargetId: "0123456789abcdef0123456789abcdef" },
+        "agent Computer Use accepts only a typed action with an opaque target ID");
+using (var validExpandAction = JsonDocument.Parse("{\"operation\":\"expand\",\"targetId\":\"0123456789abcdef0123456789abcdef\"}"))
+    Check(ComputerUseAgentAction.TryParse(validExpandAction.RootElement, out var parsedExpandAction) &&
+          parsedExpandAction is { Operation: "expand", TargetId: "0123456789abcdef0123456789abcdef" },
+        "agent Computer Use accepts a bounded observed-target menu expansion");
+using (var arbitraryAgentAction = JsonDocument.Parse("{\"operation\":\"run_shell\",\"value\":\"whoami\"}"))
+    Check(!ComputerUseAgentAction.TryParse(arbitraryAgentAction.RootElement, out _),
+        "agent Computer Use rejects arbitrary execution operations");
+using (var extraAgentAction = JsonDocument.Parse("{\"operation\":\"observe\",\"shell\":\"whoami\"}"))
+    Check(!ComputerUseAgentAction.TryParse(extraAgentAction.RootElement, out _),
+        "agent Computer Use rejects arguments outside its strict schema");
+using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text\",\"targetId\":\"stale\",\"value\":\"hello\"}"))
+    Check(!ComputerUseAgentAction.TryParse(badTargetAgentAction.RootElement, out _),
+        "agent Computer Use rejects non-opaque or malformed UI target IDs");
+var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay trời thế nào?");
+var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
+var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
+var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
+var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
+Check(unrelatedScope is null &&
+      !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
+      !unrelatedFakeGatewayCalls.Any(name => ComputerUseTaskAuthorization.ShouldDispatchToolCall(unrelatedScope, name)),
+    "unrelated chat exposes no UI labels and cannot dispatch a fake tool call even when both consent grants exist");
+Check(openEdgeScope is { } scopedEdge && scopedEdge.Allows(new("observe")) &&
+      ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: true, observationConsent: true) &&
+      scopedEdge.Allows(new("open_application", Application: "edge")) &&
+      !scopedEdge.Allows(new("open_application", Application: "vscode")) &&
+      !scopedEdge.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "detot_computer_use") &&
+      !ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "other_tool"),
+    "a direct desktop request authorizes only its matching application and required observation");
+Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
+      openFileScope.Allows(new("observe")) &&
+      openFileScope.Allows(new("open_workspace_item", Value: "docs/audit.txt")) &&
+      !openFileScope.Allows(new("open_workspace_item", Value: "docs/other.txt")) &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Mở file ../private.txt") is null,
+    "workspace navigation scope binds the exact safe relative path requested by the current user message");
+var tabTargetId = "1123456789abcdef0123456789abcdef";
+var tabTarget = new ComputerUseObservedTarget("TabItem", "Lịch", new(StringComparer.Ordinal) { "select-element" });
+var tabTurnState = new ComputerUseTurnState();
+Check(selectTabScope is { TargetControlType: "TabItem", TargetLabel: "Lịch" } &&
+      tabTurnState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget> { [tabTargetId] = tabTarget }, selectTabScope) &&
+      tabTurnState.CanAct(new("select_tab", TargetId: tabTargetId), selectTabScope) &&
+      !tabTurnState.CanAct(new("click", TargetId: tabTargetId), selectTabScope),
+    "an explicit tab request exposes only the single named TabItem and its selection operation");
+JsonDocument MakeObservationFixture(int[] matchingIndices, bool truncated = false, int controlCount = 27, bool partialStatus = false)
+{
+    var controls = Enumerable.Range(0, controlCount).Select(index => new
+    {
+        elementId = $"target-{index}", windowId = $"window-{index % 3}", controlType = "TabItem",
+        name = matchingIndices.Contains(index) ? "Lịch" : $"Tab {index}", nameTruncated = false, isPassword = false,
+        allowedActions = new[] { "select-element" }
+    }).ToArray();
+    return JsonDocument.Parse(JsonSerializer.Serialize(new { observationStatus = truncated || partialStatus ? "partial" : "available", truncated, elements = controls }));
+}
+using (var duplicateAcrossBackendLimit = MakeObservationFixture([1, 25]))
+{
+    var selection = ComputerUseObservationFilter.Select(duplicateAcrossBackendLimit.RootElement, selectTabScope!);
+    Check(selection.Status == "target_ambiguous" && selection.Elements.Length == 0 &&
+          !ComputerUseObservationFilter.IsUsableForNamedAction(selection),
+        "duplicate matches across all 27 bounded controls are rejected by the same gate that prevents action dispatch");
+}
+using (var uniqueAfterBackendLimit = MakeObservationFixture([25]))
+{
+    var selection = ComputerUseObservationFilter.Select(uniqueAfterBackendLimit.RootElement, selectTabScope!);
+    Check(selection.Status == "ok" && selection.Elements.Length == 1 &&
+          selection.Elements[0].GetProperty("elementId").GetString() == "target-25" &&
+          ComputerUseObservationFilter.IsUsableForNamedAction(selection),
+        "a unique matching control after the former 24-item cutoff remains discoverable");
+}
+using (var truncatedNamedObservation = MakeObservationFixture([1], truncated: true))
+    Check(ComputerUseObservationFilter.Select(truncatedNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
+        "a truncated source observation cannot be used to claim a unique target");
+using (var overLimitNamedObservation = MakeObservationFixture([1], controlCount: 73))
+    Check(ComputerUseObservationFilter.Select(overLimitNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
+        "a response exceeding the Companion's documented 72-control bound fails closed for named actions");
+using (var partialNamedObservation = MakeObservationFixture([1], partialStatus: true))
+    Check(ComputerUseObservationFilter.Select(partialNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
+        "partial observation status cannot be treated as proof of a unique named target");
+using (var cappedUnscopedObservation = MakeObservationFixture([]))
+{
+    var selection = ComputerUseObservationFilter.Select(cappedUnscopedObservation.RootElement,
+        new ComputerUseTaskScope("open-edge", ["observe", "open_application"], "edge"));
+    Check(selection.Elements.Length == 24 && selection.Truncated && selection.Status == "partial",
+        "the unscoped observation payload marks Backend-side control truncation accurately");
+}
+var ambiguousTabState = new ComputerUseTurnState();
+Check(selectTabScope is not null && !ambiguousTabState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { [tabTargetId] = tabTarget, ["2123456789abcdef0123456789abcdef"] = tabTarget }, selectTabScope) &&
+      !ambiguousTabState.CanAct(new("select_tab", TargetId: tabTargetId), selectTabScope),
+    "duplicate matching UI labels stop before selection instead of choosing arbitrarily");
+var failedObserveState = new ComputerUseTurnState();
+Check(openEdgeScope is not null && !failedObserveState.RecordObservation("unavailable", new Dictionary<string, ComputerUseObservedTarget>(), openEdgeScope) &&
+      !failedObserveState.CanAct(new("open_application", Application: "edge"), openEdgeScope) &&
+      !failedObserveState.CanAcceptModelCompletion,
+    "failed observation stops the turn before actions or model success claims");
+var failedActionState = new ComputerUseTurnState();
+var testClickScope = new ComputerUseTaskScope("test", ["observe", "click"]);
+var clickTarget = new ComputerUseObservedTarget("Hyperlink", "Help", new(StringComparer.Ordinal) { "click-element" });
+Check(failedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { ["0123456789abcdef0123456789abcdef"] = clickTarget }, testClickScope) &&
+      failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      !failedActionState.RecordAction("not_verified", false, "not_verified") &&
+      !failedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>(), testClickScope) &&
+      !failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      !failedActionState.CanAcceptModelCompletion,
+    "an unverified action cannot be followed by observe/action or accepted as model completion");
+var verifiedActionState = new ComputerUseTurnState();
+Check(verifiedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { ["0123456789abcdef0123456789abcdef"] = clickTarget }, testClickScope) &&
+      verifiedActionState.RecordAction("completed", true, "verified") &&
+      !verifiedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      verifiedActionState.CanAct(new("observe"), testClickScope),
+    "a verified action invalidates old targets and requires a new observation before another action");
+var agentConsentRoot = Path.Combine(Path.GetTempPath(), "detot-computer-use-consent-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var agentConsent = new ConsentPolicy(agentConsentRoot, new EphemeralDataProtectionProvider());
+    var agentConsentSnapshot = agentConsent.Get("synthetic-owner");
+    Check(agentConsentSnapshot.Options.Any(option => option.Source == "computer_use" && option.Destination == "local_only") &&
+          agentConsentSnapshot.Options.Any(option => option.Source == "desktop_ui" && option.Destination == "DeepSeek") &&
+          !agentConsent.IsAllowed("synthetic-owner", "computer_use", "direct_request", "local_only") &&
+          !agentConsent.IsAllowed("synthetic-owner", "desktop_ui", "direct_request", "DeepSeek"),
+        "agent interaction and external UI observation permissions are explicit and disabled by default");
+}
+finally
+{
+    if (Directory.Exists(agentConsentRoot)) Directory.Delete(agentConsentRoot, recursive: true);
+}
 var computerUseExecutions = 0;
 Task<string> FakeComputerUseExecutor(string action)
 {

@@ -147,7 +147,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         {
             "observe-applications" => ObserveApplications(),
             "observe-desktop-ui" => ObserveDesktopUi(),
-            "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key"
+            "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key" or "expand-element" or "collapse-element"
                 => InteractWithUi(request),
             "open-workspace" => OpenWorkspace(),
             "open-workspace-item" => OpenWorkspaceItem(request.Value!),
@@ -206,11 +206,13 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 {
                     var controlType = SafeControlType(node.Element);
                     var isPassword = SafeBoolean(() => node.Element.Properties.IsPassword.ValueOrDefault);
+                    var rawName = isPassword ? "" : SafeName(node.Element);
                     var enabled = SafeBoolean(() => node.Element.Properties.IsEnabled.ValueOrDefault);
                     var offscreen = SafeBoolean(() => node.Element.Properties.IsOffscreen.ValueOrDefault);
+                    var safeSelectionContainer = IsSafeSelectionContext(node.Element, controlType);
                     var allowed = ComputerUsePolicy.IsReadOnlyDesktopApplication(processName)
                         ? Array.Empty<string>()
-                        : GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword);
+                        : GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword, safeSelectionContainer);
                     var elementId = NewTargetId();
                     elementIds[node.Element] = elementId;
                     uiTargets[elementId] = new(node.Element, item.Handle, item.ProcessId, sessionId, controlType,
@@ -222,7 +224,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         parentId = node.Parent is not null && elementIds.TryGetValue(node.Parent, out var parentId) ? parentId : windowId,
                         depth = node.Depth,
                         controlType,
-                        name = isPassword ? "[redacted]" : Clip(SafeName(node.Element), 96),
+                        name = isPassword ? "[redacted]" : Clip(rawName, 96),
+                        nameTruncated = !isPassword && rawName.Length > 96,
                         automationId = Clip(SafeAutomationId(node.Element), 80),
                         enabled,
                         offscreen,
@@ -230,7 +233,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         isPassword,
                         bounds = SafeBounds(node.Element),
                         allowedActions = allowed,
-                        approvalRequiredActions = GetApprovalActions(controlType)
+                        approvalRequiredActions = GetApprovalActions(controlType,
+                            node.Element.Patterns.SelectionItem.IsSupported, safeSelectionContainer)
                     });
                 }
             }
@@ -282,6 +286,11 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             uiTargets.Remove(request.TargetId);
             return new { succeeded = false, status = "target_stale", verification = "not_run" };
         }
+        if (!ExpectedUiTargetMatches(target.Element, request))
+        {
+            uiTargets.Remove(request.TargetId);
+            return new { succeeded = false, status = "target_stale", verification = "not_run" };
+        }
         if (!TryReadBoolean(() => target.Element.Properties.IsEnabled.ValueOrDefault, out var currentlyEnabled) ||
             !TryReadBoolean(() => target.Element.Properties.IsOffscreen.ValueOrDefault, out var currentlyOffscreen))
             return new { succeeded = false, status = "target_state_unavailable", verification = "not_run" };
@@ -299,82 +308,35 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var freshAllowedActions = currentControlType == "Window"
             ? new[] { "activate-window" }
             : GetAllowedUiActions(target.Element, currentControlType, currentlyEnabled,
-                currentlyOffscreen, passwordKnown ? isPassword : true);
+                currentlyOffscreen, passwordKnown ? isPassword : true,
+                IsSafeSelectionContext(target.Element, currentControlType));
         if (!freshAllowedActions.Contains(request.Action, StringComparer.Ordinal) ||
             (request.Action == "press-key" && !ComputerUsePolicy.CanPressKeyOn(currentControlType, request.Value)))
             return new { succeeded = false,
-                status = IsApprovalRequired(currentControlType, request.Action, request.Value) ? "approval_required" : "action_not_allowed",
+                status = IsApprovalRequired(currentControlType, request.Action, request.Value,
+                    IsSafeSelectionContext(target.Element, currentControlType)) ? "approval_required" : "action_not_allowed",
                 verification = "not_run" };
+        if (!ExpectedUiTargetMatches(target.Element, request))
+        {
+            uiTargets.Remove(request.TargetId);
+            return new { succeeded = false, status = "target_stale", verification = "not_run" };
+        }
         try
         {
-            var verified = false;
-            switch (request.Action)
-            {
-                case "activate-window":
-                    target.Element.Focus();
-                    verified = GetForegroundWindow() == target.WindowHandle;
-                    break;
-                case "select-element":
-                    target.Element.Patterns.SelectionItem.Pattern.Select();
-                    verified = target.Element.Patterns.SelectionItem.Pattern.IsSelected.ValueOrDefault;
-                    break;
-                case "click-element":
-                    target.Element.Click();
-                    break;
-                case "double-click-element":
-                    return new { succeeded = false, status = "approval_required", verification = "not_run" };
-                case "type-text":
-                    var setStatus = ComputerUsePolicy.TrySetProtectedTextValue(
-                        SafeControlType(target.Element) == "Edit",
-                        () => target.Element.Patterns.Value.IsSupported,
-                        () =>
-                        {
-                            var supported = target.Element.Properties.IsPassword.TryGetValue(out var value);
-                            return (supported, value);
-                        },
-                        () =>
-                        {
-                            var supported = target.Element.Patterns.Value.Pattern.IsReadOnly.TryGetValue(out var value);
-                            return (supported, value);
-                        },
-                        value => target.Element.Patterns.Value.Pattern.SetValue(value),
-                        request.Value!);
-                    if (setStatus != "set") return new { succeeded = false, status = setStatus, verification = "not_run" };
-                    verified = string.Equals(target.Element.Patterns.Value.Pattern.Value.Value, request.Value, StringComparison.Ordinal);
-                    break;
-                case "scroll-element":
-                    var scroll = target.Element.Patterns.Scroll.Pattern;
-                    var before = scroll.VerticalScrollPercent.ValueOrDefault;
-                    scroll.Scroll(ScrollAmount.NoAmount, request.Direction == "down" ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement);
-                    var after = scroll.VerticalScrollPercent.ValueOrDefault;
-                    verified = Math.Abs(after - before) > 0.01;
-                    break;
-                case "press-key":
-                    target.Element.Focus();
-                    if (GetForegroundWindow() != target.WindowHandle ||
-                        !SafeBoolean(() => target.Element.Properties.HasKeyboardFocus.ValueOrDefault))
-                        return new { succeeded = false, status = "target_focus_not_verified", verification = "not_run" };
-                    var key = request.Value switch
+            if (!ComputerUsePolicy.TryRunExpectedUiAction(request.ExpectedControlType, request.ExpectedName,
+                    () =>
                     {
-                        "ArrowUp" => VirtualKeyShort.UP,
-                        "ArrowDown" => VirtualKeyShort.DOWN,
-                        "ArrowLeft" => VirtualKeyShort.LEFT,
-                        "ArrowRight" => VirtualKeyShort.RIGHT,
-                        "Home" => VirtualKeyShort.HOME,
-                        "End" => VirtualKeyShort.END,
-                        "PageUp" => VirtualKeyShort.PRIOR,
-                        "PageDown" => VirtualKeyShort.NEXT,
-                        _ => throw new InvalidOperationException("Key is not on the navigation allowlist.")
-                    };
-                    ComputerUsePolicy.PressAndRelease(key, value => Keyboard.Press(value), value => Keyboard.Release(value));
-                    verified = false;
-                    break;
-                default:
-                    return new { succeeded = false, status = "action_not_allowed", verification = "not_run" };
+                        var controlType = SafeControlType(target.Element);
+                        return TryReadElementName(target.Element, out var liveName)
+                            ? (true, controlType, liveName)
+                            : (false, controlType, (string?)null);
+                    },
+                    () => PerformUiAction(target, request), out var result, out var validationStatus))
+            {
+                uiTargets.Remove(request.TargetId);
+                return new { succeeded = false, status = validationStatus, verification = "not_run" };
             }
-            var refreshed = ObserveDesktopUi();
-            return new { succeeded = true, status = "performed", verification = ComputerUsePolicy.VerificationStatus(verified),
-                targetInvalidated = true, refreshedObservation = refreshed };
+            return result!;
         }
         catch (Exception error)
         {
@@ -382,6 +344,95 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             return new { succeeded = false, status = "action_failed", errorType = error.GetType().Name,
                 verification = "not_verified", targetInvalidated = true };
         }
+    }
+
+    private static bool ExpectedUiTargetMatches(AutomationElement element, DesktopCompanionProtocol.Request request)
+    {
+        if (request.ExpectedName is null && request.ExpectedControlType is null) return true;
+        if (request.ExpectedName is null || request.ExpectedControlType is null ||
+            !TryReadElementName(element, out var currentName)) return false;
+        return ComputerUsePolicy.MatchesExpectedUiTarget(SafeControlType(element), currentName,
+            request.ExpectedControlType, request.ExpectedName);
+    }
+
+    private object PerformUiAction(UiTarget target, DesktopCompanionProtocol.Request request)
+    {
+        var verified = false;
+        switch (request.Action)
+        {
+            case "activate-window":
+                target.Element.Focus();
+                verified = GetForegroundWindow() == target.WindowHandle;
+                break;
+            case "select-element":
+                target.Element.Patterns.SelectionItem.Pattern.Select();
+                verified = target.Element.Patterns.SelectionItem.Pattern.IsSelected.ValueOrDefault;
+                break;
+            case "click-element":
+                target.Element.Click();
+                break;
+            case "double-click-element":
+                return new { succeeded = false, status = "approval_required", verification = "not_run" };
+            case "type-text":
+                var setStatus = ComputerUsePolicy.TrySetProtectedTextValue(
+                    SafeControlType(target.Element) == "Edit",
+                    () => target.Element.Patterns.Value.IsSupported,
+                    () =>
+                    {
+                        var supported = target.Element.Properties.IsPassword.TryGetValue(out var value);
+                        return (supported, value);
+                    },
+                    () =>
+                    {
+                        var supported = target.Element.Patterns.Value.Pattern.IsReadOnly.TryGetValue(out var value);
+                        return (supported, value);
+                    },
+                    value => target.Element.Patterns.Value.Pattern.SetValue(value),
+                    request.Value!);
+                if (setStatus != "set") return new { succeeded = false, status = setStatus, verification = "not_run" };
+                verified = string.Equals(target.Element.Patterns.Value.Pattern.Value.Value, request.Value, StringComparison.Ordinal);
+                break;
+            case "scroll-element":
+                var scroll = target.Element.Patterns.Scroll.Pattern;
+                var before = scroll.VerticalScrollPercent.ValueOrDefault;
+                scroll.Scroll(ScrollAmount.NoAmount, request.Direction == "down" ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement);
+                var after = scroll.VerticalScrollPercent.ValueOrDefault;
+                verified = Math.Abs(after - before) > 0.01;
+                break;
+            case "press-key":
+                target.Element.Focus();
+                if (GetForegroundWindow() != target.WindowHandle ||
+                    !SafeBoolean(() => target.Element.Properties.HasKeyboardFocus.ValueOrDefault))
+                    return new { succeeded = false, status = "target_focus_not_verified", verification = "not_run" };
+                var key = request.Value switch
+                {
+                    "ArrowUp" => VirtualKeyShort.UP,
+                    "ArrowDown" => VirtualKeyShort.DOWN,
+                    "ArrowLeft" => VirtualKeyShort.LEFT,
+                    "ArrowRight" => VirtualKeyShort.RIGHT,
+                    "Home" => VirtualKeyShort.HOME,
+                    "End" => VirtualKeyShort.END,
+                    "PageUp" => VirtualKeyShort.PRIOR,
+                    "PageDown" => VirtualKeyShort.NEXT,
+                    _ => throw new InvalidOperationException("Key is not on the navigation allowlist.")
+                };
+                ComputerUsePolicy.PressAndRelease(key, value => Keyboard.Press(value), value => Keyboard.Release(value));
+                verified = false;
+                break;
+            case "expand-element":
+                target.Element.Patterns.ExpandCollapse.Pattern.Expand();
+                verified = target.Element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.ValueOrDefault == ExpandCollapseState.Expanded;
+                break;
+            case "collapse-element":
+                target.Element.Patterns.ExpandCollapse.Pattern.Collapse();
+                verified = target.Element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.ValueOrDefault == ExpandCollapseState.Collapsed;
+                break;
+            default:
+                return new { succeeded = false, status = "action_not_allowed", verification = "not_run" };
+        }
+        var refreshed = ObserveDesktopUi();
+        return new { succeeded = true, status = "performed", verification = ComputerUsePolicy.VerificationStatus(verified),
+            targetInvalidated = true, refreshedObservation = refreshed };
     }
 
     private static IReadOnlyList<(AutomationElement Element, AutomationElement? Parent, int Depth)> SafeDescendants(
@@ -393,30 +444,66 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     }
 
     private static string[] GetAllowedUiActions(AutomationElement element, string controlType,
-        bool enabled, bool offscreen, bool isPassword)
+        bool enabled, bool offscreen, bool isPassword, bool safeSelectionContainer)
     {
         try
         {
             var valueSupported = element.Patterns.Value.IsSupported;
             var valueReadOnly = valueSupported && element.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
+            var expandCollapseSupported = element.Patterns.ExpandCollapse.IsSupported;
+            var expandCollapseState = expandCollapseSupported
+                ? element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.ValueOrDefault.ToString()
+                : null;
             return ComputerUsePolicy.AllowedUiActions(controlType, enabled, offscreen, isPassword,
                 element.Patterns.Invoke.IsSupported, element.Patterns.SelectionItem.IsSupported,
-                valueSupported, valueReadOnly, element.Patterns.Scroll.IsSupported);
+                valueSupported, valueReadOnly, element.Patterns.Scroll.IsSupported,
+                expandCollapseSupported, expandCollapseState, safeSelectionContainer);
         }
         catch { return []; }
     }
 
-    private static string[] GetApprovalActions(string controlType) => controlType switch
+    private static bool IsSafeSelectionContext(AutomationElement element, string controlType)
+    {
+        try
+        {
+            if (!element.Patterns.SelectionItem.IsSupported ||
+                !element.Patterns.SelectionItem.Pattern.SelectionContainer.TryGetValue(out var container) || container is null)
+                return false;
+            if (ContainsComboBoxAncestor(element) || ContainsComboBoxAncestor(container)) return false;
+            var containerType = SafeControlType(container);
+            if (containerType == "Unknown") return false;
+            return ComputerUsePolicy.IsSafeSelectionContext(controlType, containerType, insideComboBox: false);
+        }
+        catch { return false; }
+    }
+
+    private static bool ContainsComboBoxAncestor(AutomationElement element)
+    {
+        AutomationElement? current = element;
+        for (var depth = 0; current is not null && depth < 32; depth++)
+        {
+            var controlType = SafeControlType(current);
+            if (ComputerUsePolicy.IsUnsafeSelectionAncestor(controlType)) return true;
+            if (controlType == "Window") return false;
+            current = current.Parent;
+        }
+        return current is not null;
+    }
+
+    private static string[] GetApprovalActions(string controlType, bool supportsSelection, bool safeSelectionContainer) => controlType switch
     {
         "Button" or "MenuItem" => ["click-element"],
-        "CheckBox" or "RadioButton" => ["click-element", "press-key"],
-        "ListItem" or "TreeItem" => ["select-element", "double-click-element", "press-key"],
-        "ComboBox" => ["press-key"],
+        "CheckBox" or "RadioButton" => ["click-element", "press-key", "select-element"],
+        "ListItem" or "TreeItem" when !safeSelectionContainer => ["select-element", "double-click-element", "press-key"],
+        "ListItem" or "TreeItem" => ["double-click-element", "press-key"],
+        "ComboBox" => ["select-element", "press-key"],
+        _ when supportsSelection && !safeSelectionContainer => ["select-element"],
         _ => []
     };
 
-    private static bool IsApprovalRequired(string controlType, string action, string? key = null) =>
-        ComputerUsePolicy.RequiresUiApproval(controlType, action, key);
+    private static bool IsApprovalRequired(string controlType, string action, string? key = null,
+        bool safeSelectionContainer = false) =>
+        ComputerUsePolicy.RequiresUiApproval(controlType, action, key, safeSelectionContainer);
 
     private bool IsWindowStillPresent(nint handle, int expectedProcessId)
     {
@@ -1144,6 +1231,18 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     {
         try { return element.Properties.Name.Value ?? ""; }
         catch { return ""; }
+    }
+
+    private static bool TryReadElementName(AutomationElement element, out string name)
+    {
+        name = "";
+        try
+        {
+            if (!element.Properties.Name.TryGetValue(out var currentName) || currentName is null) return false;
+            name = currentName;
+            return true;
+        }
+        catch { return false; }
     }
 
     private static string SafeHelpText(AutomationElement element)

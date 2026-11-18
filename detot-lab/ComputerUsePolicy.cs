@@ -25,7 +25,8 @@ public static class ComputerUsePolicy
 
     private static readonly HashSet<string> UiActions = new(StringComparer.Ordinal)
     {
-        "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key"
+        "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key",
+        "expand-element", "collapse-element"
     };
 
     public static bool CanObserve(string? target) => target is not null && ObservationTargets.Contains(target);
@@ -74,16 +75,84 @@ public static class ComputerUsePolicy
     }
 
     public static string[] AllowedUiActions(string controlType, bool enabled, bool offscreen, bool isPassword,
-        bool supportsInvoke, bool supportsSelection, bool supportsValue, bool valueReadOnly, bool supportsScroll)
+        bool supportsInvoke, bool supportsSelection, bool supportsValue, bool valueReadOnly, bool supportsScroll,
+        bool supportsExpandCollapse = false, string? expandCollapseState = null,
+        bool safeSelectionContainer = false)
     {
         if (!enabled || offscreen) return [];
         var actions = new List<string>();
         if (controlType == "Hyperlink" && supportsInvoke) actions.Add("click-element");
-        if (controlType == "TabItem" && supportsSelection) actions.Add("select-element");
+        if (supportsSelection && safeSelectionContainer && (controlType is "TabItem" or "ListItem" or "TreeItem"))
+            actions.Add("select-element");
         if (!isPassword && controlType == "Edit" && supportsValue && !valueReadOnly) actions.Add("type-text");
         if (supportsScroll) actions.Add("scroll-element");
         if (controlType == "Edit") actions.Add("press-key");
+        if (supportsExpandCollapse && (controlType is "MenuItem" or "ComboBox" or "TreeItem"))
+        {
+            if (expandCollapseState == "Collapsed") actions.Add("expand-element");
+            else if (expandCollapseState == "Expanded") actions.Add("collapse-element");
+        }
         return actions.ToArray();
+    }
+
+    public static bool IsSafeSelectionContext(string controlType, string? selectionContainerControlType,
+        bool insideComboBox) => !insideComboBox && ((controlType, selectionContainerControlType) switch
+        {
+            ("TabItem", "Tab") => true,
+            ("ListItem", "List") => true,
+            ("TreeItem", "Tree") => true,
+            _ => false
+        });
+
+    public static bool IsUnsafeSelectionAncestor(string? controlType) =>
+        controlType is null or "Unknown" or "ComboBox";
+
+    public static bool CanSelectInContext(string controlType, string action, bool safeSelectionContainer) =>
+        action != "select-element" ||
+        controlType is ("TabItem" or "ListItem" or "TreeItem") && safeSelectionContainer;
+
+    public static bool MatchesExpectedUiTarget(string? actualControlType, string? actualName,
+        string? expectedControlType, string? expectedName) =>
+        !string.IsNullOrWhiteSpace(actualName) &&
+        actualControlType == expectedControlType &&
+        !string.IsNullOrWhiteSpace(expectedName) &&
+        string.Equals(actualName, expectedName, StringComparison.OrdinalIgnoreCase);
+
+    public static bool TryRunExpectedUiAction<T>(string? expectedControlType, string? expectedName,
+        Func<(bool Readable, string? ControlType, string? Name)> readLiveTarget,
+        Func<T> action, out T? result, out string status) where T : class
+    {
+        result = null;
+        if ((expectedControlType is null) != (expectedName is null))
+        {
+            status = "target_stale";
+            return false;
+        }
+
+        if (expectedControlType is not null)
+        {
+            (bool Readable, string? ControlType, string? Name) live;
+            try { live = readLiveTarget(); }
+            catch
+            {
+                status = "target_state_unavailable";
+                return false;
+            }
+            if (!live.Readable)
+            {
+                status = "target_state_unavailable";
+                return false;
+            }
+            if (!MatchesExpectedUiTarget(live.ControlType, live.Name, expectedControlType, expectedName))
+            {
+                status = "target_stale";
+                return false;
+            }
+        }
+
+        result = action();
+        status = "performed";
+        return true;
     }
 
     public static IReadOnlyList<BoundedNode<T>> CollectBoundedDescendants<T>(T root, int limit, int depthLimit,
@@ -131,12 +200,14 @@ public static class ComputerUsePolicy
 
     public sealed record BoundedNode<T>(T Element, T Parent, int Depth) where T : class;
 
-    public static bool RequiresUiApproval(string controlType, string action, string? key = null) =>
+    public static bool RequiresUiApproval(string controlType, string action, string? key = null,
+        bool safeSelectionContainer = false) =>
         action == "press-key" ? !CanPressKeyOn(controlType, key) :
-        (action is "click-element" or "double-click-element" or "select-element") && (controlType switch
+        action == "select-element" ? !CanSelectInContext(controlType, action, safeSelectionContainer) :
+        (action is "click-element" or "double-click-element") && (controlType switch
         {
             "Button" or "MenuItem" or "CheckBox" or "RadioButton" when action == "click-element" => true,
-            "ListItem" or "TreeItem" when action is "select-element" or "double-click-element" => true,
+            "ListItem" or "TreeItem" when action == "double-click-element" => true,
             _ => false
         });
 
@@ -151,9 +222,9 @@ public static class ComputerUsePolicy
     {
         observe = new[] { "approved-applications", "desktop-ui", "github-account", "github-pull-requests" },
         navigate = new[] { "open-workspace", "open-workspace-item (existing items under workspace only)", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader" },
-        interact = new[] { "activate-window", "select-element (TabItem only)", "type-text (revalidated non-password Edit only)", "scroll-element", "press-key (ArrowLeft/ArrowRight/Home/End on Edit only)", "click-element (Hyperlink only)" },
+        interact = new[] { "activate-window", "select-element (TabItem/ListItem/TreeItem only)", "type-text (revalidated non-password Edit only)", "scroll-element", "press-key (ArrowLeft/ArrowRight/Home/End on Edit only)", "click-element (Hyperlink only)", "expand/collapse-element (MenuItem/ComboBox/TreeItem navigation only)" },
         readOnlyApplications = new[] { "Windows Settings", "Task Manager" },
-        approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "select/double-click ListItem/TreeItem", "keys on RadioButton/ComboBox/selection controls", "keyboard-submit" },
+        approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "select on CheckBox/RadioButton/ComboBox or unknown control types", "double-click ListItem/TreeItem", "keys on RadioButton/ComboBox/selection controls", "keyboard-submit" },
         interactionRequirements = new[] { "fresh-observation-target-id", "same-interactive-session", "revalidate-target-before-action" },
         accountSelection = Array.Empty<string>(),
         write = Array.Empty<string>(),
