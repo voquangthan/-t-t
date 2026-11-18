@@ -371,11 +371,11 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     break;
                 case "expand-element":
                     target.Element.Patterns.ExpandCollapse.Pattern.Expand();
-                    verified = target.Element.Patterns.ExpandCollapse.Pattern.State.ValueOrDefault == ExpandCollapseState.Expanded;
+                    verified = target.Element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.ValueOrDefault == ExpandCollapseState.Expanded;
                     break;
                 case "collapse-element":
                     target.Element.Patterns.ExpandCollapse.Pattern.Collapse();
-                    verified = target.Element.Patterns.ExpandCollapse.Pattern.State.ValueOrDefault == ExpandCollapseState.Collapsed;
+                    verified = target.Element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.ValueOrDefault == ExpandCollapseState.Collapsed;
                     break;
                 default:
                     return new { succeeded = false, status = "action_not_allowed", verification = "not_run" };
@@ -409,7 +409,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             var valueReadOnly = valueSupported && element.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
             var expandCollapseSupported = element.Patterns.ExpandCollapse.IsSupported;
             var expandCollapseState = expandCollapseSupported
-                ? element.Patterns.ExpandCollapse.Pattern.State.ValueOrDefault.ToString()
+                ? element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.ValueOrDefault.ToString()
                 : null;
             return ComputerUsePolicy.AllowedUiActions(controlType, enabled, offscreen, isPassword,
                 element.Patterns.Invoke.IsSupported, element.Patterns.SelectionItem.IsSupported,
