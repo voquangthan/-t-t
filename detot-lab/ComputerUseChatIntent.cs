@@ -51,7 +51,8 @@ public static class ComputerUseChatIntent
 }
 
 public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperations, string? Application = null,
-    string? ObservationTarget = null, string? RequestedValue = null)
+    string? ObservationTarget = null, string? RequestedValue = null, string? TargetLabel = null,
+    string? TargetControlType = null)
 {
     public bool Allows(ComputerUseAgentAction action)
     {
@@ -62,10 +63,21 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
         if (action.Operation != "open_workspace_item" && RequestedValue is not null && action.Operation != "observe") return false;
         return true;
     }
+
+    public bool MatchesTarget(string? controlType, string? name) => TargetLabel is null ||
+        controlType == TargetControlType && string.Equals(name?.Trim(), TargetLabel, StringComparison.OrdinalIgnoreCase);
 }
 
 public static class ComputerUseTaskAuthorization
 {
+    private static readonly (string Operation, string ControlType, Regex Pattern)[] NamedUiRequests =
+    [
+        ("select_tab", "TabItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+tab\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
+        ("expand", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở\s+rộng|expand)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
+        ("collapse", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:thu\s+gọn|collapse)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
+        ("click", "Hyperlink", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:bấm|nhấn|click)\s+(?:vào\s+)?(?:link|liên\s+kết)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled))
+    ];
+
     private static readonly Regex WorkspaceItemRequest = new(
         @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở|open)\s+(?:tệp|file|thư\s+mục|folder)\s+(?<path>[^\r\n""'`<>]{1,512}?)\s*[.!?]*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -87,6 +99,15 @@ public static class ComputerUseTaskAuthorization
             if (path.Length is > 0 and <= 512 && DesktopOperator.IsSafeWorkspaceRelativePath(path))
                 return new("open-workspace-item", ["observe", "open_workspace_item"], RequestedValue: path);
             return null;
+        }
+        foreach (var (operation, controlType, pattern) in NamedUiRequests)
+        {
+            var match = pattern.Match(message);
+            if (!match.Success) continue;
+            var label = match.Groups["label"].Value.Trim();
+            return label.Length is > 0 and <= 96
+                ? new("named-ui-" + operation, ["observe", operation], TargetLabel: label, TargetControlType: controlType)
+                : null;
         }
         var intent = ComputerUseChatIntent.DetectDirectRequest(message);
         if (intent is null) return null;
@@ -117,6 +138,8 @@ public static class ComputerUseTaskAuthorization
         status != "approval_required" && succeeded && verification == "verified";
 }
 
+public sealed record ComputerUseObservedTarget(string ControlType, string Name, HashSet<string> AllowedActions);
+
 public sealed class ComputerUseTurnState
 {
     private readonly Dictionary<string, HashSet<string>> observedTargets = new(StringComparer.Ordinal);
@@ -124,22 +147,31 @@ public sealed class ComputerUseTurnState
     public bool Stopped { get; private set; }
     public bool CanAcceptModelCompletion => !Stopped;
 
-    public bool RecordObservation(string? status, IReadOnlyDictionary<string, HashSet<string>> targets)
+    public bool RecordObservation(string? status, IReadOnlyDictionary<string, ComputerUseObservedTarget> targets,
+        ComputerUseTaskScope scope)
     {
-        if (Stopped || !ComputerUseTaskAuthorization.HasUsableObservation(status, targets.Count > 0))
+        IReadOnlyDictionary<string, ComputerUseObservedTarget> scopedTargets = scope.TargetLabel is null ? targets : targets.Where(pair =>
+                scope.MatchesTarget(pair.Value.ControlType, pair.Value.Name) &&
+                pair.Value.AllowedActions.Contains(RequiredObservedAction(scope.AllowedOperations.FirstOrDefault(operation => operation != "observe") ?? "")))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        if (Stopped || scope.TargetLabel is not null && scopedTargets.Count != 1 ||
+            !ComputerUseTaskAuthorization.HasUsableObservation(status, scopedTargets.Count > 0))
         {
             Stop();
             return false;
         }
         observedTargets.Clear();
-        foreach (var (id, actions) in targets) observedTargets[id] = new(actions, StringComparer.Ordinal);
+        foreach (var (id, target) in scopedTargets)
+            observedTargets[id] = new(target.AllowedActions, StringComparer.Ordinal);
         RequiresObservation = false;
         return true;
     }
 
-    public bool CanAct(ComputerUseAgentAction action)
+    public bool CanAct(ComputerUseAgentAction action, ComputerUseTaskScope scope)
     {
-        if (Stopped || action.Operation == "observe") return !Stopped;
+        if (Stopped) return false;
+        if (action.Operation == "observe") return true;
+        if (!scope.Allows(action)) return false;
         if (RequiresObservation) return false;
         if (action.TargetId is null) return true;
         return observedTargets.TryGetValue(action.TargetId, out var actions) &&

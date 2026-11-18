@@ -466,6 +466,7 @@ using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text
 var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay trời thế nào?");
 var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
+var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
 var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
 Check(unrelatedScope is null &&
       !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
@@ -485,26 +486,41 @@ Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
       !openFileScope.Allows(new("open_workspace_item", Value: "docs/other.txt")) &&
       ComputerUseTaskAuthorization.FromCurrentMessage("Mở file ../private.txt") is null,
     "workspace navigation scope binds the exact safe relative path requested by the current user message");
+var tabTargetId = "1123456789abcdef0123456789abcdef";
+var tabTarget = new ComputerUseObservedTarget("TabItem", "Lịch", new(StringComparer.Ordinal) { "select-element" });
+var tabTurnState = new ComputerUseTurnState();
+Check(selectTabScope is { TargetControlType: "TabItem", TargetLabel: "Lịch" } &&
+      tabTurnState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget> { [tabTargetId] = tabTarget }, selectTabScope) &&
+      tabTurnState.CanAct(new("select_tab", TargetId: tabTargetId), selectTabScope) &&
+      !tabTurnState.CanAct(new("click", TargetId: tabTargetId), selectTabScope),
+    "an explicit tab request exposes only the single named TabItem and its selection operation");
+var ambiguousTabState = new ComputerUseTurnState();
+Check(selectTabScope is not null && !ambiguousTabState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { [tabTargetId] = tabTarget, ["2123456789abcdef0123456789abcdef"] = tabTarget }, selectTabScope) &&
+      !ambiguousTabState.CanAct(new("select_tab", TargetId: tabTargetId), selectTabScope),
+    "duplicate matching UI labels stop before selection instead of choosing arbitrarily");
 var failedObserveState = new ComputerUseTurnState();
-Check(!failedObserveState.RecordObservation("unavailable", new Dictionary<string, HashSet<string>>()) &&
-      !failedObserveState.CanAct(new("open_application", Application: "edge")) &&
+Check(openEdgeScope is not null && !failedObserveState.RecordObservation("unavailable", new Dictionary<string, ComputerUseObservedTarget>(), openEdgeScope) &&
+      !failedObserveState.CanAct(new("open_application", Application: "edge"), openEdgeScope) &&
       !failedObserveState.CanAcceptModelCompletion,
     "failed observation stops the turn before actions or model success claims");
 var failedActionState = new ComputerUseTurnState();
-Check(failedActionState.RecordObservation("available", new Dictionary<string, HashSet<string>>
-      { ["0123456789abcdef0123456789abcdef"] = ["click-element"] }) &&
-      failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+var testClickScope = new ComputerUseTaskScope("test", ["observe", "click"]);
+var clickTarget = new ComputerUseObservedTarget("Hyperlink", "Help", new(StringComparer.Ordinal) { "click-element" });
+Check(failedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { ["0123456789abcdef0123456789abcdef"] = clickTarget }, testClickScope) &&
+      failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
       !failedActionState.RecordAction("not_verified", false, "not_verified") &&
-      !failedActionState.RecordObservation("available", new Dictionary<string, HashSet<string>>()) &&
-      !failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !failedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>(), testClickScope) &&
+      !failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
       !failedActionState.CanAcceptModelCompletion,
     "an unverified action cannot be followed by observe/action or accepted as model completion");
 var verifiedActionState = new ComputerUseTurnState();
-Check(verifiedActionState.RecordObservation("available", new Dictionary<string, HashSet<string>>
-      { ["0123456789abcdef0123456789abcdef"] = ["click-element"] }) &&
+Check(verifiedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { ["0123456789abcdef0123456789abcdef"] = clickTarget }, testClickScope) &&
       verifiedActionState.RecordAction("completed", true, "verified") &&
-      !verifiedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
-      verifiedActionState.CanAct(new("observe")),
+      !verifiedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      verifiedActionState.CanAct(new("observe"), testClickScope),
     "a verified action invalidates old targets and requires a new observation before another action");
 var agentConsentRoot = Path.Combine(Path.GetTempPath(), "detot-computer-use-consent-" + Guid.NewGuid().ToString("N"));
 try
