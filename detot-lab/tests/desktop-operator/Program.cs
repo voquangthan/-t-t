@@ -262,11 +262,17 @@ var scopedSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-e
     uiTargetId, expectedName: "Lịch", expectedControlType: "TabItem");
 var scopedHyperlinkRequest = DesktopCompanionProtocol.SerializeRequest("click-element", Guid.NewGuid().ToString("N"),
     uiTargetId, expectedName: "Tài liệu hướng dẫn", expectedControlType: "Hyperlink");
+var scopedTextRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"),
+    uiTargetId, "tìm kiếm tài liệu", expectedName: "Tìm kiếm", expectedControlType: "Edit");
 Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
       parsedScopedSelection is { ExpectedName: "Lịch", ExpectedControlType: "TabItem" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedHyperlinkRequest, out var parsedScopedHyperlink) &&
       parsedScopedHyperlink is { ExpectedName: "Tài liệu hướng dẫn", ExpectedControlType: "Hyperlink" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedTextRequest, out var parsedScopedText) &&
+      parsedScopedText is { ExpectedName: "Tìm kiếm", ExpectedControlType: "Edit", Value: "tìm kiếm tài liệu" } &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Hyperlink") &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Edit") &&
+      !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, "x", null, "Tìm kiếm", "TabItem") &&
       !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", null),
     "the authenticated Companion protocol carries a bounded backend-authorized target label/type pair and rejects mismatches");
 var cappedUiResponse = DesktopCompanionProtocol.SerializeResponse(Guid.NewGuid().ToString("N"), new { data = new string('x', 32 * 1024) });
@@ -500,6 +506,8 @@ var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay t
 var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
 var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
+var selectListScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn danh sách Báo cáo tháng");
+var typeFieldScope = ComputerUseTaskAuthorization.FromCurrentMessage("Nhập tìm kiếm tài liệu vào ô Tìm kiếm");
 var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
 Check(unrelatedScope is null &&
       !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
@@ -519,6 +527,13 @@ Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
       !openFileScope.Allows(new("open_workspace_item", Value: "docs/other.txt")) &&
       ComputerUseTaskAuthorization.FromCurrentMessage("Mở file ../private.txt") is null,
     "workspace navigation scope binds the exact safe relative path requested by the current user message");
+Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cáo tháng" } &&
+      selectListScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !selectListScope.Allows(new("select_tab", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      typeFieldScope is { TargetControlType: "Edit", TargetLabel: "Tìm kiếm", RequestedValue: "tìm kiếm tài liệu" } &&
+      typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "tìm kiếm tài liệu")) &&
+      !typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "khác")),
+    "named list selection and text entry bind one control label and exact user-provided value");
 var tabTargetId = "1123456789abcdef0123456789abcdef";
 var tabTarget = new ComputerUseObservedTarget("TabItem", "Lịch", new(StringComparer.Ordinal) { "select-element" });
 var tabTurnState = new ComputerUseTurnState();

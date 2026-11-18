@@ -60,7 +60,8 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
         if (action.Operation == "open_application" && action.Application != Application) return false;
         if (action.Operation != "open_application" && action.Application is not null) return false;
         if (action.Operation == "open_workspace_item" && action.Value != RequestedValue) return false;
-        if (action.Operation != "open_workspace_item" && RequestedValue is not null && action.Operation != "observe") return false;
+        if (action.Operation == "type_text" && action.Value != RequestedValue) return false;
+        if (action.Operation is not ("open_workspace_item" or "type_text" or "observe") && RequestedValue is not null) return false;
         return true;
     }
 
@@ -73,6 +74,7 @@ public static class ComputerUseTaskAuthorization
     private static readonly (string Operation, string ControlType, Regex Pattern)[] NamedUiRequests =
     [
         ("select_tab", "TabItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+tab\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
+        ("select", "ListItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chọn|select)\s+(?:mục\s+)?(?:trong\s+)?danh\s+sách\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("expand", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở\s+rộng|expand)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("collapse", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:thu\s+gọn|collapse)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("click", "Hyperlink", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:bấm|nhấn|click)\s+(?:vào\s+)?(?:link|liên\s+kết)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled))
@@ -80,6 +82,10 @@ public static class ComputerUseTaskAuthorization
 
     private static readonly Regex WorkspaceItemRequest = new(
         @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở|open)\s+(?:tệp|file|thư\s+mục|folder)\s+(?<path>[^\r\n""'`<>]{1,512}?)\s*[.!?]*\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex TypeIntoFieldRequest = new(
+        @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:nhập|gõ|type)\s+(?<value>[^\r\n""'`<>]{1,512}?)\s+(?:vào|into)\s+(?:ô|field)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     public static bool ShouldExposeTool(ComputerUseTaskScope? scope, bool interactionConsent,
@@ -98,6 +104,16 @@ public static class ComputerUseTaskAuthorization
             var path = itemMatch.Groups["path"].Value.Trim();
             if (path.Length is > 0 and <= 512 && DesktopOperator.IsSafeWorkspaceRelativePath(path))
                 return new("open-workspace-item", ["observe", "open_workspace_item"], RequestedValue: path);
+            return null;
+        }
+        var typeMatch = TypeIntoFieldRequest.Match(message);
+        if (typeMatch.Success)
+        {
+            var value = typeMatch.Groups["value"].Value.Trim();
+            var label = typeMatch.Groups["label"].Value.Trim();
+            if (value.Length is > 0 and <= 512 && label.Length is > 0 and <= 96)
+                return new("type-into-field", ["observe", "type_text"], RequestedValue: value,
+                    TargetLabel: label, TargetControlType: "Edit");
             return null;
         }
         foreach (var (operation, controlType, pattern) in NamedUiRequests)
