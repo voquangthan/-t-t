@@ -67,8 +67,43 @@ public static class DesktopCompanionProtocol
     public sealed record Request(string Action, string RequestId);
 }
 
+public sealed record DesktopGithubCheck(string Name, string? Status, string? Conclusion);
+public sealed record DesktopGithubCheckSummary(string Status, int TotalCount, int DisplayedCount,
+    bool Truncated, int FailureCount, string[] FailureNames, DesktopGithubCheck[] Checks);
+
+public static class DesktopGithubChecks
+{
+    private static readonly HashSet<string> SuccessfulConclusions = new(StringComparer.OrdinalIgnoreCase)
+        { "success", "neutral", "skipped" };
+
+    public static DesktopGithubCheckSummary Summarize(IEnumerable<JsonElement> checkRuns, int? apiTotalCount = null,
+        bool paginationIncomplete = false, int displayLimit = 8)
+    {
+        var all = checkRuns.Select(run => new DesktopGithubCheck(
+            ReadString(run, "name") ?? "check", ReadString(run, "status"), ReadString(run, "conclusion"))).ToArray();
+        var total = Math.Max(all.Length, apiTotalCount ?? all.Length);
+        var truncated = paginationIncomplete || all.Length < total || all.Length > displayLimit;
+        var failures = all.Where(run => run.Conclusion is { Length: > 0 } conclusion &&
+            !SuccessfulConclusions.Contains(conclusion)).ToArray();
+        return new DesktopGithubCheckSummary(
+            all.Length == 0 && total == 0 && !paginationIncomplete ? "empty" : "available",
+            total, Math.Min(displayLimit, all.Length), truncated, failures.Length,
+            failures.Select(run => run.Name).Distinct(StringComparer.OrdinalIgnoreCase).Take(10).ToArray(),
+            all.Take(displayLimit).ToArray());
+    }
+
+    public static string FormatCoverage(DesktopGithubCheckSummary summary) =>
+        $"{summary.DisplayedCount}/{summary.TotalCount} checks hiển thị" +
+        (summary.FailureCount > 0 ? $"; tổng cộng {summary.FailureCount} check lỗi" : "") +
+        (summary.Truncated ? "; danh sách bị cắt, kết quả chỉ tổng hợp trên dữ liệu đã lấy" : "");
+
+    private static string? ReadString(JsonElement value, string property) =>
+        value.TryGetProperty(property, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
+}
+
 public sealed class DesktopCompanionClient
 {
+    public const int RequestDeadlineMilliseconds = 20_000;
     private readonly string pipeName;
     public DesktopCompanionClient(string? pipeName = null) => this.pipeName = pipeName ?? DesktopCompanionProtocol.PipeNameForCurrentUser();
 
@@ -79,7 +114,7 @@ public sealed class DesktopCompanionClient
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(12));
+            timeout.CancelAfter(RequestDeadlineMilliseconds);
             await using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             await pipe.ConnectAsync(1500, timeout.Token);
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 1024, leaveOpen: true);
@@ -101,4 +136,86 @@ public sealed class DesktopCompanionClient
     }
 
     private static JsonElement Error(string error) => JsonSerializer.SerializeToElement(new { error });
+}
+
+/// <summary>Serves one authenticated local pipe request at a time and survives disconnected clients.</summary>
+public sealed class DesktopCompanionPipeServer(string pipeName, int requestDeadlineMilliseconds = 17_000)
+{
+    public async Task RunAsync(Func<DesktopCompanionProtocol.Request, CancellationToken, Task<object>> execute,
+        CancellationToken shutdownToken)
+    {
+        ArgumentNullException.ThrowIfNull(execute);
+        while (!shutdownToken.IsCancellationRequested)
+        {
+            await using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, 4096, 4096);
+            try
+            {
+                await pipe.WaitForConnectionAsync(shutdownToken);
+                await HandleConnectionAsync(pipe, execute, shutdownToken);
+            }
+            catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested) { break; }
+            catch (Exception error) when (error is IOException or ObjectDisposedException or UnauthorizedAccessException)
+            {
+                // A client may disappear between accept/read/write. Never let a broken pipe terminate the accept loop.
+                Console.Error.WriteLine($"Desktop Companion pipe request ended: {error.GetType().Name}");
+            }
+        }
+    }
+
+    private async Task HandleConnectionAsync(NamedPipeServerStream pipe,
+        Func<DesktopCompanionProtocol.Request, CancellationToken, Task<object>> execute,
+        CancellationToken shutdownToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+        deadline.CancelAfter(requestDeadlineMilliseconds);
+        Task<object>? action = null;
+        try
+        {
+            using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 2048, leaveOpen: true);
+            await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 2048, leaveOpen: true) { AutoFlush = true };
+            var line = await DesktopCompanionProtocol.ReadBoundedLineAsync(reader, 4096, deadline.Token);
+            if (!DesktopCompanionProtocol.TryParseRequest(line, out var request) || request is null)
+            {
+                await TryWriteResponseAsync(pipe, writer,
+                    JsonSerializer.Serialize(new { requestId = "", result = new { error = "invalid_request" } }), deadline.Token);
+                return;
+            }
+
+            action = execute(request, deadline.Token);
+            while (!action.IsCompleted && !deadline.IsCancellationRequested)
+            {
+                await Task.Delay(100, deadline.Token);
+                if (!pipe.IsConnected)
+                {
+                    deadline.Cancel();
+                    break;
+                }
+            }
+            var result = await action;
+            if (pipe.IsConnected && !deadline.IsCancellationRequested)
+                await TryWriteResponseAsync(pipe, writer,
+                    JsonSerializer.Serialize(new { requestId = request.RequestId, result }), deadline.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            if (action is not null)
+            {
+                try { await action; }
+                catch (Exception error) { Console.Error.WriteLine($"Desktop Companion action ended: {error.GetType().Name}"); }
+            }
+        }
+        catch (Exception error)
+        {
+            // Do not retry a response write here: the peer may already have closed its end of the pipe.
+            Console.Error.WriteLine($"Desktop Companion action ended: {error.GetType().Name}");
+        }
+    }
+
+    private static async Task TryWriteResponseAsync(NamedPipeServerStream pipe, StreamWriter writer,
+        string response, CancellationToken cancellationToken)
+    {
+        if (!pipe.IsConnected) return;
+        await writer.WriteLineAsync(response.AsMemory(), cancellationToken);
+    }
 }

@@ -1527,11 +1527,12 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
             ? reasonValue.GetString() : null;
         object? evidence = response.TryGetProperty("evidence", out var evidenceValue) && evidenceValue.ValueKind != JsonValueKind.Undefined
             ? evidenceValue.Clone() : null;
+        var status = response.TryGetProperty("status", out var statusValue) && statusValue.ValueKind == JsonValueKind.String
+            ? statusValue.GetString() : null;
         var reply = action == "open-workspace"
             ? workspaceVerified ? "Đã mở Explorer và xác minh thư mục workspace." : "Đã gửi yêu cầu mở Explorer; chưa xác minh được cửa sổ workspace."
-            : verified && workspaceVerified ? "Đã mở và xác minh VS Code cùng workspace." :
-                $"Đã mở cửa sổ VS Code riêng nhưng chưa xác minh workspace. Mong đợi: {expectedWorkspace ?? "không có"}; " +
-                $"quan sát: {observedWorkspace ?? "chưa có tín hiệu UIA"}; lý do: {workspaceReason ?? "không rõ"}.";
+            : DesktopCompanionVerification.VsCodeActionReply(status, verified, workspaceVerified,
+                expectedWorkspace, observedWorkspace, workspaceReason);
         return Results.Ok(new { reply, toolUsed = true, computerUseAction = action,
             windowVerified = verified, workspaceVerified, expectedWorkspace, observedWorkspace,
             workspaceVerificationReason = workspaceReason, evidence });
@@ -1574,6 +1575,21 @@ static IResult ToChatActionResponse(JsonElement result, string action)
                 lines.Add("  CI: API xác nhận chưa có check run.");
             else if (pull.TryGetProperty("checks", out var checks) && checks.ValueKind == JsonValueKind.Array)
             {
+                var total = pull.TryGetProperty("totalChecks", out var totalValue) && totalValue.TryGetInt32(out var totalCount)
+                    ? totalCount : checks.GetArrayLength();
+                var shown = pull.TryGetProperty("displayedChecks", out var shownValue) && shownValue.TryGetInt32(out var shownCount)
+                    ? shownCount : checks.GetArrayLength();
+                var failureCount = pull.TryGetProperty("failedChecks", out var failureValue) && failureValue.TryGetInt32(out var failures)
+                    ? failures : 0;
+                var failureLabels = pull.TryGetProperty("failedCheckNames", out var failedNames) && failedNames.ValueKind == JsonValueKind.Array
+                    ? failedNames.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String)
+                        .Select(value => value.GetString()!.Replace('\r', ' ').Replace('\n', ' ').Replace('`', 'ˋ')).ToArray()
+                    : [];
+                var summary = new DesktopGithubCheckSummary(
+                    pull.TryGetProperty("checksStatus", out var checksStatusValue) ? checksStatusValue.GetString() ?? "unavailable" : "unavailable",
+                    total, shown,
+                    pull.TryGetProperty("checksTruncated", out var truncatedValue) && truncatedValue.ValueKind == JsonValueKind.True,
+                    failureCount, failureLabels, []);
                 var names = checks.EnumerateArray().Take(8).Select(check =>
                 {
                     var name = check.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "check" : "check";
@@ -1582,7 +1598,9 @@ static IResult ToChatActionResponse(JsonElement result, string action)
                         : check.TryGetProperty("status", out var checkState) ? checkState.GetString() : "unknown";
                     return $"{name.Replace('\r', ' ').Replace('\n', ' ').Replace('`', 'ˋ')}: {outcome}";
                 });
-                lines.Add("  CI: " + string.Join("; ", names));
+                lines.Add("  CI: " + DesktopGithubChecks.FormatCoverage(summary));
+                lines.Add("    " + string.Join("; ", names));
+                if (failureLabels.Length > 0) lines.Add("    Check lỗi: " + string.Join(", ", failureLabels));
             }
         }
         return Results.Ok(new { reply = string.Join("\n", lines), toolUsed = true, computerUseAction = action });

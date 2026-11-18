@@ -131,6 +131,21 @@ Check(!DesktopCompanionVerification.IsNewWindow(101, new HashSet<nint> { 101, 20
       DesktopCompanionVerification.IsNewWindow(303, new HashSet<nint> { 101, 202 }) &&
       !DesktopCompanionVerification.IsNewWindow(0, new HashSet<nint>()),
     "workspace verification excludes reused windows and requires a new identifiable window handle");
+Check(DesktopCompanionVerification.VsCodeActionReply("launch_failed", false, false, "D:\\repo", null, "launch_failed")
+          .Contains("chưa khởi chạy", StringComparison.Ordinal) &&
+      DesktopCompanionVerification.VsCodeActionReply("window_not_found", false, false, "D:\\repo", null, "timeout_window_not_found")
+          .Contains("chưa thấy cửa sổ", StringComparison.Ordinal) &&
+      DesktopCompanionVerification.VsCodeActionReply("workspace_not_verified", true, false, "D:\\repo", "different workspace (name redacted)", "workspace_mismatch")
+          .Contains("workspace chưa xác minh", StringComparison.Ordinal) &&
+      DesktopCompanionVerification.VsCodeActionReply("verified", true, true, "D:\\repo", "repo", "verified_by_accessible_path")
+          .Contains("Đã mở và xác minh", StringComparison.Ordinal),
+    "VS Code chat response distinguishes launch failure, missing window, workspace mismatch, and verified success");
+Check(DesktopCompanionVerification.IntegrityLevelFromRid(0x0000) == "untrusted" &&
+      DesktopCompanionVerification.IntegrityLevelFromRid(0x1000) == "low" &&
+      DesktopCompanionVerification.IntegrityLevelFromRid(0x2000) == "medium" &&
+      DesktopCompanionVerification.IntegrityLevelFromRid(0x3000) == "high" &&
+      DesktopCompanionVerification.IntegrityLevelFromRid(0x4000) == "system",
+    "Windows integrity RID boundaries map Untrusted, Low, Medium, High, and System correctly");
 Check(DesktopCompanionVerification.SameInteractiveSession(5, "Default", true, 5, 5, true, true) &&
       DesktopCompanionVerification.SameInteractiveSession(5, "Default", true, 5, 5, true, true) &&
       !DesktopCompanionVerification.SameInteractiveSession(5, "Default", true, 4, 5, true, true) &&
@@ -167,40 +182,67 @@ using (var oversizedReader = new StreamReader(new MemoryStream(Encoding.UTF8.Get
     catch (InvalidDataException) { boundedReadRejected = true; }
     Check(boundedReadRejected, "Desktop Companion enforces bounded IPC frame sizes");
 }
-var testPipeName = $"detot-test-{Guid.NewGuid():N}";
-await using (var pipeServer = new NamedPipeServerStream(testPipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
-    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+JsonElement[] MakeCheckRuns(int count, int failingIndex)
 {
-    var serverReply = Task.Run(async () =>
+    var runs = new JsonElement[count];
+    for (var index = 0; index < count; index++)
     {
-        using var serverDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        try
+        using var run = JsonDocument.Parse(JsonSerializer.Serialize(new
         {
-            await pipeServer.WaitForConnectionAsync(serverDeadline.Token);
-            using var pipeReader = new StreamReader(pipeServer, Encoding.UTF8, false, 1024, leaveOpen: true);
-            await using var pipeWriter = new StreamWriter(pipeServer, Encoding.UTF8, 1024, leaveOpen: true) { AutoFlush = true };
-            var line = await DesktopCompanionProtocol.ReadBoundedLineAsync(pipeReader, 4096, serverDeadline.Token);
-            if (!DesktopCompanionProtocol.TryParseRequest(line, out var received) || received is null) return false;
-            await pipeWriter.WriteLineAsync(JsonSerializer.Serialize(new
-            {
-                requestId = received.RequestId,
-                result = new { succeeded = true, action = received.Action }
-            }));
-            return true;
+            name = $"check-{index + 1}", status = "completed", conclusion = index == failingIndex ? "failure" : "success"
+        }));
+        runs[index] = run.RootElement.Clone();
+    }
+    return runs;
+}
+var nineChecks = DesktopGithubChecks.Summarize(MakeCheckRuns(9, 8));
+var twentyChecks = DesktopGithubChecks.Summarize(MakeCheckRuns(24, 23));
+var cappedChecks = DesktopGithubChecks.Summarize(MakeCheckRuns(20, 18), apiTotalCount: 120, paginationIncomplete: true);
+Check(nineChecks.TotalCount == 9 && nineChecks.DisplayedCount == 8 && nineChecks.Truncated &&
+      nineChecks.FailureCount == 1 && nineChecks.FailureNames.SequenceEqual(["check-9"]) &&
+      DesktopGithubChecks.FormatCoverage(nineChecks).Contains("1 check lỗi", StringComparison.Ordinal),
+    "GitHub reader reports a failure on check 9 despite the eight-check display limit");
+Check(twentyChecks.TotalCount == 24 && twentyChecks.FailureCount == 1 &&
+      twentyChecks.FailureNames.SequenceEqual(["check-24"]) &&
+      DesktopGithubChecks.FormatCoverage(twentyChecks).Contains("24 checks", StringComparison.Ordinal),
+    "GitHub reader aggregates failures beyond the displayed first eight among 20+ checks");
+Check(cappedChecks.Truncated && cappedChecks.TotalCount == 120 &&
+      DesktopGithubChecks.FormatCoverage(cappedChecks).Contains("danh sách bị cắt", StringComparison.Ordinal),
+    "GitHub reader marks results incomplete if the API pagination cap is reached");
+
+var testPipeName = $"detot-test-{Guid.NewGuid():N}";
+using (var serverShutdown = new CancellationTokenSource())
+{
+    var firstActionCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var actionCount = 0;
+    var pipeServer = new DesktopCompanionPipeServer(testPipeName, requestDeadlineMilliseconds: 3_000);
+    var serverTask = pipeServer.RunAsync(async (request, token) =>
+    {
+        if (Interlocked.Increment(ref actionCount) == 1)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(5), token); }
+            catch (OperationCanceledException) { firstActionCancelled.TrySetResult(); throw; }
         }
-        catch (OperationCanceledException) { return false; }
-    });
-    using var clientDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-    JsonElement companionResult;
-    try { companionResult = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientDeadline.Token); }
-    catch (OperationCanceledException) { companionResult = JsonSerializer.SerializeToElement(new { error = "companion_timeout" }); }
-    var serverCompleted = await serverReply.WaitAsync(TimeSpan.FromSeconds(4));
-    if (companionResult.TryGetProperty("error", out var pipeError))
-        Console.WriteLine($"BLOCKED: named-pipe integration self-test is unavailable in this execution session ({pipeError.GetString()}); interactive Companion smoke is required.");
-    else
-        Check(serverCompleted && companionResult.TryGetProperty("action", out var acceptedAction) &&
-              acceptedAction.GetString() == "read-workspace",
-            "authenticated local named-pipe request and response complete with correlation validation");
+        return new { succeeded = true, action = request.Action };
+    }, serverShutdown.Token);
+    try
+    {
+        using var clientADeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        var clientACancelled = false;
+        try { _ = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientADeadline.Token); }
+        catch (OperationCanceledException) { clientACancelled = true; }
+        await firstActionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        using var clientBDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var clientB = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientBDeadline.Token);
+        Check(clientACancelled && clientB.TryGetProperty("action", out var acceptedAction) &&
+              acceptedAction.GetString() == "read-workspace" && actionCount == 2,
+            "client B is served after client A disconnects during a cancellable action");
+    }
+    finally
+    {
+        serverShutdown.Cancel();
+        await serverTask.WaitAsync(TimeSpan.FromSeconds(3));
+    }
 }
 Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:voquangthan"),
     "GCM account selection remains denied without a trusted pending Git transaction");

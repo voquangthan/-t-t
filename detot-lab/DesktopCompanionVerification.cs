@@ -154,6 +154,23 @@ public static partial class DesktopCompanionVerification
         edgeWindowFound && vscodeWindowFound && edgeWindowSessionId == currentSessionId &&
         vscodeWindowSessionId == currentSessionId;
 
+    public static string IntegrityLevelFromRid(int rid) => rid < 0 ? "unavailable" :
+        rid < 0x1000 ? "untrusted" : rid < 0x2000 ? "low" : rid < 0x3000 ? "medium" :
+        rid < 0x4000 ? "high" : "system";
+
+    public static string VsCodeActionReply(string? status, bool windowVerified, bool workspaceVerified,
+        string? expectedWorkspace, string? observedWorkspace, string? reason) =>
+        status == "launch_failed" || !windowVerified && status is not "window_not_found" and not "workspace_not_verified"
+            ? "Không mở được VS Code; chưa khởi chạy được ứng dụng."
+            : !windowVerified && status == "window_not_found"
+                ? "Đã gửi yêu cầu mở VS Code nhưng chưa thấy cửa sổ mới."
+                : windowVerified && workspaceVerified && status == "verified"
+                    ? "Đã mở và xác minh VS Code cùng workspace."
+                    : windowVerified
+                        ? $"Cửa sổ VS Code đã mở nhưng workspace chưa xác minh. Mong đợi: {expectedWorkspace ?? "không có"}; " +
+                          $"quan sát: {observedWorkspace ?? "chưa có tín hiệu UIA"}; lý do: {reason ?? "không rõ"}."
+                        : "Chưa xác minh được VS Code đã mở.";
+
     private static string NormalizePath(string path)
     {
         var normalized = Uri.UnescapeDataString(path).TrimEnd('/');

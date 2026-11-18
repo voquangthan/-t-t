@@ -37,34 +37,8 @@ if (args.Contains("--smoke-test", StringComparer.Ordinal))
 Console.WriteLine($"Desktop Companion ready for this Windows user (pipe: {pipeName}). Press Ctrl+C to stop.");
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
-while (!shutdown.IsCancellationRequested)
-{
-    await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
-        PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, 4096, 4096);
-    try { await server.WaitForConnectionAsync(shutdown.Token); }
-    catch (OperationCanceledException) { break; }
-    using var reader = new StreamReader(server, new UTF8Encoding(false), false, 2048, leaveOpen: true);
-    await using var writer = new StreamWriter(server, new UTF8Encoding(false), 2048, leaveOpen: true) { AutoFlush = true };
-    try
-    {
-        var line = await DesktopCompanionProtocol.ReadBoundedLineAsync(reader, 4096, shutdown.Token);
-        if (!DesktopCompanionProtocol.TryParseRequest(line, out var request) || request is null)
-        {
-            await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = "", result = new { error = "invalid_request" } }));
-            continue;
-        }
-        var result = await handler.ExecuteAsync(request.Action, shutdown.Token);
-        await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = request.RequestId, result }));
-    }
-    catch (OperationCanceledException) { }
-    catch (Exception error) when (error is IOException or InvalidOperationException or HttpRequestException or
-                                  System.ComponentModel.Win32Exception or UnauthorizedAccessException)
-    {
-        // Never include UI text, paths, request content, credentials, or exception messages in the IPC response.
-        await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = "", result = new { error = "desktop_action_failed" } }));
-        Console.Error.WriteLine($"Desktop action failed: {error.GetType().Name}");
-    }
-}
+await new DesktopCompanionPipeServer(pipeName).RunAsync(
+    (request, cancellationToken) => handler.ExecuteAsync(request.Action, cancellationToken), shutdown.Token);
 return 0;
 
 static class DesktopSessionDiagnostics
@@ -120,7 +94,7 @@ static class DesktopSessionDiagnostics
                     var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
                     if (count == 0) return "unavailable";
                     var rid = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
-                    return rid < 0x2000 ? "untrusted" : rid < 0x3000 ? "low" : rid < 0x4000 ? "medium" : rid < 0x5000 ? "high" : "system";
+                    return DesktopCompanionVerification.IntegrityLevelFromRid(rid);
                 }
                 finally { Marshal.FreeHGlobal(buffer); }
             }
@@ -372,7 +346,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         if (executable is null) return new { error = "vscode_unavailable" };
         var before = ReadVsCodeWindowInventory();
         if (!before.Available)
-            return new { succeeded = false, status = "workspace_not_verified", processStarted = false,
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
                 windowVerified = false, workspaceVerified = false, expectedWorkspace = Path.GetFullPath(workspace),
                 observedWorkspace = (string?)null, workspaceVerificationReason = "prelaunch_window_inventory_unavailable",
                 evidence = new { windowTitleMatched = false, rootLabelMatched = false, accessiblePathMatched = false,
@@ -380,12 +354,22 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var start = new ProcessStartInfo(executable) { UseShellExecute = false };
         foreach (var argument in DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(workspace))
             start.ArgumentList.Add(argument);
-        using var launched = Process.Start(start);
+        Process? launched;
+        try { launched = Process.Start(start); }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "launch_failed" };
+        }
         if (launched is null)
             return new { succeeded = false, status = "launch_failed", processStarted = false,
                 windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
                 expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
                 workspaceVerificationReason = "launch_failed" };
+        using (launched)
+        {
         VsCodeWorkspaceSnapshot snapshot;
         try { snapshot = WaitForWorkspaceWindow(TimeSpan.FromSeconds(12), before.Handles); }
         catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
@@ -414,6 +398,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 rootLabelMatched = snapshot.RootLabelMatched, accessiblePathMatched = snapshot.AccessiblePathMatched,
                 existingWindowObserved = snapshot.ExistingWindowObserved }
         };
+        }
     }
 
     private async Task<object> OpenRepositoryPullsAsync(CancellationToken cancellationToken)
@@ -773,29 +758,56 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 ? shaElement.GetString() : null;
             var checksStatus = "unavailable";
             object[] checks = [];
+            var totalChecks = 0;
+            var checksTruncated = false;
+            var failedChecks = 0;
+            string[] failedCheckNames = [];
             if (sha is { Length: >= 40 })
             {
-                using var checkResponse = await Github.GetAsync($"repos/{repoPath}/commits/{sha}/check-runs?per_page=20", cancellationToken);
-                if (checkResponse.IsSuccessStatusCode)
+                var summary = await ReadAllCheckRunsAsync(repoPath, sha, cancellationToken);
+                if (summary is not null)
                 {
-                    using var checkDocument = JsonDocument.Parse(await checkResponse.Content.ReadAsStringAsync(cancellationToken));
-                    if (checkDocument.RootElement.TryGetProperty("check_runs", out var runs) && runs.ValueKind == JsonValueKind.Array)
+                    checksStatus = summary.Status;
+                    totalChecks = summary.TotalCount;
+                    checksTruncated = summary.Truncated;
+                    failedChecks = summary.FailureCount;
+                    failedCheckNames = summary.FailureNames;
+                    checks = summary.Checks.Select(run => (object)new
                     {
-                        checksStatus = runs.GetArrayLength() == 0 ? "empty" : "available";
-                        checks = runs.EnumerateArray().Take(8).Select(run => (object)new
-                        {
-                            name = run.TryGetProperty("name", out var name) ? name.GetString() : "check",
-                            status = run.TryGetProperty("status", out var runStatus) ? runStatus.GetString() : null,
-                            conclusion = run.TryGetProperty("conclusion", out var conclusion) && conclusion.ValueKind == JsonValueKind.String
-                                ? conclusion.GetString() : null
-                        }).ToArray();
-                    }
+                        name = run.Name, status = run.Status, conclusion = run.Conclusion
+                    }).ToArray();
                 }
             }
             pulls.Add(new { number = n, title = title.GetString()![..Math.Min(180, title.GetString()!.Length)], state,
-                headSha = sha is { Length: >= 8 } ? sha[..8] : null, checksStatus, checks });
+                headSha = sha is { Length: >= 8 } ? sha[..8] : null, checksStatus, totalChecks,
+                displayedChecks = checks.Length, checksTruncated, failedChecks, failedCheckNames, checks });
         }
         return new { repository = repoPath, pullRequests = pulls };
+    }
+
+    private static async Task<DesktopGithubCheckSummary?> ReadAllCheckRunsAsync(string repository, string sha,
+        CancellationToken cancellationToken)
+    {
+        const int pageSize = 100;
+        const int maximumPages = 10;
+        var all = new List<JsonElement>();
+        var expectedTotal = 0;
+        var incomplete = false;
+        for (var page = 1; page <= maximumPages; page++)
+        {
+            using var response = await Github.GetAsync(
+                $"repos/{repository}/commits/{sha}/check-runs?per_page={pageSize}&page={page}", cancellationToken);
+            if (!response.IsSuccessStatusCode) return null;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            if (!document.RootElement.TryGetProperty("check_runs", out var runs) || runs.ValueKind != JsonValueKind.Array)
+                return null;
+            if (document.RootElement.TryGetProperty("total_count", out var total) && total.TryGetInt32(out var parsedTotal))
+                expectedTotal = Math.Max(expectedTotal, parsedTotal);
+            foreach (var run in runs.EnumerateArray()) all.Add(run.Clone());
+            if (runs.GetArrayLength() < pageSize || all.Count >= expectedTotal) break;
+            if (page == maximumPages) incomplete = true;
+        }
+        return DesktopGithubChecks.Summarize(all, expectedTotal == 0 ? all.Count : expectedTotal, incomplete);
     }
 
     private static HttpClient CreateGithubClient()
