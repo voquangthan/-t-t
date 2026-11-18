@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 18227)
-Total output lines: 1355
-
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Net.Http.Headers;
@@ -428,7 +425,474 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             return uiAutomation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window))
                 .Any(window => SafeNativeWindowHandle(window) == handle && SafeProcessId(window) == expectedProcessId);
         }
- …6227 tokens truncated…indow_not_found" :
+        catch { return false; }
+    }
+
+    private static bool IsElementBoundToWindow(AutomationElement element, nint expectedWindowHandle, int expectedProcessId)
+    {
+        try
+        {
+            AutomationElement? current = element;
+            for (var depth = 0; current is not null && depth < 32; depth++)
+            {
+                if (SafeProcessId(current) != expectedProcessId) return false;
+                if (SafeNativeWindowHandle(current) == expectedWindowHandle) return true;
+                current = current.Parent;
+            }
+        }
+        catch { return false; }
+        return false;
+    }
+
+    private static int SafeProcessId(AutomationElement element)
+    {
+        try { return element.Properties.ProcessId.ValueOrDefault; }
+        catch { return 0; }
+    }
+
+    private static string SafeProcessName(int processId)
+    {
+        try { using var process = Process.GetProcessById(processId); return process.ProcessName; }
+        catch { return "unknown"; }
+    }
+
+    private static int SafeSessionId(int processId)
+    {
+        try { using var process = Process.GetProcessById(processId); return process.SessionId; }
+        catch { return -1; }
+    }
+
+    private static string SafeControlType(AutomationElement element)
+    {
+        try { return element.Properties.ControlType.Value.ToString(); }
+        catch { return "Unknown"; }
+    }
+
+    private static string SafeAutomationId(AutomationElement element)
+    {
+        try { return element.Properties.AutomationId.Value ?? ""; }
+        catch { return ""; }
+    }
+
+    private static bool SafeBoolean(Func<bool> read)
+    {
+        try { return read(); }
+        catch { return false; }
+    }
+
+    private static bool TryReadBoolean(Func<bool> read, out bool value)
+    {
+        try { value = read(); return true; }
+        catch { value = false; return false; }
+    }
+
+    private static bool TryReadSupportedBoolean(Func<(bool Supported, bool Value)> read, out bool value)
+    {
+        try
+        {
+            var result = read();
+            value = result.Value;
+            return result.Supported;
+        }
+        catch { value = false; return false; }
+    }
+
+    private static object SafeBounds(AutomationElement element)
+    {
+        try
+        {
+            var rect = element.Properties.BoundingRectangle.Value;
+            return new { x = rect.X, y = rect.Y, width = rect.Width, height = rect.Height };
+        }
+        catch { return new { x = 0d, y = 0d, width = 0d, height = 0d }; }
+    }
+
+    private static string Clip(string? value, int length) => string.IsNullOrEmpty(value) ? "" : value.Length <= length ? value : value[..length];
+    private static string NewTargetId() => Guid.NewGuid().ToString("N");
+
+    [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+
+    public async Task<JsonElement> RunSmokeTestAsync(CancellationToken cancellationToken)
+    {
+        var ipc = await VerifyPipeAsync(cancellationToken);
+        var currentSessionId = Process.GetCurrentProcess().SessionId;
+        var currentUser = $"{Environment.UserDomainName}\\{Environment.UserName}";
+        var currentDesktop = DesktopSessionDiagnostics.ReadThreadDesktopName();
+        var currentIntegrity = DesktopSessionDiagnostics.ReadCurrentIntegrityLevel();
+        var before = ToElement(await ExecuteAsync("observe-applications", cancellationToken));
+        var git = ToElement(await ExecuteAsync("read-workspace", cancellationToken));
+        var edge = ToElement(await ExecuteAsync("open-github", cancellationToken));
+        var pulls = ToElement(await ExecuteAsync("read-github-pull-requests", cancellationToken));
+        var code = ToElement(await ExecuteAsync("open-vscode", cancellationToken));
+        var account = ToElement(await ExecuteAsync("read-github-account", cancellationToken));
+        await Task.Delay(1500, cancellationToken);
+        var after = ToElement(await ExecuteAsync("observe-applications", cancellationToken));
+        var processSessions = new Dictionary<string, int[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Edge"] = ReadProcessSessions("msedge"),
+            ["VSCode"] = ReadProcessSessions("Code")
+        };
+        var processIntegrity = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Edge"] = DesktopSessionDiagnostics.ReadApprovedProcessIntegrityLevels("msedge"),
+            ["VSCode"] = DesktopSessionDiagnostics.ReadApprovedProcessIntegrityLevels("Code")
+        };
+        var ipcVerified = ipc.TryGetProperty("action", out var ipcAction) && ipcAction.GetString() == "read-workspace";
+        var edgeWindowFound = ReadBoolean(edge, "windowVerified");
+        var vscodeWindowFound = ReadBoolean(code, "windowVerified");
+        var workspaceVerified = ReadBoolean(code, "workspaceVerified");
+        var edgeSessionId = ReadNullableInt(edge, "sessionId");
+        var codeSessionId = ReadNullableInt(code, "sessionId");
+        var sameSession = DesktopCompanionVerification.SameInteractiveSession(currentSessionId, currentDesktop,
+            Environment.UserInteractive, edgeSessionId, codeSessionId, edgeWindowFound, vscodeWindowFound);
+        var edgeVerified = ReadString(edge, "status") == "verified" && ReadBoolean(edge, "urlVerified");
+        var pullsAvailable = !pulls.TryGetProperty("error", out _);
+        var accountStatus = ReadString(account, "status");
+        var smokePassed = DesktopCompanionVerification.IsSmokeTestPassed(ipcVerified, sameSession,
+            edgeVerified, workspaceVerified, pullsAvailable, accountStatus);
+        return JsonSerializer.SerializeToElement(new
+        {
+            verifiedSameSession = sameSession,
+            smokeTestPassed = smokePassed,
+            authenticatedLocalIpc = ipc,
+            processSessions,
+            processIntegrity,
+            executionContext = new { sessionId = currentSessionId, user = currentUser,
+                integrityLevel = currentIntegrity, userInteractive = Environment.UserInteractive, desktop = currentDesktop },
+            session = new { before, after },
+            repository = git,
+            edge,
+            publicPullRequestsAndChecks = pulls,
+            visualStudioCode = code,
+            accountRead = account
+        });
+    }
+
+    private static string? ReadString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static bool ReadBoolean(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+
+    private static int? ReadNullableInt(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : null;
+
+    private static JsonElement ToElement(object value) => JsonSerializer.SerializeToElement(value);
+
+    private async Task<JsonElement> VerifyPipeAsync(CancellationToken cancellationToken)
+    {
+        var name = DesktopCompanionProtocol.PipeNameForCurrentUser();
+        try
+        {
+            await using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, 4096, 4096);
+            var listener = Task.Run(async () =>
+            {
+                await server.WaitForConnectionAsync(cancellationToken);
+                using var reader = new StreamReader(server, new UTF8Encoding(false), false, 2048, leaveOpen: true);
+                await using var writer = new StreamWriter(server, new UTF8Encoding(false), 2048, leaveOpen: true) { AutoFlush = true };
+                var line = await DesktopCompanionProtocol.ReadBoundedLineAsync(reader, 4096, cancellationToken);
+                if (!DesktopCompanionProtocol.TryParseRequest(line, out var request) || request is null)
+                    return ToElement(new { error = "invalid_request" });
+                var result = await ExecuteAsync(request.Action, cancellationToken);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = request.RequestId, result }));
+                return ToElement(new { action = request.Action });
+            }, cancellationToken);
+            var clientResult = await new DesktopCompanionClient(name).ExecuteAsync("read-workspace", cancellationToken);
+            var serverResult = await listener.WaitAsync(TimeSpan.FromSeconds(4), cancellationToken);
+            if (clientResult.TryGetProperty("error", out var error)) return ToElement(new { error = error.GetString() });
+            if (!serverResult.TryGetProperty("action", out _)) return serverResult;
+            return serverResult;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or OperationCanceledException or TimeoutException)
+        {
+            return ToElement(new { error = "companion_ipc_unavailable" });
+        }
+    }
+
+    private async Task<object> ReadGithubAccountAsync(CancellationToken cancellationToken)
+    {
+        const string profileSettingsUrl = "https://github.com/settings/profile";
+        var opened = OpenEdge(profileSettingsUrl, profileSettingsUrl);
+        if (ReadString(ToElement(opened), "status") == "launch_failed")
+            return new { status = "failed", username = (string?)null };
+
+        var deadline = DateTime.UtcNow.AddSeconds(4);
+        var menuOpened = false;
+        while (DateTime.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        {
+            var observation = TryReadGithubAccountState(!menuOpened, out var openedThisPass);
+            menuOpened |= openedThisPass;
+            if (observation.Status is "verified" or "signed_out")
+                return new { status = observation.Status, username = observation.Username };
+            await Task.Delay(250, cancellationToken);
+        }
+        return new { status = "not_verified", username = (string?)null };
+    }
+
+    private GithubAccountSnapshot TryReadGithubAccountState(bool allowOpenMenu, out bool menuOpened)
+    {
+        menuOpened = false;
+        try
+        {
+            using var automation = new UIA3Automation();
+            var desktop = automation.GetDesktop();
+            foreach (var process in GetDedicatedEdgeProcesses())
+            {
+                using (process)
+                {
+                    var windows = desktop.FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
+                    foreach (var window in windows)
+                    {
+                        var address = ReadAddressBar(window);
+                        if (DesktopCompanionVerification.IsGithubLoginPage(address.Value))
+                        {
+                            var loginLabels = ReadAccessibleLabels(window);
+                            if (DesktopCompanionVerification.HasGithubSignedOutMarker(loginLabels))
+                                return new("signed_out", null);
+                            continue;
+                        }
+                        if (!DesktopCompanionVerification.GithubAddressMatches(address.Value, "https://github.com/settings/profile")) continue;
+                        var labels = ReadAccessibleLabels(window);
+                        var visibleUsername = DesktopCompanionVerification.ExtractSignedInUsername(labels);
+                        if (visibleUsername is not null) return new("verified", visibleUsername);
+                        if (!allowOpenMenu) continue;
+                        var buttons = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+                        var profileMenu = buttons.FirstOrDefault(button =>
+                        {
+                            var name = SafeName(button);
+                            return name.Contains("view profile and more", StringComparison.OrdinalIgnoreCase) ||
+                                name.Contains("open user navigation menu", StringComparison.OrdinalIgnoreCase);
+                        });
+                        if (profileMenu is null) continue;
+                        try { profileMenu.Patterns.Invoke.Pattern.Invoke(); }
+                        catch { continue; }
+                        menuOpened = true;
+                        Thread.Sleep(200);
+                        var afterClickLabels = ReadAccessibleLabels(window);
+                        var login = DesktopCompanionVerification.ExtractSignedInUsername(afterClickLabels);
+                        if (login is not null) return new("verified", login);
+                    }
+                }
+            }
+        }
+        catch { /* Accessibility or browser state was insufficient; report not_verified. */ }
+        return new("not_verified", null);
+    }
+
+    private static int[] ReadProcessSessions(string processName)
+    {
+        try
+        {
+            return Process.GetProcessesByName(processName).Select(process =>
+            {
+                using (process) { try { return process.SessionId; } catch { return -1; } }
+            }).Where(session => session >= 0).Distinct().ToArray();
+        }
+        catch { return []; }
+    }
+
+    private static object ObserveApplications()
+    {
+        var observation = WindowsDesktopAutomation.ObserveOpenApprovedApplications();
+        var formatted = WindowsDesktopAutomation.FormatApplicationObservation(observation);
+        return formatted.Error is not null
+            ? new { error = "desktop_observation_unavailable" }
+            : new { observationStatus = formatted.Status, applications = observation.Applications };
+    }
+
+    private object OpenWorkspace()
+    {
+        var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+        start.ArgumentList.Add(workspace);
+        Process.Start(start);
+        var snapshot = WaitForExplorerWorkspace(TimeSpan.FromSeconds(8));
+        return new { succeeded = snapshot.WorkspaceVerified, windowVerified = snapshot.WindowFound,
+            workspaceVerified = snapshot.WorkspaceVerified, sessionId = snapshot.SessionId };
+    }
+
+    private object OpenWorkspaceItem(string relativePath)
+    {
+        var fullPath = DesktopOperator.ResolveWorkspaceItemPath(workspace, relativePath);
+        if (fullPath is null) return new { succeeded = false, status = "workspace_item_denied", windowVerified = false };
+        var isDirectory = Directory.Exists(fullPath);
+        try
+        {
+            var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+            start.ArgumentList.Add(isDirectory ? fullPath : $"/select,{fullPath}");
+            Process.Start(start);
+            var snapshot = WaitForExplorerItem(fullPath, isDirectory, TimeSpan.FromSeconds(8));
+            return new { succeeded = snapshot.ItemVerified, status = snapshot.ItemVerified ? "verified" : "item_not_verified",
+                windowVerified = snapshot.WindowFound, itemVerified = snapshot.ItemVerified,
+                itemName = Path.GetFileName(fullPath), itemType = isDirectory ? "directory" : "file",
+                sessionId = snapshot.SessionId };
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return new { succeeded = false, status = "launch_failed", windowVerified = false, itemVerified = false,
+                errorType = error.GetType().Name };
+        }
+    }
+
+    private sealed record ExplorerItemSnapshot(bool WindowFound, bool ItemVerified, int? SessionId);
+
+    private ExplorerItemSnapshot WaitForExplorerItem(string expectedPath, bool isDirectory, TimeSpan duration)
+    {
+        var until = DateTime.UtcNow + duration;
+        ExplorerItemSnapshot snapshot = new(false, false, null);
+        var expectedLocation = isDirectory ? expectedPath : Path.GetDirectoryName(expectedPath)!;
+        var expectedName = Path.GetFileName(expectedPath);
+        do
+        {
+            try
+            {
+                using var automation = new UIA3Automation();
+                foreach (var process in Process.GetProcessesByName("explorer"))
+                {
+                    using (process)
+                    {
+                        var session = SafeSessionId(process);
+                        if (session != Process.GetCurrentProcess().SessionId) continue;
+                        var windows = automation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
+                        foreach (var window in windows)
+                        {
+                            var addressPaths = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit)).Select(edit =>
+                            {
+                                try { return edit.Patterns.Value.Pattern.Value.Value; }
+                                catch { return null; }
+                            });
+                            var locationVerified = addressPaths.Any(path => path is not null && string.Equals(
+                                path.TrimEnd(['\\', '/']), expectedLocation.TrimEnd(['\\', '/']), StringComparison.OrdinalIgnoreCase));
+                            if (!locationVerified) continue;
+                            if (isDirectory)
+                            {
+                                snapshot = new(true, true, session);
+                                return snapshot;
+                            }
+                            var fileItems = window.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
+                                .Concat(window.FindAllDescendants(cf => cf.ByControlType(ControlType.DataItem)));
+                            var selected = fileItems.Any(item =>
+                                string.Equals(SafeName(item), expectedName, StringComparison.OrdinalIgnoreCase) &&
+                                SafeBoolean(() => item.Patterns.SelectionItem.Pattern.IsSelected.ValueOrDefault));
+                            snapshot = new(true, selected, session);
+                            if (selected) return snapshot;
+                        }
+                    }
+                }
+            }
+            catch { }
+            Thread.Sleep(250);
+        } while (DateTime.UtcNow < until);
+        return snapshot;
+    }
+
+    private object OpenApprovedApplication(string action)
+    {
+        var (processName, fileName, uri) = action switch
+        {
+            "open-settings" => ("SystemSettings", (string?)null, "ms-settings:"),
+            "open-task-manager" => ("Taskmgr", Path.Combine(Environment.SystemDirectory, "Taskmgr.exe"), (string?)null),
+            "open-word" => ("WINWORD", FindOfficeExecutable("WINWORD.EXE"), null),
+            "open-excel" => ("EXCEL", FindOfficeExecutable("EXCEL.EXE"), null),
+            "open-powerpoint" => ("POWERPNT", FindOfficeExecutable("POWERPNT.EXE"), null),
+            "open-pdf-reader" => FindPdfReaderLaunch(),
+            _ => ("", null, null)
+        };
+        if (string.IsNullOrWhiteSpace(processName) || (fileName is null && uri is null))
+            return new { succeeded = false, status = "application_unavailable", windowVerified = false };
+        try
+        {
+            var start = new ProcessStartInfo(fileName ?? uri!) { UseShellExecute = uri is not null };
+            Process.Start(start);
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (WindowsDesktopAutomation.HasVisibleWindow(processName))
+                    return new { succeeded = true, status = "opened", application = processName,
+                        windowVerified = true, readOnly = ComputerUsePolicy.IsReadOnlyDesktopApplication(processName) };
+                Thread.Sleep(250);
+            }
+            return new { succeeded = false, status = "window_not_verified", application = processName, windowVerified = false };
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return new { succeeded = false, status = "launch_failed", application = processName, windowVerified = false,
+                errorType = error.GetType().Name };
+        }
+    }
+
+    private static string? FindOfficeExecutable(string executableName)
+    {
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => !string.IsNullOrWhiteSpace(root));
+        return roots.Select(root => Path.Combine(root, "Microsoft Office", "root", "Office16", executableName))
+            .FirstOrDefault(File.Exists);
+    }
+
+    private static (string ProcessName, string? FileName, string? Uri) FindPdfReaderLaunch()
+    {
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => !string.IsNullOrWhiteSpace(root));
+        foreach (var root in roots)
+        {
+            var candidates = new[]
+            {
+                ("Acrobat", Path.Combine(root, "Adobe", "Acrobat DC", "Acrobat", "Acrobat.exe")),
+                ("AcroRd32", Path.Combine(root, "Adobe", "Acrobat Reader DC", "Reader", "AcroRd32.exe")),
+                ("AcroRd32", Path.Combine(root, "Adobe", "Acrobat Reader", "Reader", "AcroRd32.exe"))
+            };
+            var found = candidates.FirstOrDefault(candidate => File.Exists(candidate.Item2));
+            if (!string.IsNullOrWhiteSpace(found.Item2)) return (found.Item1, found.Item2, null);
+        }
+        return ("Acrobat", null, null);
+    }
+
+    private object OpenVsCode()
+    {
+        var executable = FindVsCode();
+        if (executable is null) return new { error = "vscode_unavailable" };
+        var before = ReadVsCodeWindowInventory();
+        if (!before.Available)
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, expectedWorkspace = Path.GetFullPath(workspace),
+                observedWorkspace = (string?)null, workspaceVerificationReason = "prelaunch_window_inventory_unavailable",
+                evidence = new { windowTitleMatched = false, rootLabelMatched = false, accessiblePathMatched = false,
+                    existingWindowObserved = false } };
+        var start = new ProcessStartInfo(executable) { UseShellExecute = false };
+        foreach (var argument in DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(workspace))
+            start.ArgumentList.Add(argument);
+        Process? launched;
+        try { launched = Process.Start(start); }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "launch_failed" };
+        }
+        if (launched is null)
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "launch_failed" };
+        using (launched)
+        {
+        VsCodeWorkspaceSnapshot snapshot;
+        try { snapshot = WaitForWorkspaceWindow(TimeSpan.FromSeconds(12), before.Handles); }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            var expected = Path.GetFullPath(workspace);
+            return new { succeeded = false, status = "workspace_not_verified", processStarted = true,
+                windowVerified = false, workspaceVerified = false, expectedWorkspace = expected,
+                observedWorkspace = (string?)null, workspaceVerificationReason = "window_inspection_failed",
+                evidence = new { windowTitleMatched = false, rootLabelMatched = false, accessiblePathMatched = false,
+                    existingWindowObserved = false } };
+        }
+        return new
+        {
+            succeeded = snapshot.WorkspaceVerified,
+            status = !snapshot.WindowFound && snapshot.Reason is "timeout_window_not_found" or "no_new_window_after_launch"
+                ? "window_not_found" :
                 snapshot.WorkspaceVerified ? "verified" : "workspace_not_verified",
             processStarted = true,
             windowVerified = snapshot.WindowFound,
@@ -888,4 +1352,3 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         return paths.FirstOrDefault(File.Exists);
     }
 }
-
