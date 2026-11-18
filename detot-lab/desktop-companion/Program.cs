@@ -287,7 +287,11 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             return new { succeeded = false, status = "target_state_unavailable", verification = "not_run" };
         if (!currentlyEnabled || currentlyOffscreen)
             return new { succeeded = false, status = "target_not_interactable", verification = "not_run" };
-        var passwordKnown = TryReadBoolean(() => target.Element.Properties.IsPassword.ValueOrDefault, out var isPassword);
+        var passwordKnown = TryReadSupportedBoolean(() =>
+        {
+            var supported = target.Element.Properties.IsPassword.TryGetValue(out var value);
+            return (supported, value);
+        }, out var isPassword);
         if (request.Action == "type-text" && !passwordKnown)
             return new { succeeded = false, status = "target_security_state_unavailable", verification = "not_run" };
         if (request.Action == "type-text" && isPassword)
@@ -323,8 +327,16 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     var setStatus = ComputerUsePolicy.TrySetProtectedTextValue(
                         SafeControlType(target.Element) == "Edit",
                         () => target.Element.Patterns.Value.IsSupported,
-                        () => target.Element.Properties.IsPassword.ValueOrDefault,
-                        () => target.Element.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault,
+                        () =>
+                        {
+                            var supported = target.Element.Properties.IsPassword.TryGetValue(out var value);
+                            return (supported, value);
+                        },
+                        () =>
+                        {
+                            var supported = target.Element.Patterns.Value.Pattern.IsReadOnly.TryGetValue(out var value);
+                            return (supported, value);
+                        },
                         value => target.Element.Patterns.Value.Pattern.SetValue(value),
                         request.Value!);
                     if (setStatus != "set") return new { succeeded = false, status = setStatus, verification = "not_run" };
@@ -471,6 +483,17 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     private static bool TryReadBoolean(Func<bool> read, out bool value)
     {
         try { value = read(); return true; }
+        catch { value = false; return false; }
+    }
+
+    private static bool TryReadSupportedBoolean(Func<(bool Supported, bool Value)> read, out bool value)
+    {
+        try
+        {
+            var result = read();
+            value = result.Value;
+            return result.Supported;
+        }
         catch { value = false; return false; }
     }
 

@@ -120,16 +120,22 @@ Check(!ComputerUsePolicy.AllowedUiActions("Edit", true, false, true,
       .Contains("type-text", StringComparer.Ordinal),
     "password UI elements never advertise text entry");
 var valueWrites = 0;
-Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => true, () => false,
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, true), () => (true, false),
         _ => valueWrites++, "synthetic") == "password_input_denied" && valueWrites == 0,
     "a target that changes to password is denied before SetValue");
-Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => false, () => true,
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, false), () => (true, true),
         _ => valueWrites++, "synthetic") == "target_read_only" && valueWrites == 0,
     "a target that changes to read-only is denied before SetValue");
-Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => throw new InvalidOperationException(), () => false,
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (false, false), () => (true, false),
+        _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
+    "an unsupported password flag fails closed before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, false), () => (false, false),
+        _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
+    "an unsupported read-only flag fails closed before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => throw new InvalidOperationException(), () => (true, false),
         _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
     "an unreadable password flag fails closed before SetValue");
-Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => false, () => false,
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, false), () => (true, false),
         _ => valueWrites++, "synthetic") == "set" && valueWrites == 1,
     "a freshly revalidated non-password editable value can be set");
 Check(!ComputerUsePolicy.AllowedUiActions("Edit", false, false, false,

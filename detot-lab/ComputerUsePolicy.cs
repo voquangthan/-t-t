@@ -53,15 +53,20 @@ public static class ComputerUsePolicy
     public static string VerificationStatus(bool postconditionObserved) =>
         postconditionObserved ? "verified" : "reobserve_required";
 
-    public static string TrySetProtectedTextValue(bool isEdit, Func<bool> supportsValue, Func<bool> readPassword,
-        Func<bool> readOnly, Action<string> setValue, string value)
+    public static string TrySetProtectedTextValue(bool isEdit, Func<bool> supportsValue,
+        Func<(bool Supported, bool Value)> readPassword, Func<(bool Supported, bool Value)> readOnly,
+        Action<string> setValue, string value)
     {
         if (!isEdit) return "not_editable";
         try
         {
             if (!supportsValue()) return "value_pattern_unavailable";
-            if (readPassword()) return "password_input_denied";
-            if (readOnly()) return "target_read_only";
+            var password = readPassword();
+            if (!password.Supported) return "target_security_state_unavailable";
+            if (password.Value) return "password_input_denied";
+            var readOnlyState = readOnly();
+            if (!readOnlyState.Supported) return "target_security_state_unavailable";
+            if (readOnlyState.Value) return "target_read_only";
         }
         catch { return "target_security_state_unavailable"; }
         setValue(value);
