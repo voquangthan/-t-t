@@ -153,6 +153,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             "open-edge" => OpenEdge("about:blank", "about:blank"),
             "open-github" => await OpenRepositoryPullsAsync(cancellationToken),
             "open-vscode" => OpenVsCode(),
+            "open-settings" or "open-task-manager" or "open-word" or "open-excel" or "open-powerpoint" or "open-pdf-reader"
+                => OpenApprovedApplication(request.Action),
             "read-workspace" => await ReadWorkspaceAsync(cancellationToken),
             "read-github-account" => await ReadGithubAccountAsync(cancellationToken),
             "read-github-pull-requests" => await ReadPullRequestsAsync(cancellationToken),
@@ -205,7 +207,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     var isPassword = SafeBoolean(() => node.Element.Properties.IsPassword.ValueOrDefault);
                     var enabled = SafeBoolean(() => node.Element.Properties.IsEnabled.ValueOrDefault);
                     var offscreen = SafeBoolean(() => node.Element.Properties.IsOffscreen.ValueOrDefault);
-                    var allowed = GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword);
+                    var allowed = ComputerUsePolicy.IsReadOnlyDesktopApplication(processName)
+                        ? Array.Empty<string>()
+                        : GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword);
                     var elementId = NewTargetId();
                     elementIds[node.Element] = elementId;
                     uiTargets[elementId] = new(node.Element, item.Handle, item.ProcessId, sessionId, controlType, allowed, isPassword,
@@ -261,6 +265,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         }
         if (target.SessionId != Process.GetCurrentProcess().SessionId)
             return new { succeeded = false, status = "wrong_interactive_session", verification = "not_run" };
+        var targetProcessName = SafeProcessName(target.ProcessId);
+        if (!ComputerUsePolicy.CanInteractWithApplication(targetProcessName, request.Action))
+            return new { succeeded = false, status = "read_only_application", verification = "not_run" };
         if (!IsWindowStillPresent(target.WindowHandle, target.ProcessId))
         {
             uiTargets.Remove(request.TargetId);
@@ -651,6 +658,67 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var snapshot = WaitForExplorerWorkspace(TimeSpan.FromSeconds(8));
         return new { succeeded = snapshot.WorkspaceVerified, windowVerified = snapshot.WindowFound,
             workspaceVerified = snapshot.WorkspaceVerified, sessionId = snapshot.SessionId };
+    }
+
+    private object OpenApprovedApplication(string action)
+    {
+        var (processName, fileName, uri) = action switch
+        {
+            "open-settings" => ("SystemSettings", (string?)null, "ms-settings:"),
+            "open-task-manager" => ("Taskmgr", Path.Combine(Environment.SystemDirectory, "Taskmgr.exe"), (string?)null),
+            "open-word" => ("WINWORD", FindOfficeExecutable("WINWORD.EXE"), null),
+            "open-excel" => ("EXCEL", FindOfficeExecutable("EXCEL.EXE"), null),
+            "open-powerpoint" => ("POWERPNT", FindOfficeExecutable("POWERPNT.EXE"), null),
+            "open-pdf-reader" => FindPdfReaderLaunch(),
+            _ => ("", null, null)
+        };
+        if (string.IsNullOrWhiteSpace(processName) || (fileName is null && uri is null))
+            return new { succeeded = false, status = "application_unavailable", windowVerified = false };
+        try
+        {
+            var start = new ProcessStartInfo(fileName ?? uri!) { UseShellExecute = uri is not null };
+            Process.Start(start);
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (WindowsDesktopAutomation.HasVisibleWindow(processName))
+                    return new { succeeded = true, status = "opened", application = processName,
+                        windowVerified = true, readOnly = ComputerUsePolicy.IsReadOnlyDesktopApplication(processName) };
+                Thread.Sleep(250);
+            }
+            return new { succeeded = false, status = "window_not_verified", application = processName, windowVerified = false };
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return new { succeeded = false, status = "launch_failed", application = processName, windowVerified = false,
+                errorType = error.GetType().Name };
+        }
+    }
+
+    private static string? FindOfficeExecutable(string executableName)
+    {
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => !string.IsNullOrWhiteSpace(root));
+        return roots.Select(root => Path.Combine(root, "Microsoft Office", "root", "Office16", executableName))
+            .FirstOrDefault(File.Exists);
+    }
+
+    private static (string ProcessName, string? FileName, string? Uri) FindPdfReaderLaunch()
+    {
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => !string.IsNullOrWhiteSpace(root));
+        foreach (var root in roots)
+        {
+            var candidates = new[]
+            {
+                ("Acrobat", Path.Combine(root, "Adobe", "Acrobat DC", "Acrobat", "Acrobat.exe")),
+                ("AcroRd32", Path.Combine(root, "Adobe", "Acrobat Reader DC", "Reader", "AcroRd32.exe")),
+                ("AcroRd32", Path.Combine(root, "Adobe", "Acrobat Reader", "Reader", "AcroRd32.exe"))
+            };
+            var found = candidates.FirstOrDefault(candidate => File.Exists(candidate.Item2));
+            if (!string.IsNullOrWhiteSpace(found.Item2)) return (found.Item1, found.Item2, null);
+        }
+        return ("Acrobat", null, null);
     }
 
     private object OpenVsCode()

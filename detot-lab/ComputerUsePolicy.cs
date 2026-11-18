@@ -13,7 +13,13 @@ public static class ComputerUsePolicy
         "open-workspace",
         "open-github",
         "open-edge",
-        "open-vscode"
+        "open-vscode",
+        "open-settings",
+        "open-task-manager",
+        "open-word",
+        "open-excel",
+        "open-powerpoint",
+        "open-pdf-reader"
     };
 
     private static readonly HashSet<string> UiActions = new(StringComparer.Ordinal)
@@ -26,6 +32,13 @@ public static class ComputerUsePolicy
     public static bool CanNavigate(string? action) => action is not null && NavigationActions.Contains(action);
 
     public static bool CanInteract(string? action) => action is not null && UiActions.Contains(action);
+
+    public static bool IsReadOnlyDesktopApplication(string? processName) => processName is not null &&
+        (processName.Equals("SystemSettings", StringComparison.OrdinalIgnoreCase) ||
+         processName.Equals("Taskmgr", StringComparison.OrdinalIgnoreCase));
+
+    public static bool CanInteractWithApplication(string? processName, string? action) =>
+        !IsReadOnlyDesktopApplication(processName) || action == "activate-window";
 
     public static string[] AllowedUiActions(string controlType, bool enabled, bool offscreen, bool isPassword,
         bool supportsInvoke, bool supportsSelection, bool supportsValue, bool valueReadOnly, bool supportsScroll)
@@ -58,8 +71,9 @@ public static class ComputerUsePolicy
     public static object Describe() => new
     {
         observe = new[] { "approved-applications", "desktop-ui", "github-account", "github-pull-requests" },
-        navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode" },
+        navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader" },
         interact = new[] { "activate-window", "select-element", "type-text", "scroll-element", "press-key (navigation keys only)", "click-element (Hyperlink/TabItem only)" },
+        readOnlyApplications = new[] { "Windows Settings", "Task Manager" },
         approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "double-click-element on ListItem/TreeItem", "keyboard-submit" },
         interactionRequirements = new[] { "fresh-observation-target-id", "same-interactive-session", "revalidate-target-before-action" },
         accountSelection = Array.Empty<string>(),

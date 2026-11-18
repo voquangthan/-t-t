@@ -10,7 +10,8 @@ public static class DesktopCompanionProtocol
         "observe-applications", "open-workspace", "open-edge", "open-github",
         "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
         "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
-        "select-element", "type-text", "scroll-element", "press-key"
+        "select-element", "type-text", "scroll-element", "press-key", "open-settings",
+        "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader"
     };
     private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
         { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key" };

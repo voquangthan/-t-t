@@ -69,6 +69,17 @@ Check(successfulEmptyMessage.Status == "empty" && successfulEmptyMessage.Reply i
       successfulEmptyMessage.Reply.Contains("không thấy ứng dụng nào", StringComparison.OrdinalIgnoreCase),
     "only a successful complete empty observation may report no apps");
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
+Check(ComputerUsePolicy.CanNavigate("open-settings") && ComputerUsePolicy.CanNavigate("open-task-manager") &&
+      ComputerUsePolicy.CanNavigate("open-word") && ComputerUsePolicy.CanNavigate("open-excel") &&
+      ComputerUsePolicy.CanNavigate("open-powerpoint") && ComputerUsePolicy.CanNavigate("open-pdf-reader"),
+    "only fixed Windows and document app launch actions are allowlisted");
+Check(ComputerUsePolicy.IsReadOnlyDesktopApplication("SystemSettings") &&
+      ComputerUsePolicy.IsReadOnlyDesktopApplication("Taskmgr") &&
+      !ComputerUsePolicy.CanInteractWithApplication("SystemSettings", "type-text") &&
+      !ComputerUsePolicy.CanInteractWithApplication("Taskmgr", "click-element") &&
+      ComputerUsePolicy.CanInteractWithApplication("SystemSettings", "activate-window") &&
+      ComputerUsePolicy.CanInteractWithApplication("WINWORD", "type-text"),
+    "Settings and Task Manager stay observation-only while app activation remains available");
 Check(ComputerUsePolicy.CanInteract("press-key") && !ComputerUsePolicy.CanInteract("run-shell"),
     "UI interaction exposes a fixed key action while arbitrary commands stay denied");
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
@@ -306,6 +317,13 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở Edge đi") == "open-edge",
     "a direct chat request maps to an allowlisted Edge action");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đệ Tốt, mở VS Code giúp t") == "open-vscode",
     "a direct chat request maps to an allowlisted VS Code action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở Windows Settings") == "open-settings" &&
+      ComputerUseChatIntent.DetectDirectRequest("Open Task Manager") == "open-task-manager" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Word") == "open-word" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Excel") == "open-excel" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở PowerPoint") == "open-powerpoint" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở PDF Reader") == "open-pdf-reader",
+    "fixed application launch intents are recognized without command text");
 Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra tài khoản GitHub hiện tại") == "read-github-account",
     "a direct GitHub account inspection request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-github-pull-requests",

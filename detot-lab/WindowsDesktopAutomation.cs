@@ -17,7 +17,14 @@ public static class WindowsDesktopAutomation
             ["explorer"] = "File Explorer",
             ["devenv"] = "Visual Studio",
             ["notepad"] = "Notepad",
-            ["WindowsTerminal"] = "Windows Terminal"
+            ["WindowsTerminal"] = "Windows Terminal",
+            ["SystemSettings"] = "Windows Settings (read-only)",
+            ["Taskmgr"] = "Task Manager (read-only)",
+            ["WINWORD"] = "Microsoft Word",
+            ["EXCEL"] = "Microsoft Excel",
+            ["POWERPNT"] = "Microsoft PowerPoint",
+            ["Acrobat"] = "PDF Reader",
+            ["AcroRd32"] = "PDF Reader"
         };
 
     public static IReadOnlyList<string> ReadOpenApprovedApplications()

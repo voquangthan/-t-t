@@ -232,6 +232,13 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
             return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-workspace", cancellationToken));
         case "open-github":
             return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-github", cancellationToken));
+        case "open-settings":
+        case "open-task-manager":
+        case "open-word":
+        case "open-excel":
+        case "open-powerpoint":
+        case "open-pdf-reader":
+            return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, cancellationToken));
         default:
             return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, request.TargetId,
                 request.Text, request.Direction, cancellationToken));
@@ -1530,6 +1537,12 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
         "open-vscode" => "open-vscode",
         "open-edge" => "open-edge",
         "open-github" => "open-github",
+        "open-settings" => "open-settings",
+        "open-task-manager" => "open-task-manager",
+        "open-word" => "open-word",
+        "open-excel" => "open-excel",
+        "open-powerpoint" => "open-powerpoint",
+        "open-pdf-reader" => "open-pdf-reader",
         "read-github-account" => "read-github-account",
         "read-github-pull-requests" => "read-github-pull-requests",
         _ => ""
@@ -1585,6 +1598,29 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
             action == "open-github" ? "Đã mở và xác minh GitHub trong profile riêng của Đệ Tốt." : "Đã mở Edge trong profile riêng của Đệ Tốt.";
         return Results.Ok(new { reply, toolUsed = true, computerUseAction = action, windowVerified = verified,
             urlVerified, url = response.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null });
+    }
+    if (action is "open-settings" or "open-task-manager" or "open-word" or "open-excel" or "open-powerpoint" or "open-pdf-reader")
+    {
+        var verified = response.TryGetProperty("windowVerified", out var verifiedValue) && verifiedValue.ValueKind == JsonValueKind.True;
+        var status = response.TryGetProperty("status", out var statusValue) && statusValue.ValueKind == JsonValueKind.String
+            ? statusValue.GetString() : "unavailable";
+        var label = action switch
+        {
+            "open-settings" => "Windows Settings",
+            "open-task-manager" => "Task Manager",
+            "open-word" => "Microsoft Word",
+            "open-excel" => "Microsoft Excel",
+            "open-powerpoint" => "Microsoft PowerPoint",
+            _ => "PDF Reader"
+        };
+        var reply = verified ? $"Đã mở và xác minh cửa sổ {label}." : status switch
+        {
+            "application_unavailable" => $"Không tìm thấy {label} trên máy này.",
+            "launch_failed" => $"Windows không mở được {label}.",
+            _ => $"Đã gửi yêu cầu mở {label}, nhưng chưa xác minh được cửa sổ."
+        };
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action, status,
+            windowVerified = verified, readOnly = action is "open-settings" or "open-task-manager" });
     }
     return ToChatActionResponse(response, action);
 }
