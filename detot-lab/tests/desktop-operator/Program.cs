@@ -37,6 +37,10 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+Check(ComputerUsePolicy.CanObserve("desktop-ui"), "general desktop UI observation is explicitly allowed");
+Check(ComputerUseChatIntent.DetectDirectRequest("Quan sát giao diện") == "read-desktop-ui" &&
+      ComputerUseChatIntent.ObservationTargetForAction("read-desktop-ui") == "desktop-ui",
+    "a bounded natural-language request reaches the general UI observation action");
 var emptyApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation([], available: true, partial: false);
 Check(emptyApplicationObservation.Status == "empty" && emptyApplicationObservation.Applications.Count == 0,
     "a successful empty desktop observation is distinct from an error");
@@ -65,9 +69,29 @@ Check(successfulEmptyMessage.Status == "empty" && successfulEmptyMessage.Reply i
       successfulEmptyMessage.Reply.Contains("không thấy ứng dụng nào", StringComparison.OrdinalIgnoreCase),
     "only a successful complete empty observation may report no apps");
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
+Check(ComputerUsePolicy.CanInteract("press-key") && !ComputerUsePolicy.CanInteract("run-shell"),
+    "UI interaction exposes a fixed key action while arbitrary commands stay denied");
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
+var safeUiActions = ComputerUsePolicy.AllowedUiActions("Hyperlink", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false, supportsScroll: false);
+Check(safeUiActions.SequenceEqual(["click-element", "press-key"]),
+    "only safe navigation actions are advertised for a visible hyperlink");
+Check(!ComputerUsePolicy.AllowedUiActions("Button", true, false, false,
+        supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false, supportsScroll: false)
+      .Contains("click-element", StringComparer.Ordinal) &&
+      ComputerUsePolicy.RequiresUiApproval("Button", "click-element"),
+    "generic button invocation requires approval instead of inferring risk from its label");
+Check(!ComputerUsePolicy.AllowedUiActions("Edit", true, false, true,
+        supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false)
+      .Contains("type-text", StringComparer.Ordinal),
+    "password UI elements never advertise text entry");
+Check(!ComputerUsePolicy.AllowedUiActions("Edit", false, false, false,
+        supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false).Any() &&
+      !ComputerUsePolicy.AllowedUiActions("Edit", true, true, false,
+        supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false).Any(),
+    "disabled and offscreen elements expose no actions");
 Check(DesktopCompanionProtocol.IsAllowedAction("read-workspace") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-pull-requests") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-account"),
@@ -83,6 +107,23 @@ Check(DesktopCompanionProtocol.TryParseRequest(companionRequest, out var parsedC
 Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"open-edge\",\"requestId\":\"00000000000000000000000000000000\",\"command\":\"whoami\"}", out _) &&
       !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"run-shell\",\"requestId\":\"00000000000000000000000000000000\"}", out _),
     "Desktop Companion rejects injected properties and unknown actions");
+var uiTargetId = Guid.NewGuid().ToString("N");
+var uiRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"), uiTargetId, "search text");
+Check(DesktopCompanionProtocol.TryParseRequest(uiRequest, out var parsedUiRequest) &&
+      parsedUiRequest?.Action == "type-text" && parsedUiRequest.TargetId == uiTargetId && parsedUiRequest.Value == "search text",
+    "UIA request carries only an observed opaque target and bounded text value");
+Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"type-text\",\"requestId\":\"00000000000000000000000000000000\",\"targetId\":\"00000000000000000000000000000000\",\"value\":\"x\",\"value\":\"y\"}", out _) &&
+      !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"press-key\",\"requestId\":\"00000000000000000000000000000000\",\"targetId\":\"00000000000000000000000000000000\",\"value\":\"Enter\"}", out _),
+    "UIA IPC rejects duplicate fields and submit/command keys");
+Check(DesktopCompanionProtocol.TryParseRequest(
+        DesktopCompanionProtocol.SerializeRequest("press-key", Guid.NewGuid().ToString("N"), uiTargetId, "ArrowDown"), out var keyRequest) &&
+      keyRequest?.Value == "ArrowDown" &&
+      !DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
+      !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, new string('x', 513), null),
+    "UIA input enforces the navigation-key allowlist and text size bound");
+var cappedUiResponse = DesktopCompanionProtocol.SerializeResponse(Guid.NewGuid().ToString("N"), new { data = new string('x', 32 * 1024) });
+Check(cappedUiResponse.Length < 1024 && cappedUiResponse.Contains("response_too_large", StringComparison.Ordinal),
+    "desktop IPC caps oversized UI observations to a bounded protocol error");
 var dedicatedEdgeCommand = "msedge.exe --user-data-dir=\"C:\\Users\\Tester\\AppData\\Local\\DetotLab\\Edge Profile\" --new-window https://github.com/owner/repo/pulls";
 Check(DesktopCompanionVerification.IsDedicatedEdgeCommandLine(dedicatedEdgeCommand,
       "C:\\Users\\Tester\\AppData\\Local\\DetotLab\\Edge Profile") &&

@@ -7,6 +7,8 @@ using System.Text;
 using System.Text.Json;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Input;
+using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 
 if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Desktop Companion requires Windows.");
@@ -38,7 +40,7 @@ Console.WriteLine($"Desktop Companion ready for this Windows user (pipe: {pipeNa
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
 await new DesktopCompanionPipeServer(pipeName).RunAsync(
-    (request, cancellationToken) => handler.ExecuteAsync(request.Action, cancellationToken), shutdown.Token);
+    (request, cancellationToken) => handler.ExecuteAsync(request, cancellationToken), shutdown.Token);
 return 0;
 
 static class DesktopSessionDiagnostics
@@ -126,20 +128,331 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     private sealed record VsCodeWindowInventory(bool Available, IReadOnlySet<nint> Handles);
     private sealed record AddressBarSnapshot(bool Available, string? Value);
     private sealed record GithubAccountSnapshot(string Status, string? Username);
+    private sealed record CachedUiTarget(AutomationElement Element, nint WindowHandle, int ProcessId, int SessionId,
+        string ControlType, string[] AllowedActions, bool IsPassword, DateTime ExpiresAt);
+    private readonly UIA3Automation uiAutomation = new();
+    private readonly Dictionary<string, CachedUiTarget> uiTargets = new(StringComparer.Ordinal);
+    private const int UiWindowLimit = 6;
+    private const int UiElementLimitPerWindow = 12;
+    private const int UiTreeDepthLimit = 4;
+    private const int UiTargetLifetimeSeconds = 90;
     [StructLayout(LayoutKind.Sequential)] private struct UnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
 
-    public async Task<object> ExecuteAsync(string action, CancellationToken cancellationToken) => action switch
+    public Task<object> ExecuteAsync(string action, CancellationToken cancellationToken) =>
+        ExecuteAsync(new DesktopCompanionProtocol.Request(action, Guid.NewGuid().ToString("N")), cancellationToken);
+
+    public async Task<object> ExecuteAsync(DesktopCompanionProtocol.Request request, CancellationToken cancellationToken)
     {
-        "observe-applications" => ObserveApplications(),
-        "open-workspace" => OpenWorkspace(),
-        "open-edge" => OpenEdge("about:blank", "about:blank"),
-        "open-github" => await OpenRepositoryPullsAsync(cancellationToken),
-        "open-vscode" => OpenVsCode(),
-        "read-workspace" => await ReadWorkspaceAsync(cancellationToken),
-        "read-github-account" => await ReadGithubAccountAsync(cancellationToken),
-        "read-github-pull-requests" => await ReadPullRequestsAsync(cancellationToken),
-        _ => new { error = "action_not_allowed" }
+        return request.Action switch
+        {
+            "observe-applications" => ObserveApplications(),
+            "observe-desktop-ui" => ObserveDesktopUi(),
+            "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key"
+                => InteractWithUi(request),
+            "open-workspace" => OpenWorkspace(),
+            "open-edge" => OpenEdge("about:blank", "about:blank"),
+            "open-github" => await OpenRepositoryPullsAsync(cancellationToken),
+            "open-vscode" => OpenVsCode(),
+            "read-workspace" => await ReadWorkspaceAsync(cancellationToken),
+            "read-github-account" => await ReadGithubAccountAsync(cancellationToken),
+            "read-github-pull-requests" => await ReadPullRequestsAsync(cancellationToken),
+            _ => new { error = "action_not_allowed" }
+        };
+    }
+
+    private object ObserveDesktopUi()
+    {
+        uiTargets.Clear();
+        try
+        {
+            var desktop = uiAutomation.GetDesktop();
+            var allWindows = desktop.FindAllChildren(cf => cf.ByControlType(ControlType.Window));
+            var windows = allWindows
+                .Select(window => (Window: window, Handle: SafeNativeWindowHandle(window), ProcessId: SafeProcessId(window),
+                    Name: SafeName(window), Focused: SafeBoolean(() => window.Properties.HasKeyboardFocus.ValueOrDefault),
+                    Offscreen: SafeBoolean(() => window.Properties.IsOffscreen.ValueOrDefault)))
+                .Where(item => item.Handle > 0 && !item.Offscreen)
+                .OrderByDescending(item => item.Focused).Take(UiWindowLimit).ToArray();
+            var observedWindows = new List<object>();
+            var observedElements = new List<object>();
+            var truncated = allWindows.Length > UiWindowLimit;
+            foreach (var item in windows)
+            {
+                var windowId = NewTargetId();
+                var processName = SafeProcessName(item.ProcessId);
+                var sessionId = SafeSessionId(item.ProcessId);
+                uiTargets[windowId] = new(item.Window, item.Handle, item.ProcessId, sessionId, "Window", ["activate-window"], false,
+                    DateTime.UtcNow.AddSeconds(UiTargetLifetimeSeconds));
+                observedWindows.Add(new
+                {
+                    windowId,
+                    title = Clip(item.Name, 128),
+                    process = processName,
+                    processId = item.ProcessId,
+                    sessionId,
+                    focused = item.Focused,
+                    allowedActions = new[] { "activate-window" },
+                    dialog = SafeBoolean(() => item.Window.Properties.IsDialog.ValueOrDefault),
+                    enabled = SafeBoolean(() => item.Window.Properties.IsEnabled.ValueOrDefault)
+                });
+
+                var nodes = SafeDescendants(item.Window, UiElementLimitPerWindow + 1, UiTreeDepthLimit, out var treeTruncated);
+                if (nodes.Count > UiElementLimitPerWindow || treeTruncated) truncated = true;
+                var elementIds = new Dictionary<AutomationElement, string>();
+                foreach (var node in nodes.Take(UiElementLimitPerWindow))
+                {
+                    var controlType = SafeControlType(node.Element);
+                    var isPassword = SafeBoolean(() => node.Element.Properties.IsPassword.ValueOrDefault);
+                    var enabled = SafeBoolean(() => node.Element.Properties.IsEnabled.ValueOrDefault);
+                    var offscreen = SafeBoolean(() => node.Element.Properties.IsOffscreen.ValueOrDefault);
+                    var allowed = GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword);
+                    var elementId = NewTargetId();
+                    elementIds[node.Element] = elementId;
+                    uiTargets[elementId] = new(node.Element, item.Handle, item.ProcessId, sessionId, controlType, allowed, isPassword,
+                        DateTime.UtcNow.AddSeconds(UiTargetLifetimeSeconds));
+                    observedElements.Add(new
+                    {
+                        elementId,
+                        windowId,
+                        parentId = node.Parent is not null && elementIds.TryGetValue(node.Parent, out var parentId) ? parentId : windowId,
+                        depth = node.Depth,
+                        controlType,
+                        name = isPassword ? "[redacted]" : Clip(SafeName(node.Element), 96),
+                        automationId = Clip(SafeAutomationId(node.Element), 80),
+                        enabled,
+                        offscreen,
+                        focused = SafeBoolean(() => node.Element.Properties.HasKeyboardFocus.ValueOrDefault),
+                        isPassword,
+                        bounds = SafeBounds(node.Element),
+                        allowedActions = allowed,
+                        approvalRequiredActions = GetApprovalActions(controlType)
+                    });
+                }
+            }
+            return new
+            {
+                observationStatus = truncated ? "partial" : windows.Length == 0 ? "empty" : "available",
+                capturedAt = DateTimeOffset.UtcNow,
+                interactiveSessionId = Process.GetCurrentProcess().SessionId,
+                desktop = DesktopSessionDiagnostics.ReadThreadDesktopName(),
+                topLevelWindowCount = allWindows.Length,
+                windows = observedWindows,
+                elements = observedElements,
+                truncated,
+                targetExpiresInSeconds = UiTargetLifetimeSeconds
+            };
+        }
+        catch (Exception error)
+        {
+            uiTargets.Clear();
+            return new { observationStatus = "unavailable", error = "uia_observation_failed", errorType = error.GetType().Name,
+                windows = Array.Empty<object>(), elements = Array.Empty<object>(), truncated = false };
+        }
+    }
+
+    private object InteractWithUi(DesktopCompanionProtocol.Request request)
+    {
+        if (request.TargetId is null || !uiTargets.TryGetValue(request.TargetId, out var target))
+            return new { succeeded = false, status = "target_not_found", verification = "not_run" };
+        if (target.ExpiresAt < DateTime.UtcNow)
+        {
+            uiTargets.Remove(request.TargetId);
+            return new { succeeded = false, status = "target_expired", verification = "not_run" };
+        }
+        if (target.SessionId != Process.GetCurrentProcess().SessionId)
+            return new { succeeded = false, status = "wrong_interactive_session", verification = "not_run" };
+        if (!IsWindowStillPresent(target.WindowHandle, target.ProcessId))
+        {
+            uiTargets.Remove(request.TargetId);
+            return new { succeeded = false, status = "target_stale", verification = "not_run" };
+        }
+        if (target.IsPassword && request.Action == "type-text")
+            return new { succeeded = false, status = "password_input_denied", verification = "not_run" };
+        if (!target.AllowedActions.Contains(request.Action, StringComparer.Ordinal))
+            return new { succeeded = false,
+                status = IsApprovalRequired(target.ControlType, request.Action) ? "approval_required" : "action_not_allowed",
+                verification = "not_run" };
+        try
+        {
+            if (!SafeBoolean(() => target.Element.Properties.IsEnabled.ValueOrDefault) ||
+                SafeBoolean(() => target.Element.Properties.IsOffscreen.ValueOrDefault))
+                return new { succeeded = false, status = "target_not_interactable", verification = "not_run" };
+            var verified = false;
+            switch (request.Action)
+            {
+                case "activate-window":
+                    target.Element.Focus();
+                    verified = GetForegroundWindow() == target.WindowHandle;
+                    break;
+                case "select-element":
+                    target.Element.Patterns.SelectionItem.Pattern.Select();
+                    verified = target.Element.Patterns.SelectionItem.Pattern.IsSelected.ValueOrDefault;
+                    break;
+                case "click-element":
+                    target.Element.Click();
+                    break;
+                case "double-click-element":
+                    return new { succeeded = false, status = "approval_required", verification = "not_run" };
+                case "type-text":
+                    target.Element.Patterns.Value.Pattern.SetValue(request.Value!);
+                    verified = string.Equals(target.Element.Patterns.Value.Pattern.Value.Value, request.Value, StringComparison.Ordinal);
+                    break;
+                case "scroll-element":
+                    var scroll = target.Element.Patterns.Scroll.Pattern;
+                    var before = scroll.VerticalScrollPercent.ValueOrDefault;
+                    scroll.Scroll(ScrollAmount.NoAmount, request.Direction == "down" ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement);
+                    var after = scroll.VerticalScrollPercent.ValueOrDefault;
+                    verified = Math.Abs(after - before) > 0.01;
+                    break;
+                case "press-key":
+                    target.Element.Focus();
+                    if (GetForegroundWindow() != target.WindowHandle ||
+                        !SafeBoolean(() => target.Element.Properties.HasKeyboardFocus.ValueOrDefault))
+                        return new { succeeded = false, status = "target_focus_not_verified", verification = "not_run" };
+                    Keyboard.Press(request.Value switch
+                    {
+                        "Tab" => VirtualKeyShort.TAB,
+                        "ArrowUp" => VirtualKeyShort.UP,
+                        "ArrowDown" => VirtualKeyShort.DOWN,
+                        "ArrowLeft" => VirtualKeyShort.LEFT,
+                        "ArrowRight" => VirtualKeyShort.RIGHT,
+                        "Home" => VirtualKeyShort.HOME,
+                        "End" => VirtualKeyShort.END,
+                        "PageUp" => VirtualKeyShort.PRIOR,
+                        "PageDown" => VirtualKeyShort.NEXT,
+                        _ => throw new InvalidOperationException("Key is not on the navigation allowlist.")
+                    });
+                    verified = true;
+                    break;
+                default:
+                    return new { succeeded = false, status = "action_not_allowed", verification = "not_run" };
+            }
+            var refreshed = ObserveDesktopUi();
+            return new { succeeded = true, status = "performed", verification = verified ? "verified" : "reobserve_required",
+                targetInvalidated = true, refreshedObservation = refreshed };
+        }
+        catch (Exception error)
+        {
+            uiTargets.Remove(request.TargetId);
+            return new { succeeded = false, status = "action_failed", errorType = error.GetType().Name,
+                verification = "not_verified", targetInvalidated = true };
+        }
+    }
+
+    private static IReadOnlyList<(AutomationElement Element, AutomationElement? Parent, int Depth)> SafeDescendants(
+        AutomationElement root, int limit, int depthLimit, out bool truncated)
+    {
+        truncated = false;
+        var result = new List<(AutomationElement, AutomationElement?, int)>();
+        var queue = new Queue<(AutomationElement Parent, int Depth)>();
+        queue.Enqueue((root, 0));
+        while (queue.Count > 0 && result.Count < limit)
+        {
+            var (parent, depth) = queue.Dequeue();
+            if (depth >= depthLimit)
+            {
+                try { truncated |= parent.FindChildAt(0) is not null; }
+                catch { truncated = true; }
+                continue;
+            }
+            for (var index = 0; index < limit - result.Count; index++)
+            {
+                AutomationElement? child;
+                try { child = parent.FindChildAt(index); }
+                catch { truncated = true; break; }
+                if (child is null) break;
+                result.Add((child, ReferenceEquals(parent, root) ? null : parent, depth + 1));
+                if (depth + 1 < depthLimit) queue.Enqueue((child, depth + 1));
+                if (result.Count >= limit) break;
+            }
+        }
+        if (queue.Count > 0 || result.Count >= limit) truncated = true;
+        return result;
+    }
+
+    private static string[] GetAllowedUiActions(AutomationElement element, string controlType,
+        bool enabled, bool offscreen, bool isPassword)
+    {
+        try
+        {
+            var valueSupported = element.Patterns.Value.IsSupported;
+            var valueReadOnly = valueSupported && element.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
+            return ComputerUsePolicy.AllowedUiActions(controlType, enabled, offscreen, isPassword,
+                element.Patterns.Invoke.IsSupported, element.Patterns.SelectionItem.IsSupported,
+                valueSupported, valueReadOnly, element.Patterns.Scroll.IsSupported);
+        }
+        catch { return []; }
+    }
+
+    private static string[] GetApprovalActions(string controlType) => controlType switch
+    {
+        "Button" or "MenuItem" or "CheckBox" or "RadioButton" => ["click-element"],
+        "ListItem" or "TreeItem" => ["double-click-element"],
+        _ => []
     };
+
+    private static bool IsApprovalRequired(string controlType, string action) => ComputerUsePolicy.RequiresUiApproval(controlType, action);
+
+    private bool IsWindowStillPresent(nint handle, int expectedProcessId)
+    {
+        try
+        {
+            return uiAutomation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window))
+                .Any(window => SafeNativeWindowHandle(window) == handle && SafeProcessId(window) == expectedProcessId);
+        }
+        catch { return false; }
+    }
+
+    private static int SafeProcessId(AutomationElement element)
+    {
+        try { return element.Properties.ProcessId.ValueOrDefault; }
+        catch { return 0; }
+    }
+
+    private static string SafeProcessName(int processId)
+    {
+        try { using var process = Process.GetProcessById(processId); return process.ProcessName; }
+        catch { return "unknown"; }
+    }
+
+    private static int SafeSessionId(int processId)
+    {
+        try { using var process = Process.GetProcessById(processId); return process.SessionId; }
+        catch { return -1; }
+    }
+
+    private static string SafeControlType(AutomationElement element)
+    {
+        try { return element.Properties.ControlType.Value.ToString(); }
+        catch { return "Unknown"; }
+    }
+
+    private static string SafeAutomationId(AutomationElement element)
+    {
+        try { return element.Properties.AutomationId.Value ?? ""; }
+        catch { return ""; }
+    }
+
+    private static bool SafeBoolean(Func<bool> read)
+    {
+        try { return read(); }
+        catch { return false; }
+    }
+
+    private static object SafeBounds(AutomationElement element)
+    {
+        try
+        {
+            var rect = element.Properties.BoundingRectangle.Value;
+            return new { x = rect.X, y = rect.Y, width = rect.Width, height = rect.Height };
+        }
+        catch { return new { x = 0d, y = 0d, width = 0d, height = 0d }; }
+    }
+
+    private static string Clip(string? value, int length) => string.IsNullOrEmpty(value) ? "" : value.Length <= length ? value : value[..length];
+    private static string NewTargetId() => Guid.NewGuid().ToString("N");
+
+    [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
 
     public async Task<JsonElement> RunSmokeTestAsync(CancellationToken cancellationToken)
     {

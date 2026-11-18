@@ -215,8 +215,12 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
 {
     if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
         context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
-    if (!ComputerUsePolicy.CanNavigate(request.Action) || ComputerUsePolicy.CanWrite(request.Action))
+    if (ComputerUsePolicy.CanWrite(request.Action) ||
+        (!ComputerUsePolicy.CanNavigate(request.Action) && !ComputerUsePolicy.CanInteract(request.Action)))
         return Results.BadRequest(new { error = "Hành động không được hỗ trợ." });
+    if (ComputerUsePolicy.CanInteract(request.Action) &&
+        !DesktopCompanionProtocol.IsValidArguments(request.Action!, request.TargetId, request.Text, request.Direction))
+        return Results.BadRequest(new { error = "ID mục tiêu hoặc tham số thao tác UI không hợp lệ." });
 
     switch (request.Action)
     {
@@ -226,8 +230,11 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
             return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-vscode", cancellationToken));
         case "open-workspace":
             return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-workspace", cancellationToken));
-        default:
+        case "open-github":
             return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-github", cancellationToken));
+        default:
+            return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, request.TargetId,
+                request.Text, request.Direction, cancellationToken));
     }
 }).RequireRateLimiting("chat");
 app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRequest request,
@@ -237,6 +244,8 @@ app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRe
         context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
     if (!ComputerUsePolicy.CanObserve(request.Target))
         return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
+    if (request.Target == "desktop-ui")
+        return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-desktop-ui", cancellationToken));
     if (request.Target == "approved-applications")
     {
         return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-applications", cancellationToken));
@@ -1464,9 +1473,39 @@ static IResult BrowserActionResult(JsonElement result)
     return Results.Ok(result);
 }
 
+static string? ReadComputerUseString(JsonElement element, string property) =>
+    element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
 static async Task<IResult> ExecuteComputerUseChatAction(string action, string? repositoryRoot,
     DesktopCompanionClient companion, CancellationToken cancellationToken)
 {
+    if (action == "read-desktop-ui")
+    {
+        var observation = await companion.ExecuteAsync("observe-desktop-ui", cancellationToken);
+        if (observation.TryGetProperty("error", out _)) return BrowserActionResult(observation);
+        var status = ReadComputerUseString(observation, "observationStatus") ?? "unavailable";
+        var windows = observation.TryGetProperty("windows", out var windowList) && windowList.ValueKind == JsonValueKind.Array
+            ? windowList.EnumerateArray().ToArray() : Array.Empty<JsonElement>();
+        var windowLabels = windows.Select(window =>
+            $"{ReadComputerUseString(window, "process") ?? "app"}: {ReadComputerUseString(window, "title") ?? "(không có tiêu đề)"}").ToArray();
+        var windowNames = windows.ToDictionary(window => ReadComputerUseString(window, "windowId") ?? "",
+            window => ReadComputerUseString(window, "title") ?? "cửa sổ", StringComparer.Ordinal);
+        var controls = observation.TryGetProperty("elements", out var elementList) && elementList.ValueKind == JsonValueKind.Array
+            ? elementList.EnumerateArray().Where(element => element.TryGetProperty("name", out var name) &&
+                name.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(name.GetString()) && name.GetString() != "[redacted]")
+                .Take(16).Select(element =>
+                    $"{ReadComputerUseString(element, "controlType")}: {ReadComputerUseString(element, "name")} " +
+                    (windowNames.TryGetValue(ReadComputerUseString(element, "windowId") ?? "", out var ownerWindow) ? $"({ownerWindow})" : ""))
+                .ToArray() : Array.Empty<string>();
+        var lines = new List<string> { $"Trạng thái quan sát: {status}; {windows.Length} cửa sổ hiển thị." };
+        lines.AddRange(windowLabels.Select(label => "- " + label));
+        if (controls.Length > 0) lines.Add("Phần tử truy cập được: " + string.Join("; ", controls));
+        if (observation.TryGetProperty("truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True)
+            lines.Add("Danh sách bị giới hạn; cần quan sát lại phần tử cụ thể trước khi thao tác.");
+        return Results.Ok(new { reply = string.Join("\n", lines), toolUsed = true,
+            computerUseAction = action, computerUseObservationStatus = status });
+    }
+
     if (action == "read-approved-applications")
     {
         var result = await companion.ExecuteAsync("observe-applications", cancellationToken);
@@ -1625,5 +1664,5 @@ record WeatherLocationEdit(string? City);
 record WeatherFeedbackEdit(string? Decision);
 record MemoryCalendarReminder(int Version, Guid RequestId, DateTimeOffset Start, DateTimeOffset End,
     int[]? ReminderMinutes);
-record DesktopActionRequest(string? Action);
+record DesktopActionRequest(string? Action, string? TargetId = null, string? Text = null, string? Direction = null);
 record DesktopObserveRequest(string? Target);

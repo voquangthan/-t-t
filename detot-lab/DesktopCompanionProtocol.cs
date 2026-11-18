@@ -8,8 +8,14 @@ public static class DesktopCompanionProtocol
     private static readonly HashSet<string> Actions = new(StringComparer.Ordinal)
     {
         "observe-applications", "open-workspace", "open-edge", "open-github",
-        "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests"
+        "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
+        "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
+        "select-element", "type-text", "scroll-element", "press-key"
     };
+    private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
+        { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key" };
+    private static readonly HashSet<string> NavigationKeys = new(StringComparer.Ordinal)
+        { "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" };
 
     public static string PipeNameForCurrentUser()
     {
@@ -19,6 +25,14 @@ public static class DesktopCompanionProtocol
     }
 
     public static bool IsAllowedAction(string? action) => action is not null && Actions.Contains(action);
+
+    public static string SerializeResponse(string requestId, object result)
+    {
+        var response = JsonSerializer.Serialize(new { requestId, result });
+        return response.Length <= 30 * 1024
+            ? response
+            : JsonSerializer.Serialize(new { requestId, result = new { error = "response_too_large" } });
+    }
 
     public static async Task<string?> ReadBoundedLineAsync(StreamReader reader, int maximumCharacters,
         CancellationToken cancellationToken = default)
@@ -39,11 +53,38 @@ public static class DesktopCompanionProtocol
         }
     }
 
-    public static string SerializeRequest(string? action, string requestId)
+    public static string SerializeRequest(string? action, string requestId, string? targetId = null,
+        string? value = null, string? direction = null)
     {
         if (!IsAllowedAction(action)) throw new ArgumentException("Desktop action is not allowed.", nameof(action));
         if (!Guid.TryParseExact(requestId, "N", out _)) throw new ArgumentException("Invalid request id.", nameof(requestId));
-        return JsonSerializer.Serialize(new { action = action!, requestId });
+        if (!IsValidArguments(action!, targetId, value, direction))
+            throw new ArgumentException("Desktop action arguments are invalid.", nameof(targetId));
+        var request = new Dictionary<string, string?> { ["action"] = action!, ["requestId"] = requestId };
+        if (targetId is not null) request["targetId"] = targetId;
+        if (value is not null) request["value"] = value;
+        if (direction is not null) request["direction"] = direction;
+        var serialized = JsonSerializer.Serialize(request);
+        if (serialized.Length > 4096) throw new ArgumentException("Desktop request exceeded its protocol limit.", nameof(value));
+        return serialized;
+    }
+
+    public static bool IsValidArguments(string action, string? targetId, string? value, string? direction)
+    {
+        if (TargetActions.Contains(action) && (targetId is null || !Guid.TryParseExact(targetId, "N", out _))) return false;
+        if (!TargetActions.Contains(action) && targetId is not null) return false;
+        if (action == "type-text")
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 512 || value.Contains('\r') || value.Contains('\n') || value.Contains('\0') || direction is not null)
+                return false;
+        }
+        else if (action == "press-key")
+        {
+            if (value is null || !NavigationKeys.Contains(value) || direction is not null) return false;
+        }
+        else if (value is not null) return false;
+        if (action == "scroll-element") return direction is "up" or "down";
+        return direction is null;
     }
 
     public static bool TryParseRequest(string? json, out Request? request)
@@ -54,17 +95,33 @@ public static class DesktopCompanionProtocol
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 2 ||
+            JsonProperty[] properties = root.ValueKind == JsonValueKind.Object
+                ? root.EnumerateObject().ToArray() : Array.Empty<JsonProperty>();
+            if (root.ValueKind != JsonValueKind.Object || properties.Any(p => p.Name is not ("action" or "requestId" or "targetId" or "value" or "direction")) ||
+                properties.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
                 !root.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String ||
                 !root.TryGetProperty("requestId", out var id) || id.ValueKind != JsonValueKind.String ||
                 !IsAllowedAction(action.GetString()) || !Guid.TryParseExact(id.GetString(), "N", out _)) return false;
-            request = new Request(action.GetString()!, id.GetString()!);
+            var targetId = ReadOptionalString(root, "targetId");
+            var value = ReadOptionalString(root, "value");
+            var direction = ReadOptionalString(root, "direction");
+            if (targetId == InvalidOptionalString || value == InvalidOptionalString || direction == InvalidOptionalString ||
+                !IsValidArguments(action.GetString()!, targetId, value, direction)) return false;
+            request = new Request(action.GetString()!, id.GetString()!, targetId, value, direction);
             return true;
         }
         catch (JsonException) { return false; }
     }
 
-    public sealed record Request(string Action, string RequestId);
+    private const string InvalidOptionalString = "\0invalid";
+    private static string? ReadOptionalString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value)) return null;
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : InvalidOptionalString;
+    }
+
+    public sealed record Request(string Action, string RequestId, string? TargetId = null,
+        string? Value = null, string? Direction = null);
 }
 
 public sealed record DesktopGithubCheck(string Name, string? Status, string? Conclusion);
@@ -108,6 +165,10 @@ public sealed class DesktopCompanionClient
     public DesktopCompanionClient(string? pipeName = null) => this.pipeName = pipeName ?? DesktopCompanionProtocol.PipeNameForCurrentUser();
 
     public async Task<JsonElement> ExecuteAsync(string action, CancellationToken cancellationToken = default)
+        => await ExecuteAsync(action, null, null, null, cancellationToken);
+
+    public async Task<JsonElement> ExecuteAsync(string action, string? targetId, string? value = null,
+        string? direction = null, CancellationToken cancellationToken = default)
     {
         if (!DesktopCompanionProtocol.IsAllowedAction(action))
             return JsonSerializer.SerializeToElement(new { error = "action_not_allowed" });
@@ -120,7 +181,8 @@ public sealed class DesktopCompanionClient
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 1024, leaveOpen: true);
             await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
             var requestId = Guid.NewGuid().ToString("N");
-            await writer.WriteLineAsync(DesktopCompanionProtocol.SerializeRequest(action, requestId).AsMemory(), timeout.Token);
+            await writer.WriteLineAsync(DesktopCompanionProtocol.SerializeRequest(action, requestId,
+                targetId, value, direction).AsMemory(), timeout.Token);
             var responseLine = await DesktopCompanionProtocol.ReadBoundedLineAsync(reader, 32 * 1024, timeout.Token);
             if (responseLine is null) return Error("companion_protocol_error");
             using var document = JsonDocument.Parse(responseLine);
@@ -133,6 +195,7 @@ public sealed class DesktopCompanionClient
         catch (IOException) { return Error("companion_unavailable"); }
         catch (JsonException) { return Error("companion_protocol_error"); }
         catch (UnauthorizedAccessException) { return Error("companion_unauthorized"); }
+        catch (ArgumentException) { return Error("invalid_action_arguments"); }
     }
 
     private static JsonElement Error(string error) => JsonSerializer.SerializeToElement(new { error });
@@ -195,7 +258,7 @@ public sealed class DesktopCompanionPipeServer(string pipeName, int requestDeadl
             var result = await action;
             if (pipe.IsConnected && !deadline.IsCancellationRequested)
                 await TryWriteResponseAsync(pipe, writer,
-                    JsonSerializer.Serialize(new { requestId = request.RequestId, result }), deadline.Token);
+                    DesktopCompanionProtocol.SerializeResponse(request.RequestId, result), deadline.Token);
         }
         catch (OperationCanceledException)
         {
