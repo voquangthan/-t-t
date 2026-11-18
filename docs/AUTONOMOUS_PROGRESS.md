@@ -6,6 +6,7 @@
 - The Backend supplies the exact scope-derived label/type through the authenticated named-pipe protocol; Companion validates it immediately before invoking the UI action. Direct protocol actions for click/select/expand/collapse require this trusted pair.
 - Local evidence: `git diff --check` and GitHub Reader tests 11/11 PASS. The local runner has no .NET SDK, so C# build/operator tests require Windows CI.
 - Remote verification is currently blocked: GitHub connector returned HTTP 403 `account suspended`, while direct Git remote access cannot resolve `github.com`. The branch must not be pushed or marked CI/Work-reviewed until those external services recover.
+- Follow-on local commits `68ef991` and `6d6715c` extend the same scoped path with one ListItem selection, one non-password Edit text value, and one exact top-level Window activation. These additions remain pending the same C# CI and interactive Windows evidence.
 
 ## Memory Core V2 — M2 Semantic Memory
 
