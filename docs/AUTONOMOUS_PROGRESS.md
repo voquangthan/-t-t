@@ -1,5 +1,12 @@
 # Đệ Tốt Pro — checkpoint
 
+## Universal Windows Computer Use — named target revalidation pending remote CI (18/11/2026)
+
+- Local commit `876f971` binds named UI actions to one target from the complete bounded 72-control observation before reducing the model payload. A source marked `partial`/truncated, a duplicate name, or an unreadable/changing live name/type now stops before interaction.
+- The Backend supplies the exact scope-derived label/type through the authenticated named-pipe protocol; Companion validates it immediately before invoking the UI action. Direct protocol actions for click/select/expand/collapse require this trusted pair.
+- Local evidence: `git diff --check` and GitHub Reader tests 11/11 PASS. The local runner has no .NET SDK, so C# build/operator tests require Windows CI.
+- Remote verification is currently blocked: GitHub connector returned HTTP 403 `account suspended`, while direct Git remote access cannot resolve `github.com`. The branch must not be pushed or marked CI/Work-reviewed until those external services recover.
+
 ## Memory Core V2 — M2 Semantic Memory
 
 - M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.
