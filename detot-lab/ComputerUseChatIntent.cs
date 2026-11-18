@@ -211,8 +211,8 @@ public static class ComputerUseObservationFilter
         }
 
         var selected = controls.Take(maximumUnscopedControls).ToArray();
-        var selectedWindows = observation.TryGetProperty("windows", out var windows) && windows.ValueKind == JsonValueKind.Array
-            ? windows.EnumerateArray().Select(window => Read(window, "windowId")).Where(id => id is not null).Cast<string>().ToArray()
+        var selectedWindows = observation.TryGetProperty("windows", out var allWindows) && allWindows.ValueKind == JsonValueKind.Array
+            ? allWindows.EnumerateArray().Select(window => Read(window, "windowId")).Where(id => id is not null).Cast<string>().ToArray()
             : [];
         var wasTruncated = sourceTruncated || controls.Length > maximumUnscopedControls;
         return new(wasTruncated ? "partial" : Read(observation, "observationStatus") ?? "unavailable",
