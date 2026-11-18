@@ -129,7 +129,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     private sealed record AddressBarSnapshot(bool Available, string? Value);
     private sealed record GithubAccountSnapshot(string Status, string? Username);
     private sealed record CachedUiTarget(AutomationElement Element, nint WindowHandle, int ProcessId, int SessionId,
-        string ControlType, string[] AllowedActions, bool IsPassword, DateTime ExpiresAt);
+        string ControlType, DateTime ExpiresAt);
     private readonly UIA3Automation uiAutomation = new();
     private readonly Dictionary<string, CachedUiTarget> uiTargets = new(StringComparer.Ordinal);
     private const int UiWindowLimit = 6;
@@ -184,7 +184,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 var windowId = NewTargetId();
                 var processName = SafeProcessName(item.ProcessId);
                 var sessionId = SafeSessionId(item.ProcessId);
-                uiTargets[windowId] = new(item.Window, item.Handle, item.ProcessId, sessionId, "Window", ["activate-window"], false,
+                uiTargets[windowId] = new(item.Window, item.Handle, item.ProcessId, sessionId, "Window",
                     DateTime.UtcNow.AddSeconds(UiTargetLifetimeSeconds));
                 observedWindows.Add(new
                 {
@@ -213,7 +213,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         : GetAllowedUiActions(node.Element, controlType, enabled, offscreen, isPassword);
                     var elementId = NewTargetId();
                     elementIds[node.Element] = elementId;
-                    uiTargets[elementId] = new(node.Element, item.Handle, item.ProcessId, sessionId, controlType, allowed, isPassword,
+                    uiTargets[elementId] = new(node.Element, item.Handle, item.ProcessId, sessionId, controlType,
                         DateTime.UtcNow.AddSeconds(UiTargetLifetimeSeconds));
                     observedElements.Add(new
                     {
@@ -269,22 +269,40 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var targetProcessName = SafeProcessName(target.ProcessId);
         if (!ComputerUsePolicy.CanInteractWithApplication(targetProcessName, request.Action))
             return new { succeeded = false, status = "read_only_application", verification = "not_run" };
-        if (!IsWindowStillPresent(target.WindowHandle, target.ProcessId))
+        if (!IsWindowStillPresent(target.WindowHandle, target.ProcessId) ||
+            !IsElementBoundToWindow(target.Element, target.WindowHandle, target.ProcessId) ||
+            SafeSessionId(target.ProcessId) != target.SessionId)
         {
             uiTargets.Remove(request.TargetId);
             return new { succeeded = false, status = "target_stale", verification = "not_run" };
         }
-        if (target.IsPassword && request.Action == "type-text")
+        var currentControlType = SafeControlType(target.Element);
+        if (currentControlType == "Unknown" || currentControlType != target.ControlType)
+        {
+            uiTargets.Remove(request.TargetId);
+            return new { succeeded = false, status = "target_stale", verification = "not_run" };
+        }
+        if (!TryReadBoolean(() => target.Element.Properties.IsEnabled.ValueOrDefault, out var currentlyEnabled) ||
+            !TryReadBoolean(() => target.Element.Properties.IsOffscreen.ValueOrDefault, out var currentlyOffscreen))
+            return new { succeeded = false, status = "target_state_unavailable", verification = "not_run" };
+        if (!currentlyEnabled || currentlyOffscreen)
+            return new { succeeded = false, status = "target_not_interactable", verification = "not_run" };
+        var passwordKnown = TryReadBoolean(() => target.Element.Properties.IsPassword.ValueOrDefault, out var isPassword);
+        if (request.Action == "type-text" && !passwordKnown)
+            return new { succeeded = false, status = "target_security_state_unavailable", verification = "not_run" };
+        if (request.Action == "type-text" && isPassword)
             return new { succeeded = false, status = "password_input_denied", verification = "not_run" };
-        if (!target.AllowedActions.Contains(request.Action, StringComparer.Ordinal))
+        var freshAllowedActions = currentControlType == "Window"
+            ? new[] { "activate-window" }
+            : GetAllowedUiActions(target.Element, currentControlType, currentlyEnabled,
+                currentlyOffscreen, passwordKnown ? isPassword : true);
+        if (!freshAllowedActions.Contains(request.Action, StringComparer.Ordinal) ||
+            (request.Action == "press-key" && !ComputerUsePolicy.CanPressKeyOn(currentControlType, request.Value)))
             return new { succeeded = false,
-                status = IsApprovalRequired(target.ControlType, request.Action) ? "approval_required" : "action_not_allowed",
+                status = IsApprovalRequired(currentControlType, request.Action, request.Value) ? "approval_required" : "action_not_allowed",
                 verification = "not_run" };
         try
         {
-            if (!SafeBoolean(() => target.Element.Properties.IsEnabled.ValueOrDefault) ||
-                SafeBoolean(() => target.Element.Properties.IsOffscreen.ValueOrDefault))
-                return new { succeeded = false, status = "target_not_interactable", verification = "not_run" };
             var verified = false;
             switch (request.Action)
             {
@@ -302,7 +320,14 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 case "double-click-element":
                     return new { succeeded = false, status = "approval_required", verification = "not_run" };
                 case "type-text":
-                    target.Element.Patterns.Value.Pattern.SetValue(request.Value!);
+                    var setStatus = ComputerUsePolicy.TrySetProtectedTextValue(
+                        SafeControlType(target.Element) == "Edit",
+                        () => target.Element.Patterns.Value.IsSupported,
+                        () => target.Element.Properties.IsPassword.ValueOrDefault,
+                        () => target.Element.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault,
+                        value => target.Element.Patterns.Value.Pattern.SetValue(value),
+                        request.Value!);
+                    if (setStatus != "set") return new { succeeded = false, status = setStatus, verification = "not_run" };
                     verified = string.Equals(target.Element.Patterns.Value.Pattern.Value.Value, request.Value, StringComparison.Ordinal);
                     break;
                 case "scroll-element":
@@ -317,9 +342,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     if (GetForegroundWindow() != target.WindowHandle ||
                         !SafeBoolean(() => target.Element.Properties.HasKeyboardFocus.ValueOrDefault))
                         return new { succeeded = false, status = "target_focus_not_verified", verification = "not_run" };
-                    Keyboard.Press(request.Value switch
+                    var key = request.Value switch
                     {
-                        "Tab" => VirtualKeyShort.TAB,
                         "ArrowUp" => VirtualKeyShort.UP,
                         "ArrowDown" => VirtualKeyShort.DOWN,
                         "ArrowLeft" => VirtualKeyShort.LEFT,
@@ -329,14 +353,15 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         "PageUp" => VirtualKeyShort.PRIOR,
                         "PageDown" => VirtualKeyShort.NEXT,
                         _ => throw new InvalidOperationException("Key is not on the navigation allowlist.")
-                    });
-                    verified = true;
+                    };
+                    ComputerUsePolicy.PressAndRelease(key, value => Keyboard.Press(value), value => Keyboard.Release(value));
+                    verified = false;
                     break;
                 default:
                     return new { succeeded = false, status = "action_not_allowed", verification = "not_run" };
             }
             var refreshed = ObserveDesktopUi();
-            return new { succeeded = true, status = "performed", verification = verified ? "verified" : "reobserve_required",
+            return new { succeeded = true, status = "performed", verification = ComputerUsePolicy.VerificationStatus(verified),
                 targetInvalidated = true, refreshedObservation = refreshed };
         }
         catch (Exception error)
@@ -350,32 +375,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     private static IReadOnlyList<(AutomationElement Element, AutomationElement? Parent, int Depth)> SafeDescendants(
         AutomationElement root, int limit, int depthLimit, out bool truncated)
     {
-        truncated = false;
-        var result = new List<(AutomationElement, AutomationElement?, int)>();
-        var queue = new Queue<(AutomationElement Parent, int Depth)>();
-        queue.Enqueue((root, 0));
-        while (queue.Count > 0 && result.Count < limit)
-        {
-            var (parent, depth) = queue.Dequeue();
-            if (depth >= depthLimit)
-            {
-                try { truncated |= parent.FindChildAt(0) is not null; }
-                catch { truncated = true; }
-                continue;
-            }
-            for (var index = 0; index < limit - result.Count; index++)
-            {
-                AutomationElement? child;
-                try { child = parent.FindChildAt(index); }
-                catch { truncated = true; break; }
-                if (child is null) break;
-                result.Add((child, ReferenceEquals(parent, root) ? null : parent, depth + 1));
-                if (depth + 1 < depthLimit) queue.Enqueue((child, depth + 1));
-                if (result.Count >= limit) break;
-            }
-        }
-        if (queue.Count > 0 || result.Count >= limit) truncated = true;
-        return result;
+        var nodes = ComputerUsePolicy.CollectBoundedDescendants(root, limit, depthLimit,
+            (parent, index) => parent.FindChildAt(index), out truncated);
+        return nodes.Select(node => (node.Element, ReferenceEquals(node.Parent, root) ? null : node.Parent, node.Depth)).ToArray();
     }
 
     private static string[] GetAllowedUiActions(AutomationElement element, string controlType,
@@ -394,12 +396,15 @@ sealed class CompanionActions(string workspace, string edgeProfile)
 
     private static string[] GetApprovalActions(string controlType) => controlType switch
     {
-        "Button" or "MenuItem" or "CheckBox" or "RadioButton" => ["click-element"],
-        "ListItem" or "TreeItem" => ["double-click-element"],
+        "Button" or "MenuItem" => ["click-element"],
+        "CheckBox" or "RadioButton" => ["click-element", "press-key"],
+        "ListItem" or "TreeItem" => ["select-element", "double-click-element", "press-key"],
+        "ComboBox" => ["press-key"],
         _ => []
     };
 
-    private static bool IsApprovalRequired(string controlType, string action) => ComputerUsePolicy.RequiresUiApproval(controlType, action);
+    private static bool IsApprovalRequired(string controlType, string action, string? key = null) =>
+        ComputerUsePolicy.RequiresUiApproval(controlType, action, key);
 
     private bool IsWindowStillPresent(nint handle, int expectedProcessId)
     {
@@ -409,6 +414,22 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 .Any(window => SafeNativeWindowHandle(window) == handle && SafeProcessId(window) == expectedProcessId);
         }
         catch { return false; }
+    }
+
+    private static bool IsElementBoundToWindow(AutomationElement element, nint expectedWindowHandle, int expectedProcessId)
+    {
+        try
+        {
+            AutomationElement? current = element;
+            for (var depth = 0; current is not null && depth < 32; depth++)
+            {
+                if (SafeProcessId(current) != expectedProcessId) return false;
+                if (SafeNativeWindowHandle(current) == expectedWindowHandle) return true;
+                current = current.Parent;
+            }
+        }
+        catch { return false; }
+        return false;
     }
 
     private static int SafeProcessId(AutomationElement element)
@@ -445,6 +466,12 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     {
         try { return read(); }
         catch { return false; }
+    }
+
+    private static bool TryReadBoolean(Func<bool> read, out bool value)
+    {
+        try { value = read(); return true; }
+        catch { value = false; return false; }
     }
 
     private static object SafeBounds(AutomationElement element)

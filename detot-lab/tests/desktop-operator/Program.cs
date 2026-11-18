@@ -87,8 +87,29 @@ Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-block
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
 var safeUiActions = ComputerUsePolicy.AllowedUiActions("Hyperlink", true, false, false,
     supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false, supportsScroll: false);
-Check(safeUiActions.SequenceEqual(["click-element", "press-key"]),
-    "only safe navigation actions are advertised for a visible hyperlink");
+Check(safeUiActions.SequenceEqual(["click-element"]) &&
+      !ComputerUsePolicy.AllowedUiActions("RadioButton", true, false, false,
+          supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false, supportsScroll: false)
+          .Contains("press-key", StringComparer.Ordinal) &&
+      ComputerUsePolicy.CanInteractWithApplication("WINWORD", "press-key") &&
+      !ComputerUsePolicy.CanPressKeyOn("RadioButton", "ArrowDown") &&
+      !ComputerUsePolicy.CanPressKeyOn("ComboBox", "ArrowDown") &&
+      ComputerUsePolicy.CanPressKeyOn("Edit", "ArrowLeft") &&
+      !ComputerUsePolicy.CanPressKeyOn("Edit", "ArrowDown") &&
+      ComputerUsePolicy.RequiresUiApproval("RadioButton", "press-key", "ArrowDown"),
+    "key navigation is limited to non-selection edit controls; radio and combo key effects require approval");
+var keyEventOrder = new List<string>();
+ComputerUsePolicy.PressAndRelease("Tab", key => keyEventOrder.Add("down:" + key), key => keyEventOrder.Add("up:" + key));
+Check(keyEventOrder.SequenceEqual(["down:Tab", "up:Tab"]), "a key action always emits a matching release");
+try
+{
+    ComputerUsePolicy.PressAndRelease("Tab", _ => throw new InvalidOperationException("fixture"), _ => keyEventOrder.Add("released-after-error"));
+}
+catch (InvalidOperationException) { }
+Check(keyEventOrder.Last() == "released-after-error", "key release runs even when key-down throws");
+Check(ComputerUsePolicy.VerificationStatus(false) == "reobserve_required" &&
+      ComputerUsePolicy.VerificationStatus(true) == "verified",
+    "sending a key without an observed UI postcondition never claims it was verified");
 Check(!ComputerUsePolicy.AllowedUiActions("Button", true, false, false,
         supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false, supportsScroll: false)
       .Contains("click-element", StringComparer.Ordinal) &&
@@ -98,6 +119,19 @@ Check(!ComputerUsePolicy.AllowedUiActions("Edit", true, false, true,
         supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false)
       .Contains("type-text", StringComparer.Ordinal),
     "password UI elements never advertise text entry");
+var valueWrites = 0;
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => true, () => false,
+        _ => valueWrites++, "synthetic") == "password_input_denied" && valueWrites == 0,
+    "a target that changes to password is denied before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => false, () => true,
+        _ => valueWrites++, "synthetic") == "target_read_only" && valueWrites == 0,
+    "a target that changes to read-only is denied before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => throw new InvalidOperationException(), () => false,
+        _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
+    "an unreadable password flag fails closed before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => false, () => false,
+        _ => valueWrites++, "synthetic") == "set" && valueWrites == 1,
+    "a freshly revalidated non-password editable value can be set");
 Check(!ComputerUsePolicy.AllowedUiActions("Edit", false, false, false,
         supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false).Any() &&
       !ComputerUsePolicy.AllowedUiActions("Edit", true, true, false,
@@ -428,6 +462,26 @@ Check(WindowsDesktopAutomation.ReadOpenApprovedApplications().All(name =>
             "Windows Settings (read-only)" or "Task Manager (read-only)" or "Microsoft Word" or "Microsoft Excel" or
             "Microsoft PowerPoint" or "PDF Reader"),
     "application observation returns only approved app identities");
+var eightLeafRoot = new UiTreeFixtureNode();
+for (var index = 0; index < 8; index++) eightLeafRoot.Children.Add(new UiTreeFixtureNode());
+var eightLeafNodes = ComputerUsePolicy.CollectBoundedDescendants(eightLeafRoot, 13, 4,
+    (node, index) => index < node.Children.Count ? node.Children[index] : null, out var eightLeafTruncated);
+Check(eightLeafNodes.Count == 8 && !eightLeafTruncated,
+    "bounded UI traversal visits all eight leaf siblings below its element limit");
+var oversizedRoot = new UiTreeFixtureNode();
+for (var index = 0; index < 14; index++) oversizedRoot.Children.Add(new UiTreeFixtureNode());
+var oversizedNodes = ComputerUsePolicy.CollectBoundedDescendants(oversizedRoot, 13, 4,
+    (node, index) => index < node.Children.Count ? node.Children[index] : null, out var oversizedTruncated);
+Check(oversizedNodes.Count == 13 && oversizedTruncated,
+    "bounded UI traversal marks sibling overflow as partial");
+var deepRoot = new UiTreeFixtureNode();
+var deepChild = new UiTreeFixtureNode();
+deepChild.Children.Add(new UiTreeFixtureNode());
+deepRoot.Children.Add(deepChild);
+var deepNodes = ComputerUsePolicy.CollectBoundedDescendants(deepRoot, 13, 1,
+    (node, index) => index < node.Children.Count ? node.Children[index] : null, out var deepTruncated);
+Check(deepNodes.Count == 1 && deepTruncated,
+    "bounded UI traversal marks descendants beyond the depth limit as partial");
 Check(DesktopOperator.SafeGitHubUrl("https://github.com/voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
     "HTTPS GitHub remote is canonicalized");
 Check(DesktopOperator.SafeGitHubUrl("git@github.com:voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
@@ -622,4 +676,9 @@ static string CreateIsolatedTestDirectory(string purpose)
     var directory = Path.Combine(root, purpose + "-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
     return directory;
+}
+
+sealed class UiTreeFixtureNode
+{
+    public List<UiTreeFixtureNode> Children { get; } = [];
 }

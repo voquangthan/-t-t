@@ -17,7 +17,7 @@ public static class DesktopCompanionProtocol
     private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
         { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key" };
     private static readonly HashSet<string> NavigationKeys = new(StringComparer.Ordinal)
-        { "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" };
+        { "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" };
 
     public static string PipeNameForCurrentUser()
     {
