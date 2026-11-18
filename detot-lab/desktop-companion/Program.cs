@@ -355,7 +355,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             request.ExpectedControlType, request.ExpectedName);
     }
 
-    private object PerformUiAction(UiTarget target, DesktopCompanionProtocol.Request request)
+    private object PerformUiAction(CachedUiTarget target, DesktopCompanionProtocol.Request request)
     {
         var verified = false;
         switch (request.Action)

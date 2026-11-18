@@ -236,10 +236,12 @@ Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"open-edge\",\"req
       !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"run-shell\",\"requestId\":\"00000000000000000000000000000000\"}", out _),
     "Desktop Companion rejects injected properties and unknown actions");
 var uiTargetId = Guid.NewGuid().ToString("N");
-var uiRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"), uiTargetId, "search text");
+var uiRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"), uiTargetId, "search text",
+    expectedName: "Search", expectedControlType: "Edit");
 Check(DesktopCompanionProtocol.TryParseRequest(uiRequest, out var parsedUiRequest) &&
-      parsedUiRequest?.Action == "type-text" && parsedUiRequest.TargetId == uiTargetId && parsedUiRequest.Value == "search text",
-    "UIA request carries only an observed opaque target and bounded text value");
+      parsedUiRequest is { Action: "type-text", TargetId: not null, Value: "search text", ExpectedName: "Search", ExpectedControlType: "Edit" } &&
+      parsedUiRequest.TargetId == uiTargetId,
+    "UIA request carries an observed opaque target, bounded text, and an exact target context");
 Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"type-text\",\"requestId\":\"00000000000000000000000000000000\",\"targetId\":\"00000000000000000000000000000000\",\"value\":\"x\",\"value\":\"y\"}", out _) &&
       !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"press-key\",\"requestId\":\"00000000000000000000000000000000\",\"targetId\":\"00000000000000000000000000000000\",\"value\":\"Enter\"}", out _),
     "UIA IPC rejects duplicate fields and submit/command keys");

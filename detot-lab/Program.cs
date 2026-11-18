@@ -219,7 +219,8 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
         (!ComputerUsePolicy.CanNavigate(request.Action) && !ComputerUsePolicy.CanInteract(request.Action)))
         return Results.BadRequest(new { error = "Hành động không được hỗ trợ." });
     if (ComputerUsePolicy.CanInteract(request.Action) &&
-        !DesktopCompanionProtocol.IsValidArguments(request.Action!, request.TargetId, request.Text, request.Direction))
+        !DesktopCompanionProtocol.IsValidArguments(request.Action!, request.TargetId, request.Text, request.Direction,
+            request.ExpectedName, request.ExpectedControlType))
         return Results.BadRequest(new { error = "ID mục tiêu hoặc tham số thao tác UI không hợp lệ." });
     if (request.Action == "open-workspace-item" &&
         DesktopOperator.ResolveWorkspaceItemPath(desktopRepositoryRoot, request.Text) is null)
@@ -244,7 +245,7 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
             return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, cancellationToken));
         default:
             return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, request.TargetId,
-                request.Text, request.Direction, cancellationToken));
+                request.Text, request.Direction, cancellationToken, request.ExpectedName, request.ExpectedControlType));
     }
 }).RequireRateLimiting("chat");
 app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRequest request,
@@ -1986,5 +1987,6 @@ record WeatherLocationEdit(string? City);
 record WeatherFeedbackEdit(string? Decision);
 record MemoryCalendarReminder(int Version, Guid RequestId, DateTimeOffset Start, DateTimeOffset End,
     int[]? ReminderMinutes);
-record DesktopActionRequest(string? Action, string? TargetId = null, string? Text = null, string? Direction = null);
+record DesktopActionRequest(string? Action, string? TargetId = null, string? Text = null, string? Direction = null,
+    string? ExpectedName = null, string? ExpectedControlType = null);
 record DesktopObserveRequest(string? Target);
