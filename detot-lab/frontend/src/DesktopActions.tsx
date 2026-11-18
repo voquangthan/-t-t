@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { githubAccountPresentation, pullRequestChecksSummary, pullRequestMetadata, type DesktopObservation } from "./desktopActionsModel";
 
 type WorkspaceStatus = {
   available: boolean;
@@ -14,31 +15,6 @@ type ComputerUsePermissions = {
   accountSelection: string[];
   write: string[];
   codeExecution: boolean;
-};
-
-type DesktopObservation = {
-  error?: string;
-  authenticated?: boolean;
-  login?: string | null;
-  needsUserLogin?: boolean;
-  repository?: string;
-  applications?: string[];
-  observationStatus?: "available" | "empty" | "partial" | "unavailable";
-  pullRequests?: Array<{
-    number: number;
-    title: string;
-    state: string;
-    merged: boolean;
-    headSha: string;
-    headBranch: string | null;
-    baseBranch: string | null;
-    checks: Array<{ name: string; status: string; conclusion: string | null }>;
-    checksStatus?: "available" | "empty" | "unavailable";
-    checksError?: "rate_limited" | "http_error" | "invalid_response" | null;
-    checksHttpStatus?: number | null;
-    checksTotalCount?: number | null;
-    checksTruncated?: boolean;
-  }>;
 };
 
 const permissionLabels: Record<string, string> = {
@@ -114,10 +90,8 @@ export function DesktopActions() {
       const result = await response.json() as DesktopObservation;
       if (!response.ok || result.error) throw new Error(result.error ?? `Không đọc được GitHub (HTTP ${response.status}).`);
       setObservation(result);
-      if (target === "github-account" && result.needsUserLogin)
-        setNotice("Profile Edge riêng của Đệ Tốt chưa đăng nhập GitHub. Hãy đăng nhập trực tiếp trong cửa sổ Edge nếu muốn dùng profile này.");
-      else if (target === "github-account")
-        setNotice(result.login ? `Profile Edge đang đăng nhập với tài khoản ${result.login}.` : "Profile Edge chưa xác định được tài khoản.");
+      if (target === "github-account")
+        setNotice(githubAccountPresentation(result).notice);
       else setNotice("Đã đọc danh sách PR và trạng thái CI công khai; không đọc nội dung review hoặc file trong repository.");
     } catch (cause) {
       setObservation(undefined);
@@ -148,6 +122,9 @@ export function DesktopActions() {
       setError(cause instanceof Error ? cause.message : "Không đọc được ứng dụng đang mở.");
     } finally { setObserving(""); }
   }
+
+  const accountPresentation = observation && (observation.status !== undefined || observation.authenticated !== undefined || observation.needsUserLogin !== undefined)
+    ? githubAccountPresentation(observation) : null;
 
   return <section className="desktop-actions-page">
     <div className="cloud-heading"><div><span className="eyebrow">THAO TÁC CỤC BỘ</span><h1>Trợ lý máy tính</h1>
@@ -189,22 +166,22 @@ export function DesktopActions() {
         <ul>{observation.applications.map(application => <li key={application}>{application}</li>)}</ul>}
       <p className="desktop-muted">Không đọc tiêu đề, văn bản, tab hoặc nội dung bên trong cửa sổ.</p>
     </section>}
-    {observation?.authenticated && observation.login && <section className="desktop-workspace-card" aria-label="Tài khoản GitHub">
-      <div className="overview-card-head"><h2>Tài khoản trong profile Edge riêng</h2><span className="desktop-state-ok">Đã đăng nhập</span></div>
-      <p className="desktop-muted">{observation.login}. Đây là profile riêng do adapter quản lý; không đọc tài khoản trong cửa sổ Edge cá nhân khác.</p>
+    {accountPresentation && <section className="desktop-workspace-card" aria-label="Tài khoản GitHub">
+      <div className="overview-card-head"><h2>{accountPresentation.title}</h2><span className={accountPresentation.status === "verified" ? "desktop-state-ok" : "desktop-muted"}>{accountPresentation.label}</span></div>
+      <p className="desktop-muted">{accountPresentation.status === "verified" ? `${accountPresentation.detail}. Đây là profile riêng do adapter quản lý; không đọc tài khoản trong cửa sổ Edge cá nhân khác.` : accountPresentation.detail}</p>
     </section>}
     {observation?.pullRequests && <section className="desktop-workspace-card" aria-label="Pull Request và CI">
       <div className="overview-card-head"><h2>Pull Request gần đây</h2><span className="desktop-muted">{observation.repository}</span></div>
       {observation.pullRequests.length === 0 ? <p className="desktop-muted">Không có Pull Request công khai gần đây.</p> : <ul className="desktop-pr-list">
         {observation.pullRequests.map(pr => <li key={`${pr.number}-${pr.headSha}`}>
           <div><a href={`https://github.com/${observation.repository}/pull/${pr.number}`} target="_blank" rel="noreferrer">#{pr.number} {pr.title}</a>
-            <small>{pr.state}{pr.merged ? " · đã merge" : ""} · {pr.headBranch ?? "?"} → {pr.baseBranch ?? "?"} · {pr.headSha.slice(0, 8)}</small></div>
+            <small>{pullRequestMetadata(pr)}</small></div>
           <div className="desktop-check-list">
             {pr.checksStatus === "unavailable" ? <span className="desktop-check-error">Không đọc được CI{pr.checksError === "rate_limited" ? " · GitHub giới hạn yêu cầu" : pr.checksHttpStatus ? ` · HTTP ${pr.checksHttpStatus}` : " · phản hồi không hợp lệ"}</span>
               : pr.checksStatus === "empty" ? <span>API xác nhận chưa có check run</span>
               : pr.checksStatus === "available" ? pr.checks.map((check, index) => <span key={`${check.name}-${index}`} className={check.conclusion === "success" ? "desktop-check-ok" : check.conclusion === "failure" ? "desktop-check-error" : ""}>{check.name}: {check.conclusion ?? check.status}</span>)
               : <span>Chưa xác định được trạng thái CI</span>}
-            {pr.checksTruncated && <small>Đang hiện {pr.checks.length}/{pr.checksTotalCount ?? "nhiều"} checks.</small>}
+            {pullRequestChecksSummary(pr) && <small>{pullRequestChecksSummary(pr)}</small>}
           </div>
         </li>)}
       </ul>}

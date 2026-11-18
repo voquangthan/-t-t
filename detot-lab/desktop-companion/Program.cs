@@ -754,6 +754,11 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             if (!pull.TryGetProperty("number", out var number) || !number.TryGetInt32(out var n) ||
                 !pull.TryGetProperty("title", out var title) || title.ValueKind != JsonValueKind.String) continue;
             var state = pull.TryGetProperty("state", out var stateElement) ? stateElement.GetString() : null;
+            var merged = pull.TryGetProperty("merged_at", out var mergedAt) && mergedAt.ValueKind == JsonValueKind.String;
+            var headBranch = pull.TryGetProperty("head", out var headRef) && headRef.TryGetProperty("ref", out var headRefName)
+                ? headRefName.GetString() : null;
+            var baseBranch = pull.TryGetProperty("base", out var baseRef) && baseRef.TryGetProperty("ref", out var baseRefName)
+                ? baseRefName.GetString() : null;
             var sha = pull.TryGetProperty("head", out var head) && head.TryGetProperty("sha", out var shaElement)
                 ? shaElement.GetString() : null;
             var checksStatus = "unavailable";
@@ -778,8 +783,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     }).ToArray();
                 }
             }
-            pulls.Add(new { number = n, title = title.GetString()![..Math.Min(180, title.GetString()!.Length)], state,
-                headSha = sha is { Length: >= 8 } ? sha[..8] : null, checksStatus, totalChecks,
+            pulls.Add(new { number = n, title = title.GetString()![..Math.Min(180, title.GetString()!.Length)], state, merged,
+                headBranch, baseBranch, headSha = sha is { Length: >= 8 } ? sha[..8] : null, checksStatus, totalChecks,
+                checksTotalCount = totalChecks,
                 displayedChecks = checks.Length, checksTruncated, failedChecks, failedCheckNames, checks });
         }
         return new { repository = repoPath, pullRequests = pulls };

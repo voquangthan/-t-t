@@ -225,3 +225,11 @@
 - CI now builds `DesktopCompanion.csproj`. The old one-off pipe fixture was replaced with an integration test using the actual Companion pipe-server implementation; it asserts cancellation and follow-on client success rather than converting pipe errors into a skipped/blocked test.
 - Local .NET build/test execution is unavailable in this Codex runtime (`dotnet` is not installed or on PATH). JavaScript regression remains 11/11 PASS; `git diff --check` PASS. CI on the new PR head is required to establish C# build/test results. Live interactive Windows smoke remains pending and must not be represented as PASS.
 - Current stage: run full review branch CI, fix any failures within the current REVISE findings, then read CI and Work review for the exact resulting HEAD SHA. Do not merge.
+
+## PR #3 Work review follow-up — frontend DTO compatibility (18/11/2026)
+
+- Work reviewed `8b7ab10adbe54686ec58cb72652d986d09dce9cf` as REVISE after CI #18 passed. New finding: the existing Computer Use page consumed the old account/PR DTO and lost verified username/status, merge/source/target metadata, and failure summaries for checks beyond the visible first eight.
+- Updated the page to consume Companion's `status`/`username`, branch/merge fields, `totalChecks`, `failedChecks`, and `failedCheckNames`. Verified, signed-out, failed, and not-verified account states render distinct labels and details; verified without a username is downgraded to not-verified.
+- Companion PR payload now preserves merged status and head/base branch names alongside the aggregate CI fields. Added view-model contract/render-output tests with exact Companion-shaped account, merged PR, and 9-check hidden failure fixtures; frontend test script includes them.
+- Local direct Node regression: **7/7 PASS**. Local pnpm install/build could not run: pnpm attempted a package-store symlink outside the writable workspace and Windows returned EPERM. The PR CI remains the required frontend build verification. `dotnet` is also unavailable in this Codex runtime, so C# confirmation remains CI-based.
+- Next: push this scoped UI/DTO fix, verify CI on its exact SHA, then read the new Work review. No interactive Windows smoke has been run; do not claim E2E workspace PASS.
