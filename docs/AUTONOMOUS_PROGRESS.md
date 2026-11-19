@@ -21,6 +21,11 @@
 - Work review correctly rejected title-only workspace verification. Explorer now reports `workspaceVerified=true` only when a readable address bar value resolves exactly to the configured workspace (including a `file:` URI form). A matching/containing title, a same-basename folder elsewhere, or an unreadable address remains not verified.
 - Local verification after the correction: Desktop Companion build **0 warnings / 0 errors**; Desktop Operator regression **149/149 PASS**. The companion pipe cancellation message in the regression is the expected client-disconnect fixture, followed by the asserted second-client success. CI and Work review on the new SHA are still required; no interactive Explorer E2E has been claimed.
 
+## P2 File Explorer evidence-source correction (19/11/2026)
+
+- Work review found that an unrelated Explorer Edit (for example Search) could contain the workspace path. The observer now carries the evidence source with each value and accepts only a recognized location/address control inside an Explorer toolbar. Unknown controls, untrusted sources, wrong locations, matching titles, and unreadable addresses all fail closed.
+- Local verification after this correction: Backend build **0 warnings / 0 errors**; Companion build **0 warnings / 0 errors**; Desktop Operator **149/149 PASS**. Regression covers trusted exact location, file URI, wrong path, same-basename elsewhere, untrusted search text containing the expected path, and missing address. CI/Work review for this commit and interactive Windows evidence remain pending.
+
 ## Memory Core V2 — M2 Semantic Memory
 
 - M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.

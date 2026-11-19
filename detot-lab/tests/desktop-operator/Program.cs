@@ -324,12 +324,17 @@ Check(DesktopCompanionVerification.WorkspaceLabelMatches("D:\\work\\codex-comput
       !DesktopCompanionVerification.WorkspaceLabelMatches("D:\\work\\codex-computer-use", "Visual Studio Code",
       ["another-workspace"], []),
     "VS Code workspace verification requires an accessible root label or full path; title alone is insufficient");
-Check(DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", ["D:\\work\\repo"]) &&
-      DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", ["file:///D:/work/repo"]) &&
-      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", ["C:\\archive\\repo-backup"]) &&
-      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", ["C:\\other\\repo"]) &&
+Check(DesktopCompanionVerification.IsTrustedExplorerLocationControl("41477", "anything", null, insideToolbar: true) &&
+      DesktopCompanionVerification.IsTrustedExplorerLocationControl(null, "Address bar", null, insideToolbar: true) &&
+      !DesktopCompanionVerification.IsTrustedExplorerLocationControl(null, "Search", null, insideToolbar: true) &&
+      !DesktopCompanionVerification.IsTrustedExplorerLocationControl("41477", "Address bar", null, insideToolbar: false) &&
+      DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", [new(true, "D:\\work\\repo")]) &&
+      DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", [new(true, "file:///D:/work/repo")]) &&
+      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", [new(true, "C:\\archive\\repo-backup")]) &&
+      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", [new(true, "C:\\other\\repo")]) &&
+      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", [new(false, "D:\\work\\repo")]) &&
       !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", []),
-    "Explorer workspace verification requires an exact readable address, never a matching or containing title");
+    "Explorer workspace verification requires an exact address from a trusted location control, never search input or a title");
 var reusedWindowWorkspace = DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,
     "codex-computer-use - Visual Studio Code", ["Open Editors", "codex-computer-use"], []);
 var wrongWindowWorkspace = DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,

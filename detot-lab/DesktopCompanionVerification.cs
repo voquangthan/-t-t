@@ -4,6 +4,7 @@ public static partial class DesktopCompanionVerification
 {
     public sealed record WorkspaceEvidence(string ExpectedWorkspace, string? ObservedWorkspace,
         bool Verified, string Reason, bool WindowTitleMatched, bool RootLabelMatched, bool AccessiblePathMatched);
+    public sealed record ExplorerLocationEvidence(bool IsCurrentLocationControl, string? Value);
 
     private static readonly Regex UserDataDir = new(
         "(?:^|\\s)(?:\\\"--user-data-dir=(?<wholeQuoted>[^\\\"]+)\\\"|--user-data-dir(?:=|\\s+)(?:\\\"(?<quoted>[^\\\"]+)\\\"|(?<plain>[^\\s]+)))",
@@ -58,14 +59,16 @@ public static partial class DesktopCompanionVerification
     // Explorer titles are a presentation hint, not a location identity: two folders may share a
     // name or one title may merely contain the workspace name. Only a readable exact address is
     // sufficient to verify an Explorer window is displaying the configured workspace.
-    public static bool ExplorerWorkspaceMatches(string? expectedWorkspace, IEnumerable<string?> addressPaths)
+    public static bool ExplorerWorkspaceMatches(string? expectedWorkspace, IEnumerable<ExplorerLocationEvidence> locations)
     {
         if (string.IsNullOrWhiteSpace(expectedWorkspace)) return false;
         string expected;
         try { expected = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
         catch (ArgumentException) { return false; }
-        foreach (var candidate in addressPaths)
+        foreach (var location in locations)
         {
+            if (!location.IsCurrentLocationControl) continue;
+            var candidate = location.Value;
             if (string.IsNullOrWhiteSpace(candidate)) continue;
             var path = candidate.Trim();
             if (Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
@@ -79,6 +82,16 @@ public static partial class DesktopCompanionVerification
         }
         return false;
     }
+
+    // An Edit control can also be Explorer search. Require both toolbar context and one exact,
+    // known location identity; unknown/localized controls fail closed rather than guessing.
+    public static bool IsTrustedExplorerLocationControl(string? automationId, string? name, string? helpText,
+        bool insideToolbar) => insideToolbar &&
+        (string.Equals(automationId, "41477", StringComparison.Ordinal) ||
+         new[] { name, helpText }.Any(label => label is not null &&
+             (label.Equals("Address bar", StringComparison.OrdinalIgnoreCase) ||
+              label.Equals("Thanh địa chỉ", StringComparison.OrdinalIgnoreCase) ||
+              label.Equals("Địa chỉ", StringComparison.OrdinalIgnoreCase))));
 
     public static WorkspaceEvidence EvaluateWorkspace(string expectedWorkspace, bool windowFound, string? windowTitle,
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)

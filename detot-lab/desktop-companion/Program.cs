@@ -1220,12 +1220,16 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         foreach (var window in windows)
                         {
                             var edits = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
-                            var paths = edits.Select(edit =>
+                            var locations = edits.Select(edit =>
                             {
-                                try { return edit.Patterns.Value.Pattern.Value.Value; }
-                                catch { return null; }
+                                string? value;
+                                try { value = edit.Patterns.Value.Pattern.Value.Value; }
+                                catch { value = null; }
+                                return new DesktopCompanionVerification.ExplorerLocationEvidence(
+                                    DesktopCompanionVerification.IsTrustedExplorerLocationControl(
+                                        SafeAutomationId(edit), SafeName(edit), SafeHelpText(edit), IsInsideToolbar(edit)), value);
                             }).ToArray();
-                            var verified = DesktopCompanionVerification.ExplorerWorkspaceMatches(workspace, paths);
+                            var verified = DesktopCompanionVerification.ExplorerWorkspaceMatches(workspace, locations);
                             snapshot = new(true, verified, session);
                             if (verified) return snapshot;
                         }
@@ -1242,6 +1246,20 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     {
         try { return element.Properties.Name.Value ?? ""; }
         catch { return ""; }
+    }
+
+    private static bool IsInsideToolbar(AutomationElement element)
+    {
+        try
+        {
+            for (AutomationElement? current = element.Parent; current is not null; current = current.Parent)
+            {
+                if (SafeControlType(current) == "ToolBar") return true;
+                if (SafeControlType(current) == "Window") return false;
+            }
+        }
+        catch { }
+        return false;
     }
 
     private static bool TryReadElementName(AutomationElement element, out string name)
