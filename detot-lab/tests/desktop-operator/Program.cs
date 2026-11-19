@@ -656,6 +656,9 @@ var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay t
 var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
 var openThenClickScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm link Pull requests");
 var unsafeCompoundScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm nút Lưu rồi gửi");
+var inspectEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Kiểm tra trang hiện tại trong Edge");
+var inspectGithubScope = ComputerUseTaskAuthorization.FromCurrentMessage("Review the current pull request in GitHub");
+var openThenInspectScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi kiểm tra trang hiện tại");
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
 var readDocumentScope = ComputerUseTaskAuthorization.FromCurrentMessage("Tóm tắt tài liệu docs/guide.pdf");
 var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
@@ -677,6 +680,96 @@ Check(openEdgeScope is { } scopedEdge && scopedEdge.Allows(new("observe")) &&
       ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "detot_computer_use") &&
       !ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "other_tool"),
     "a direct desktop request authorizes only its matching application and required observation");
+Check(inspectEdgeScope is { Intent: "planned-app-inspection", Application: "edge", BindApplicationProcess: true,
+          RequiresApplicationLaunchBeforeTarget: true, MaximumTargetActions: 2 } inspection &&
+      inspectGithubScope is null &&
+      openThenInspectScope is { Intent: "open-edge-then-planned-app-inspection", Application: "edge",
+          BindApplicationProcess: true, MaximumTargetActions: 2 } &&
+      inspection.AllowedOperations.Contains("select_tab", StringComparer.Ordinal) &&
+      inspection.AllowedOperations.Contains("scroll", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("click", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("type_text", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("press_key", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal) &&
+      ComputerUseTaskAuthorization.RequiresToolInvocation(inspectEdgeScope) &&
+      ComputerUseTaskAuthorization.RequiresToolInvocation(openThenInspectScope) &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Review Edge and Visual Studio Code") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi kiểm tra trang trong VS Code") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Check Edge and send an email") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Review https://github.com/voquangthan/-t-t") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Check the current page") is null,
+    "natural app inspection requires one named allowlisted application and excludes writes, submission, arbitrary keys, and file reads; GitHub uses its scoped reader");
+if (inspectEdgeScope is { } appInspection)
+{
+    const string tabId = "0123456789abcdef0123456789abcdef";
+    const string treeId = "1123456789abcdef0123456789abcdef";
+    using var appObservation = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"edge-window","process":"msedge","title":"Edge"},
+                    {"windowId":"code-window","process":"Code","title":"Private editor"}],
+         "elements":[{"elementId":"0123456789abcdef0123456789abcdef","windowId":"edge-window","controlType":"TabItem","name":"Home","nameTruncated":false,"isPassword":false,"allowedActions":["select-element"]},
+                     {"elementId":"1123456789abcdef0123456789abcdef","windowId":"code-window","controlType":"TreeItem","name":"Private files","nameTruncated":false,"isPassword":false,"allowedActions":["expand-element"]}]}
+        """);
+    var appObservationSelection = ComputerUseObservationFilter.Select(appObservation.RootElement, appInspection);
+    Check(appObservationSelection.Status == "available" && appObservationSelection.Elements.Length == 1 &&
+          appObservationSelection.Elements[0].GetProperty("elementId").GetString() == tabId &&
+          appObservationSelection.WindowIds.SequenceEqual(new[] { "edge-window" }),
+        "planned inspection sends only windows and controls belonging to the one requested application process");
+
+    using var absentAppObservation = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"code-window","process":"Code","title":"Private editor"}],
+         "elements":[{"elementId":"1123456789abcdef0123456789abcdef","windowId":"code-window","controlType":"TreeItem","name":"Private files","nameTruncated":false,"isPassword":false,"allowedActions":["expand-element"]}]}
+        """);
+    var absentAppSelection = ComputerUseObservationFilter.Select(absentAppObservation.RootElement, appInspection);
+    Check(absentAppSelection.Status == "empty" && absentAppSelection.Elements.Length == 0 &&
+          absentAppSelection.WindowIds.Length == 0,
+        "an unopened requested app produces an empty scoped observation instead of exposing other apps");
+
+    var emptyStartState = new ComputerUseTurnState();
+    Check(emptyStartState.RecordObservation("empty", new Dictionary<string, ComputerUseObservedTarget>(), appInspection) &&
+          emptyStartState.CanAct(new("open_application", Application: "edge"), appInspection),
+        "an empty, app-scoped initial observation permits launching the explicitly requested app");
+    var partialObservationState = new ComputerUseTurnState();
+    Check(!partialObservationState.RecordObservation("partial", new Dictionary<string, ComputerUseObservedTarget>
+          { [tabId] = new("TabItem", "Home", new(StringComparer.Ordinal) { "select-element" }, "Edge", "msedge") },
+          appInspection) && partialObservationState.Stopped,
+        "planned app inspection stops instead of using a partial or truncated observation");
+
+    var state = new ComputerUseTurnState();
+    var broadScope = state.ObservationScope(appInspection);
+    var beforeLaunchTargets = new Dictionary<string, ComputerUseObservedTarget>
+    {
+        [tabId] = new("TabItem", "Home", new(StringComparer.Ordinal) { "select-element" }, "Edge", "msedge"),
+        [treeId] = new("TreeItem", "Files", new(StringComparer.Ordinal) { "expand-element" }, "Project", "Code")
+    };
+    var scopedBeforeLaunch = broadScope.BindApplicationProcess &&
+        state.RecordObservation("available", beforeLaunchTargets, appInspection) &&
+        state.CanAct(new("open_application", Application: "edge"), appInspection) &&
+        !state.CanAct(new("open_application", Application: "vscode"), appInspection) &&
+        state.RecordAction("verified", true, "verified", "open_application");
+    var targetScope = state.ObservationScope(appInspection);
+    var firstAction = scopedBeforeLaunch && targetScope.BindApplicationProcess &&
+        state.RecordObservation("available", beforeLaunchTargets, appInspection) &&
+        state.CanAct(new("select_tab", TargetId: tabId), appInspection) &&
+        !state.CanAct(new("expand", TargetId: treeId), appInspection) &&
+        state.RecordAction("verified", true, "verified", "select_tab", singleTargetAction: true);
+    var secondAction = firstAction && state.RecordObservation("available", beforeLaunchTargets, appInspection) &&
+        state.CanAct(new("expand", TargetId: treeId), appInspection) &&
+        state.RecordAction("verified", true, "verified", "expand", singleTargetAction: true) &&
+        !state.CanAct(new("select_tab", TargetId: tabId), appInspection);
+    Check(scopedBeforeLaunch && firstAction && secondAction && state.RequiresObservation,
+        "planned inspection binds evidence to the launched app, requires re-observation, and stops after two target actions");
+
+    var wrongProcessState = new ComputerUseTurnState();
+    var wrongProcessRejected = wrongProcessState.RecordAction("verified", true, "verified", "open_application") &&
+        !wrongProcessState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+        {
+            [tabId] = new("TabItem", "Home", new(StringComparer.Ordinal) { "select-element" }, "Editor", "Code")
+        }, appInspection) && wrongProcessState.Stopped;
+    Check(wrongProcessRejected,
+        "planned inspection rejects observation targets from another application's process after launch");
+}
 Check(openThenClickScope is { TargetControlType: "Hyperlink", TargetLabel: "Pull requests" } compound &&
       compound.AllowedOperations.Contains("open_application", StringComparer.Ordinal) &&
       compound.AllowedOperations.Contains("click", StringComparer.Ordinal) &&

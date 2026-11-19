@@ -58,7 +58,8 @@ public static class ComputerUseChatIntent
 
 public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperations, string? Application = null,
     string? ObservationTarget = null, string? RequestedValue = null, string? TargetLabel = null,
-    string? TargetControlType = null, bool RequiresApplicationLaunchBeforeTarget = false)
+    string? TargetControlType = null, bool RequiresApplicationLaunchBeforeTarget = false,
+    int MaximumTargetActions = 1, bool BindApplicationProcess = false)
 {
     private static readonly IReadOnlyDictionary<string, string[]> ApplicationProcesses =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -79,7 +80,7 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
             (action.Value is not null || action.Direction is not null)) return false;
         if ((action.Operation is "open_workspace_item" or "read_workspace_item") && action.Value != RequestedValue) return false;
         if (action.Operation == "type_text" && action.Value != RequestedValue) return false;
-        if (action.Operation == "scroll" && action.Direction != RequestedValue) return false;
+        if (action.Operation == "scroll" && RequestedValue is not null && action.Direction != RequestedValue) return false;
         if (action.Operation is not ("open_workspace_item" or "read_workspace_item" or "type_text" or "scroll" or "observe") && RequestedValue is not null) return false;
         return true;
     }
@@ -90,10 +91,12 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
     public bool MatchesObservedTarget(ComputerUseObservedTarget target) =>
         MatchesTarget(target.ControlType, target.Name) && MatchesApplicationProcess(target.Process);
 
-    public bool MatchesApplicationProcess(string? process) =>
-        !RequiresApplicationLaunchBeforeTarget || TargetLabel is null ||
-        ApplicationProcesses.TryGetValue(Application ?? "", out var expected) &&
-        expected.Contains(process ?? "", StringComparer.OrdinalIgnoreCase);
+    public bool MatchesApplicationProcess(string? process)
+    {
+        var bindToApplication = BindApplicationProcess || RequiresApplicationLaunchBeforeTarget && TargetLabel is not null;
+        return !bindToApplication || ApplicationProcesses.TryGetValue(Application ?? "", out var expected) &&
+            expected.Contains(process ?? "", StringComparer.OrdinalIgnoreCase);
+    }
 }
 
 public static class ComputerUseTaskAuthorization
@@ -127,6 +130,28 @@ public static class ComputerUseTaskAuthorization
         @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:nhập|gõ|type)\s+(?<value>[^\r\n""'`<>]{1,512}?)\s+(?:vào|into)\s+(?:ô|field)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    private static readonly Regex SafeInspectionIntent = new(
+        @"\b(?:inspect|examine|look\s+at|review|check|read|view|summari[sz]e|tell\s+me\s+about|show\s+me|xem|kiểm\s+tra|đọc|quan\s+sát|tóm\s+tắt|cho\s+(?:tôi|mình|t)\s+xem|cho\s+biết)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex UnsafeInspectionIntent = new(
+        @"\b(?:delete|remove|send|submit|save|overwrite|install|uninstall|execute|run|sign\s+in|log\s+in|log\s+out|change|modify|edit|type|enter|fill|create|purchase|buy|pay|cancel|merge|push|commit|click|bấm|nhấn|xóa|gỡ|gửi|nộp|lưu|ghi\s+đè|cài\s+đặt|chạy|thực\s+thi|đăng\s+nhập|đăng\s+xuất|thay\s+đổi|sửa|nhập|điền|tạo|mua|thanh\s+toán|hủy)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex WebAddress = new(@"(?:https?://|www\.)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly (string Application, Regex Pattern)[] InspectionApplications =
+    [
+        ("edge", new(@"\b(?:microsoft\s+)?edge\b|\bbrowser\b|trình\s+duyệt", Options)),
+        ("vscode", new(@"\b(?:vs\s*code|visual\s+studio\s+code)\b", Options)),
+        ("settings", new(@"\b(?:windows\s+)?settings\b|cài\s+đặt\s+windows", Options)),
+        ("task-manager", new(@"\b(?:windows\s+)?task\s+manager\b|trình\s+quản\s+lý\s+tác\s+vụ", Options)),
+        ("word", new(@"\b(?:microsoft\s+)?word\b", Options)),
+        ("excel", new(@"\b(?:microsoft\s+)?excel\b", Options)),
+        ("powerpoint", new(@"\b(?:microsoft\s+)?powerpoint\b", Options)),
+        ("pdf-reader", new(@"\b(?:pdf\s+reader|acrobat(?:\s+reader)?)\b", Options)),
+    ];
+
     public static bool ShouldExposeTool(ComputerUseTaskScope? scope, bool interactionConsent,
         bool observationConsent, bool workspaceFileConsent = false) => scope is not null &&
         (scope.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal)
@@ -137,7 +162,8 @@ public static class ComputerUseTaskAuthorization
         scope is not null && toolName == "detot_computer_use";
 
     public static bool RequiresToolInvocation(ComputerUseTaskScope? scope) =>
-        scope?.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal) == true;
+        scope?.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal) == true ||
+        scope?.BindApplicationProcess == true;
 
     public static ComputerUseTaskScope? FromCurrentMessage(string? message)
     {
@@ -147,23 +173,47 @@ public static class ComputerUseTaskAuthorization
         if (compound.Success)
         {
             var first = FromSingleRequest(compound.Groups["first"].Value.Trim());
-            var second = FromSingleRequest(compound.Groups["second"].Value.Trim());
+            var secondText = compound.Groups["second"].Value.Trim();
+            var second = FromSingleRequest(secondText) ?? FromPlannedInspectionRequest(secondText, first?.Application);
+            var plannedInspection = second is { Intent: "planned-app-inspection" } &&
+                string.Equals(first?.Application, second.Application, StringComparison.Ordinal);
+            var namedTargetAction = second is not null && second.AllowedOperations.Contains("observe", StringComparer.Ordinal) &&
+                second.AllowedOperations.Count(operation => operation != "observe") == 1 &&
+                second.TargetLabel is not null && second.TargetControlType is not null &&
+                !second.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal);
             if (first is null || second is null ||
                 first.AllowedOperations.Any(operation => operation is not ("observe" or "open_application" or "open_workspace")) ||
                 first.Application is null ||
-                !second.AllowedOperations.Contains("observe", StringComparer.Ordinal) ||
-                second.AllowedOperations.Count(operation => operation != "observe") != 1 ||
-                second.TargetLabel is null || second.TargetControlType is null ||
-                second.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal)) return null;
+                (!plannedInspection && !namedTargetAction)) return null;
 
-            var action = second.AllowedOperations.Single(operation => operation != "observe");
+            var targetOperations = plannedInspection
+                ? second.AllowedOperations.Where(operation => operation is not ("observe" or "open_application" or "open_workspace"))
+                : second.AllowedOperations.Where(operation => operation != "observe");
+            var allowedOperations = first.AllowedOperations.Where(operation => operation != "observe")
+                .Concat(targetOperations).Prepend("observe").Distinct(StringComparer.Ordinal).ToArray();
             return new(first.Intent + "-then-" + second.Intent,
-                ["observe", .. first.AllowedOperations.Where(operation => operation != "observe"), action],
+                allowedOperations,
                 first.Application, RequestedValue: second.RequestedValue,
                 TargetLabel: second.TargetLabel, TargetControlType: second.TargetControlType,
-                RequiresApplicationLaunchBeforeTarget: true);
+                RequiresApplicationLaunchBeforeTarget: true, MaximumTargetActions: plannedInspection ? 2 : 1,
+                BindApplicationProcess: plannedInspection);
         }
-        return FromSingleRequest(message);
+        return FromSingleRequest(message) ?? FromPlannedInspectionRequest(message);
+    }
+
+    private static ComputerUseTaskScope? FromPlannedInspectionRequest(string message, string? inheritedApplication = null)
+    {
+        if (!SafeInspectionIntent.IsMatch(message) || UnsafeInspectionIntent.IsMatch(message) || WebAddress.IsMatch(message)) return null;
+        var applications = InspectionApplications.Where(candidate => candidate.Pattern.IsMatch(message))
+            .Select(candidate => candidate.Application).Distinct(StringComparer.Ordinal).ToArray();
+        if (applications.Length > 1 || (applications.Length == 0 && inheritedApplication is null)) return null;
+        var application = applications.Length == 1 ? applications[0] : inheritedApplication!;
+        if ((inheritedApplication is not null && application != inheritedApplication) ||
+            !InspectionApplications.Any(candidate => candidate.Application == application)) return null;
+        const string launchOperation = "open_application";
+        return new("planned-app-inspection", ["observe", launchOperation, "activate_window", "select_tab", "select", "expand", "collapse", "scroll"],
+            application, RequiresApplicationLaunchBeforeTarget: true, MaximumTargetActions: 2,
+            BindApplicationProcess: true);
     }
 
     private static ComputerUseTaskScope? FromSingleRequest(string message)
@@ -336,13 +386,23 @@ public static class ComputerUseObservationFilter
             return new("ok", matches, windowId is null ? [] : [windowId], false);
         }
 
-        var selected = controls.Take(maximumUnscopedControls).ToArray();
-        var selectedWindows = observation.TryGetProperty("windows", out var allWindows) && allWindows.ValueKind == JsonValueKind.Array
-            ? allWindows.EnumerateArray().Select(window => Read(window, "windowId")).Where(id => id is not null).Cast<string>().ToArray()
-            : [];
-        var wasTruncated = sourceTruncated || controls.Length > maximumUnscopedControls;
-        return new(wasTruncated ? "partial" : Read(observation, "observationStatus") ?? "unavailable",
-            selected, selectedWindows, wasTruncated);
+        JsonElement[] applicationWindows = observation.TryGetProperty("windows", out var allWindows) && allWindows.ValueKind == JsonValueKind.Array
+            ? allWindows.EnumerateArray().Where(window => !scope.BindApplicationProcess ||
+                    scope.MatchesApplicationProcess(Read(window, "process")))
+                .ToArray()
+            : Array.Empty<JsonElement>();
+        var applicationWindowIds = applicationWindows.Select(window => Read(window, "windowId"))
+            .Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
+        var applicationControls = scope.BindApplicationProcess
+            ? controls.Where(element => applicationWindowIds.Contains(Read(element, "windowId") ?? "")).ToArray()
+            : controls;
+        var selected = applicationControls.Take(maximumUnscopedControls).ToArray();
+        var selectedWindows = applicationWindows
+            .Select(window => Read(window, "windowId")).Where(id => id is not null).Cast<string>().ToArray();
+        var wasTruncated = sourceTruncated || applicationControls.Length > maximumUnscopedControls;
+        var status = wasTruncated ? "partial" : scope.BindApplicationProcess && applicationWindows.Length == 0
+            ? "empty" : Read(observation, "observationStatus") ?? "unavailable";
+        return new(status, selected, selectedWindows, wasTruncated);
     }
 
     public static string RequiredObservedAction(string operation) => operation switch
@@ -380,7 +440,7 @@ public sealed class ComputerUseTurnState
     private readonly Dictionary<string, ComputerUseObservedTarget> observedTargets = new(StringComparer.Ordinal);
     private bool workspaceItemRead;
     private bool applicationLaunchCompleted;
-    private bool targetActionCompleted;
+    private int targetActionsCompleted;
     public bool RequiresObservation { get; private set; } = true;
     public bool Stopped { get; private set; }
     public bool CanAcceptModelCompletion => !Stopped;
@@ -389,12 +449,13 @@ public sealed class ComputerUseTurnState
         ComputerUseTaskScope scope)
     {
         var observationScope = ObservationScope(scope);
-        IReadOnlyDictionary<string, ComputerUseObservedTarget> scopedTargets = observationScope.TargetLabel is null ? targets : targets.Where(pair =>
-                observationScope.MatchesObservedTarget(pair.Value) &&
-                pair.Value.AllowedActions.Contains(ComputerUseObservationFilter.RequiredObservedAction(
-                    ComputerUseObservationFilter.TargetUiOperation(observationScope))))
+        var scopedTargets = targets.Where(pair => observationScope.MatchesObservedTarget(pair.Value) &&
+                (observationScope.TargetLabel is null || pair.Value.AllowedActions.Contains(
+                    ComputerUseObservationFilter.RequiredObservedAction(
+                        ComputerUseObservationFilter.TargetUiOperation(observationScope)))))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-        if (Stopped || observationScope.TargetLabel is not null && scopedTargets.Count != 1 ||
+        if (Stopped || observationScope.BindApplicationProcess && status == "partial" ||
+            observationScope.TargetLabel is not null && scopedTargets.Count != 1 ||
             !ComputerUseTaskAuthorization.HasUsableObservation(status, scopedTargets.Count > 0))
         {
             Stop();
@@ -416,7 +477,7 @@ public sealed class ComputerUseTurnState
         {
             var isLaunch = action.Operation is "open_application" or "open_workspace";
             if (isLaunch && applicationLaunchCompleted || !isLaunch && !applicationLaunchCompleted) return false;
-            if (!isLaunch && targetActionCompleted) return false;
+            if (!isLaunch && targetActionsCompleted >= scope.MaximumTargetActions) return false;
         }
         if (action.Operation == "read_workspace_item") return !workspaceItemRead;
         if (RequiresObservation) return false;
@@ -446,7 +507,7 @@ public sealed class ComputerUseTurnState
         }
         if (operation == "read_workspace_item") workspaceItemRead = true;
         if (operation is "open_application" or "open_workspace") applicationLaunchCompleted = true;
-        else if (singleTargetAction) targetActionCompleted = true;
+        else if (singleTargetAction) targetActionsCompleted++;
         RequiresObservation = true;
         observedTargets.Clear();
         return true;
