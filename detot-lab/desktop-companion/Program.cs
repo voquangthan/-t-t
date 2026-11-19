@@ -1219,17 +1219,13 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         var windows = automation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
                         foreach (var window in windows)
                         {
-                            var title = SafeName(window);
                             var edits = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
                             var paths = edits.Select(edit =>
                             {
                                 try { return edit.Patterns.Value.Pattern.Value.Value; }
                                 catch { return null; }
                             }).ToArray();
-                            var folder = Path.GetFileName(workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                            var verified = title.Contains(folder, StringComparison.OrdinalIgnoreCase) ||
-                                paths.Any(path => path is not null && string.Equals(path.TrimEnd(['\\', '/']),
-                                    workspace.TrimEnd(['\\', '/']), StringComparison.OrdinalIgnoreCase));
+                            var verified = DesktopCompanionVerification.ExplorerWorkspaceMatches(workspace, paths);
                             snapshot = new(true, verified, session);
                             if (verified) return snapshot;
                         }

@@ -55,6 +55,31 @@ public static partial class DesktopCompanionVerification
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
         => EvaluateWorkspace(expectedWorkspace, true, windowTitle, rootTreeLabels, accessiblePaths).Verified;
 
+    // Explorer titles are a presentation hint, not a location identity: two folders may share a
+    // name or one title may merely contain the workspace name. Only a readable exact address is
+    // sufficient to verify an Explorer window is displaying the configured workspace.
+    public static bool ExplorerWorkspaceMatches(string? expectedWorkspace, IEnumerable<string?> addressPaths)
+    {
+        if (string.IsNullOrWhiteSpace(expectedWorkspace)) return false;
+        string expected;
+        try { expected = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
+        catch (ArgumentException) { return false; }
+        foreach (var candidate in addressPaths)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) continue;
+            var path = candidate.Trim();
+            if (Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
+                path = Uri.UnescapeDataString(uri.LocalPath);
+            try
+            {
+                if (string.Equals(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    expected, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            catch (ArgumentException) { }
+        }
+        return false;
+    }
+
     public static WorkspaceEvidence EvaluateWorkspace(string expectedWorkspace, bool windowFound, string? windowTitle,
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
     {

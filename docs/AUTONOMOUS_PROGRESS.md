@@ -16,6 +16,11 @@
 - The direct Chat dispatcher reports the three distinct results truthfully: no Explorer window, Explorer visible but not the configured workspace, or the configured workspace verified. It does not expose another Explorer path when verification fails.
 - Added contract regressions for policy exposure, intent mapping and protocol allowlisting. C# compilation/operator tests must be confirmed by Windows CI; no live Explorer action is claimed from this runner.
 
+## P2 File Explorer verification correction (19/11/2026)
+
+- Work review correctly rejected title-only workspace verification. Explorer now reports `workspaceVerified=true` only when a readable address bar value resolves exactly to the configured workspace (including a `file:` URI form). A matching/containing title, a same-basename folder elsewhere, or an unreadable address remains not verified.
+- Local verification after the correction: Desktop Companion build **0 warnings / 0 errors**; Desktop Operator regression **149/149 PASS**. The companion pipe cancellation message in the regression is the expected client-disconnect fixture, followed by the asserted second-client success. CI and Work review on the new SHA are still required; no interactive Explorer E2E has been claimed.
+
 ## Memory Core V2 — M2 Semantic Memory
 
 - M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.
