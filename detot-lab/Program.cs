@@ -257,6 +257,8 @@ app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRe
         return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
     if (request.Target == "desktop-ui")
         return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-desktop-ui", cancellationToken));
+    if (request.Target == "workspace-explorer")
+        return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-workspace", cancellationToken));
     if (request.Target == "approved-applications")
     {
         return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-applications", cancellationToken));

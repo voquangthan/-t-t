@@ -7,7 +7,7 @@ public static class DesktopCompanionProtocol
 {
     private static readonly HashSet<string> Actions = new(StringComparer.Ordinal)
     {
-        "observe-applications", "open-workspace", "open-edge", "open-github",
+        "observe-applications", "observe-workspace", "open-workspace", "open-edge", "open-github",
         "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
         "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
         "select-element", "type-text", "scroll-element", "press-key", "open-settings",

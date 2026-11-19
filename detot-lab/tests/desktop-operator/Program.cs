@@ -39,6 +39,9 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
 Check(ComputerUsePolicy.CanObserve("desktop-ui"), "general desktop UI observation is explicitly allowed");
+Check(ComputerUsePolicy.CanObserve("workspace-explorer") &&
+      JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("workspace-explorer", StringComparison.Ordinal),
+    "File Explorer observation is limited to the configured workspace");
 Check(ComputerUseChatIntent.DetectDirectRequest("Quan sát giao diện") == "read-desktop-ui" &&
       ComputerUseChatIntent.ObservationTargetForAction("read-desktop-ui") == "desktop-ui",
     "a bounded natural-language request reaches the general UI observation action");
@@ -216,6 +219,7 @@ Check(!ComputerUsePolicy.AllowedUiActions("Edit", false, false, false,
         supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false).Any(),
     "disabled and offscreen elements expose no actions");
 Check(DesktopCompanionProtocol.IsAllowedAction("read-workspace") &&
+      DesktopCompanionProtocol.IsAllowedAction("observe-workspace") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-pull-requests") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-account"),
     "Desktop Companion exposes only explicit read action IDs");
@@ -490,6 +494,9 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-git
     "a direct PR and CI inspection request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Xem ứng dụng đang mở") == "read-approved-applications",
     "a direct approved-app observation request is recognized");
+Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra File Explorer của workspace") == "read-workspace-explorer" &&
+      ComputerUseChatIntent.ObservationTargetForAction("read-workspace-explorer") == "workspace-explorer",
+    "a direct File Explorer request observes only the configured workspace state");
 Check(ComputerUseChatIntent.DetectDirectRequest("Làm sao để mở Edge?") is null,
     "a how-to question does not launch an application");
 Check(ComputerUseChatIntent.DetectDirectRequest("Trong ví dụ này: mở Edge") is null,

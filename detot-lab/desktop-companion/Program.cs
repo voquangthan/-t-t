@@ -146,6 +146,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         return request.Action switch
         {
             "observe-applications" => ObserveApplications(),
+            "observe-workspace" => ObserveWorkspaceExplorer(),
             "observe-desktop-ui" => ObserveDesktopUi(),
             "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key" or "expand-element" or "collapse-element"
                 => InteractWithUi(request),
@@ -796,6 +797,20 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var snapshot = WaitForExplorerWorkspace(TimeSpan.FromSeconds(8));
         return new { succeeded = snapshot.WorkspaceVerified, windowVerified = snapshot.WindowFound,
             workspaceVerified = snapshot.WorkspaceVerified, sessionId = snapshot.SessionId };
+    }
+
+    // Do not enumerate arbitrary Explorer locations or filenames. This observation only reports
+    // whether a same-session Explorer window is currently showing the configured workspace.
+    private object ObserveWorkspaceExplorer()
+    {
+        var snapshot = WaitForExplorerWorkspace(TimeSpan.Zero);
+        return new
+        {
+            observationStatus = snapshot.WindowFound ? "available" : "empty",
+            explorerWindowFound = snapshot.WindowFound,
+            workspaceVerified = snapshot.WorkspaceVerified,
+            sessionId = snapshot.SessionId
+        };
     }
 
     private object OpenWorkspaceItem(string relativePath)

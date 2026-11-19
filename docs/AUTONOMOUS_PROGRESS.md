@@ -9,6 +9,12 @@
 - P1 now covers bounded UI observation, low-risk window activation, Tab/List/Tree selection in safe containers, navigation-only tree expansion/collapse, non-password Edit value entry, named Document scrolling, and Hyperlink invocation. Dangerous buttons, menu commands, account/settings changes, submits, arbitrary keys, file writes, shell commands and code execution remain blocked or require a future explicit approval path.
 - **Next scope:** P2 application adapters, starting with a read-only File Explorer observer and a workspace-only open path. Preserve P1 behavior and do not claim Windows UI E2E until the interactive smoke proves a real action and verified postcondition.
 
+## Universal Windows Computer Use — P2 File Explorer observer (19/11/2026)
+
+- Added the first P2 application adapter by extending the existing authenticated Companion instead of adding a new runtime. `observe-workspace` reports only whether same-session File Explorer is open and whether it displays the configured workspace; it does not enumerate drives, arbitrary Explorer paths, filenames, or file contents.
+- Natural requests to inspect File Explorer are routed only to this bounded observation. Existing “Mở File Explorer” remains an alias for `open-workspace`, so it opens the configured workspace rather than an arbitrary location. Opening one explicitly named relative file/folder remains restricted to an existing non-reparse item inside the workspace.
+- Added contract regressions for policy exposure, intent mapping and protocol allowlisting. C# compilation/operator tests must be confirmed by Windows CI; no live Explorer action is claimed from this runner.
+
 ## Memory Core V2 — M2 Semantic Memory
 
 - M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.
