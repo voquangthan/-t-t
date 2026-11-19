@@ -13,6 +13,7 @@
 
 - Added the first P2 application adapter by extending the existing authenticated Companion instead of adding a new runtime. `observe-workspace` reports only whether same-session File Explorer is open and whether it displays the configured workspace; it does not enumerate drives, arbitrary Explorer paths, filenames, or file contents.
 - Natural requests to inspect File Explorer are routed only to this bounded observation. Existing “Mở File Explorer” remains an alias for `open-workspace`, so it opens the configured workspace rather than an arbitrary location. Opening one explicitly named relative file/folder remains restricted to an existing non-reparse item inside the workspace.
+- The direct Chat dispatcher reports the three distinct results truthfully: no Explorer window, Explorer visible but not the configured workspace, or the configured workspace verified. It does not expose another Explorer path when verification fails.
 - Added contract regressions for policy exposure, intent mapping and protocol allowlisting. C# compilation/operator tests must be confirmed by Windows CI; no live Explorer action is claimed from this runner.
 
 ## Memory Core V2 — M2 Semantic Memory

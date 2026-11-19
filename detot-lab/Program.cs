@@ -1820,6 +1820,22 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
         return Results.Ok(new { reply, toolUsed = true, computerUseAction = action, computerUseObservationStatus = status });
     }
 
+    if (action == "read-workspace-explorer")
+    {
+        var result = await companion.ExecuteAsync("observe-workspace", cancellationToken);
+        if (result.TryGetProperty("error", out _)) return BrowserActionResult(result);
+        var status = ReadComputerUseString(result, "observationStatus") ?? "unavailable";
+        var found = result.TryGetProperty("explorerWindowFound", out var foundValue) && foundValue.ValueKind == JsonValueKind.True;
+        var verified = result.TryGetProperty("workspaceVerified", out var workspaceValue) && workspaceValue.ValueKind == JsonValueKind.True;
+        var reply = !found
+            ? "Không thấy cửa sổ File Explorer nào trong phiên Windows hiện tại."
+            : verified
+                ? "File Explorer đang mở đúng workspace đã cấu hình."
+                : "Có File Explorer đang mở, nhưng chưa xác minh nó hiển thị workspace đã cấu hình.";
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action,
+            computerUseObservationStatus = status, explorerWindowFound = found, workspaceVerified = verified });
+    }
+
     var companionAction = action switch
     {
         "open-workspace" => "open-workspace",
