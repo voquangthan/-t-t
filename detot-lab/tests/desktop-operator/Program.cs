@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.IO.Pipes;
 using System.Net;
 using System.Text;
@@ -650,6 +651,45 @@ finally
 {
     if (File.Exists(documentPath)) File.Delete(documentPath);
     if (Directory.Exists(documentRoot)) Directory.Delete(documentRoot);
+}
+var archiveRoot = CreateIsolatedTestDirectory("workspace-document-archive");
+var archivePath = Path.Combine(archiveRoot, "bundle.zip");
+try
+{
+    await using (var archiveStream = File.Create(archivePath))
+    using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create))
+    {
+        foreach (var (entryName, content) in new[]
+        {
+            (".state/session.json", "PRIVATE-MEMORY-SENTINEL"),
+            ("logs/session.json", "PRIVATE-LOG-SENTINEL"),
+            ("backups/note.txt", "PRIVATE-BACKUP-SENTINEL"),
+            ("credentials/client-secret.json", "PRIVATE-CREDENTIAL-SENTINEL"),
+            ("docs/guide.md", "Allowed documentation entry.")
+        })
+        {
+            var entry = archive.CreateEntry(entryName);
+            await using var entryStream = entry.Open();
+            await using var writer = new StreamWriter(entryStream, Encoding.UTF8);
+            await writer.WriteAsync(content);
+        }
+    }
+
+    var archiveRejected = false;
+    try
+    {
+        await new UniversalFileReader().ReadWorkspaceFileAsync(archiveRoot, "bundle.zip", CancellationToken.None);
+    }
+    catch (InvalidDataException error)
+    {
+        archiveRejected = error.Message.Contains("ZIP", StringComparison.OrdinalIgnoreCase);
+    }
+    Check(archiveRejected,
+        "scoped workspace reads reject ZIP containers before any entry can become model-bound excerpts");
+}
+finally
+{
+    if (Directory.Exists(archiveRoot)) Directory.Delete(archiveRoot, recursive: true);
 }
 Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cáo tháng" } &&
       selectListScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&

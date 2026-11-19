@@ -1,12 +1,17 @@
 # Đệ Tốt Pro — checkpoint
 
+## Current Universal Windows Computer Use status (19/11/2026)
+
+- PR #4 is open on `codex/universal-windows-ui`, current HEAD `faf0a7b347ad9b0dd557804d7763ad10900a2f9e`. CI run `44445969890` passed. A matching REVISE comment is visible for this SHA; it is posted under the repository owner account via ChatGPT Codex Connector, so independent reviewer identity is not established.
+- The review found ZIP entry paths bypass workspace read exclusions. The current local fix rejects `.zip` in `ReadWorkspaceFileAsync` before opening it; general upload reading is unchanged. A regression fixture contains blocked state/log/backup/credential entries plus an allowed guide entry.
+- `git diff --check` passes. Local .NET SDK is unavailable, so local build/operator tests could not run. Push CI and review of a new SHA remain pending. No live document content was sent externally; no Windows/Chat E2E is claimed.
+- A separate untracked root `AGENTS.md` is retained from repository cleanup and is outside the PR fix; do not include it in the PR commit. Keep autonomous code execution hard-blocked and do not merge.
+
 ## Universal Windows Computer Use — scoped workspace document read (19/11/2026)
 
-- Base PR #4 HEAD `5c597c8e4bc7631cb65b14ec9c37460960411d78` is open; Windows regression CI showed success. The latest visible Work PASS is for `6896de8`, so it is stale for the current HEAD. Current PR HEAD has no matching Work verdict; comments appear under the repository owner account and do not prove an independent reviewer identity.
-- Uncommitted changes extend the existing Computer Use tool with one exact workspace-relative file read through Universal File Reader. The path is bound to the current user request, blocked credential/runtime/state/database/log/backup paths are denied, known credential patterns are redacted, and a distinct `workspace_files / direct_request / DeepSeek` grant is required. This read no longer requires UI-control grants or a running Companion. Documentation now describes the scope and limits.
-- Local Backend build: 0 warnings / 0 errors. Desktop Operator: 155/155 PASS; with browser adapter: 161/161 PASS using `--skip-local-pipe`. The local named-pipe integration fails in this sandbox with `companion_unauthorized` under `PipeOptions.CurrentUserOnly`; security was not weakened. `git diff --check` passes.
-- No live Chat/DeepSeek read has been run, and no document contents were sent externally. The tool has not been verified through the running UI. Do not claim E2E.
-- **Next:** inspect the final scoped diff, commit/push the feature branch, then check CI and obtain a HEAD-matching Work result. Preserve the hard block on autonomous code execution; do not merge.
+- PR #4 added one exact workspace-relative file read through Universal File Reader. The path is bound to the current user request, blocked credential/runtime/state/database/log/backup paths are denied, known credential patterns are redacted, and a distinct `workspace_files / direct_request / DeepSeek` grant is required. This read does not require UI-control grants or a running Companion. Documentation describes the scope and limits.
+- No live Chat/DeepSeek read was run, and no document contents were sent externally. The tool was not verified through the running UI. Do not claim E2E.
+
 ## Universal Windows Computer Use — P1 protocol and CI review passed (19/11/2026)
 
 - The named-target interaction chain is now complete on `codex/universal-windows-ui`: Backend scope → authenticated named pipe → Companion live revalidation. Click/select/expand/collapse/text/scroll actions carry both the exact accessible label and control type; missing, duplicate, partial, truncated, unreadable, changed, disabled, offscreen, expired, or cross-session targets stop before interaction.

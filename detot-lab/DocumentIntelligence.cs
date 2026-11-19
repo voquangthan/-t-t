@@ -71,6 +71,8 @@ public sealed class UniversalFileReader
     {
         if (!DesktopOperator.IsSafeWorkspaceDocumentPath(relativePath))
             throw new InvalidDataException("Đường dẫn tài liệu không nằm trong phạm vi đọc cho phép.");
+        if (string.Equals(Path.GetExtension(relativePath), ".zip", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Không hỗ trợ đọc ZIP theo phạm vi workspace; hãy chọn một tài liệu được phép bên trong workspace.");
         var fullPath = DesktopOperator.ResolveWorkspaceItemPath(workspaceRoot, relativePath);
         if (fullPath is null || Directory.Exists(fullPath))
             throw new FileNotFoundException("Không tìm thấy tệp trong workspace được phép.");
