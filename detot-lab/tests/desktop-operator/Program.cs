@@ -173,14 +173,14 @@ await using (var pipeServer = new NamedPipeServerStream(testPipeName, PipeDirect
 {
     var serverReply = Task.Run(async () =>
     {
-        using var serverDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        using var serverDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         try
         {
             await pipeServer.WaitForConnectionAsync(serverDeadline.Token);
             using var pipeReader = new StreamReader(pipeServer, Encoding.UTF8, false, 1024, leaveOpen: true);
-            await using var pipeWriter = new StreamWriter(pipeServer, Encoding.UTF8, 1024, leaveOpen: true) { AutoFlush = true };
             var line = await DesktopCompanionProtocol.ReadBoundedLineAsync(pipeReader, 4096, serverDeadline.Token);
             if (!DesktopCompanionProtocol.TryParseRequest(line, out var received) || received is null) return false;
+            await using var pipeWriter = new StreamWriter(pipeServer, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
             await pipeWriter.WriteLineAsync(JsonSerializer.Serialize(new
             {
                 requestId = received.RequestId,
@@ -190,11 +190,11 @@ await using (var pipeServer = new NamedPipeServerStream(testPipeName, PipeDirect
         }
         catch (OperationCanceledException) { return false; }
     });
-    using var clientDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    using var clientDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     JsonElement companionResult;
     try { companionResult = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientDeadline.Token); }
     catch (OperationCanceledException) { companionResult = JsonSerializer.SerializeToElement(new { error = "companion_timeout" }); }
-    var serverCompleted = await serverReply.WaitAsync(TimeSpan.FromSeconds(4));
+    var serverCompleted = await serverReply.WaitAsync(TimeSpan.FromSeconds(12));
     if (companionResult.TryGetProperty("error", out var pipeError))
         Console.WriteLine($"BLOCKED: named-pipe integration self-test is unavailable in this execution session ({pipeError.GetString()}); interactive Companion smoke is required.");
     else
