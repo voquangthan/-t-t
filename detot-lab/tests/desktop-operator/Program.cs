@@ -701,11 +701,43 @@ if (openThenClickScope is { } twoStepScope)
         state.RecordAction("verified", true, "verified", "open_application");
     var targetScope = state.ObservationScope(twoStepScope);
     Check(launchAllowed && targetScope.TargetLabel == "Pull requests" &&
-          state.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget> { [targetId] = target }, twoStepScope) &&
+          state.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+          {
+              [targetId] = target with { Process = "msedge" }
+          }, twoStepScope) &&
           state.CanAct(new("click", TargetId: targetId), twoStepScope) &&
           state.RecordAction("verified", true, "verified", "click", singleTargetAction: true) &&
           !state.CanAct(new("click", TargetId: targetId), twoStepScope),
         "two-step state observes broadly only before the requested app is verified, then binds one fresh exact target and prevents a repeated target action");
+
+    using var wrongAppOnly = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"other-window","process":"other-app","title":"Other app"}],
+         "elements":[{"elementId":"other-target","windowId":"other-window","controlType":"Hyperlink","name":"Pull requests","nameTruncated":false,"isPassword":false,"allowedActions":["click-element"]}]}
+        """);
+    var wrongAppSelection = ComputerUseObservationFilter.Select(wrongAppOnly.RootElement, targetScope);
+    Check(wrongAppSelection.Status == "target_not_found" && wrongAppSelection.Elements.Length == 0,
+        "a same-label control in another process cannot satisfy a two-step application's target scope");
+    using var matchingAndDecoy = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"word-window","process":"WINWORD","title":"Document"},{"windowId":"other-window","process":"other-app","title":"Other app"}],
+         "elements":[{"elementId":"word-target","windowId":"word-window","controlType":"Hyperlink","name":"Pull requests","nameTruncated":false,"isPassword":false,"allowedActions":["click-element"]},{"elementId":"other-target","windowId":"other-window","controlType":"Hyperlink","name":"Pull requests","nameTruncated":false,"isPassword":false,"allowedActions":["click-element"]}]}
+        """);
+    var appBoundSelection = ComputerUseObservationFilter.Select(matchingAndDecoy.RootElement,
+        targetScope with { Application = "word" });
+    Check(appBoundSelection.Status == "ok" && appBoundSelection.Elements.Length == 1 &&
+          appBoundSelection.Elements[0].GetProperty("elementId").GetString() == "word-target",
+        "when duplicate labels exist, only the target owned by the requested application's process remains eligible");
+
+    var wrongAppState = new ComputerUseTurnState();
+    var wrongAppLaunch = wrongAppState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+        { [targetId] = target with { Process = "other-app" } }, twoStepScope) &&
+        wrongAppState.CanAct(new("open_application", Application: "edge"), twoStepScope) &&
+        wrongAppState.RecordAction("verified", true, "verified", "open_application");
+    Check(wrongAppLaunch && !wrongAppState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+          { [targetId] = target with { Process = "other-app" } }, twoStepScope) &&
+          !wrongAppState.CanAct(new("click", TargetId: targetId), twoStepScope),
+        "turn-state authorization independently rejects a target whose observed process is outside the launched application");
 }
 Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
       openFileScope.Allows(new("observe")) &&

@@ -60,6 +60,15 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
     string? ObservationTarget = null, string? RequestedValue = null, string? TargetLabel = null,
     string? TargetControlType = null, bool RequiresApplicationLaunchBeforeTarget = false)
 {
+    private static readonly IReadOnlyDictionary<string, string[]> ApplicationProcesses =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["edge"] = ["msedge"], ["vscode"] = ["Code"], ["workspace"] = ["explorer"],
+            ["settings"] = ["SystemSettings"], ["task-manager"] = ["Taskmgr"],
+            ["word"] = ["WINWORD"], ["excel"] = ["EXCEL"], ["powerpoint"] = ["POWERPNT"],
+            ["pdf-reader"] = ["Acrobat", "AcroRd32"], ["github"] = ["msedge"]
+        };
+
     public bool Allows(ComputerUseAgentAction action)
     {
         if (!AllowedOperations.Contains(action.Operation, StringComparer.Ordinal)) return false;
@@ -77,6 +86,14 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
 
     public bool MatchesTarget(string? controlType, string? name) => TargetLabel is null ||
         controlType == TargetControlType && string.Equals(name?.Trim(), TargetLabel, StringComparison.OrdinalIgnoreCase);
+
+    public bool MatchesObservedTarget(ComputerUseObservedTarget target) =>
+        MatchesTarget(target.ControlType, target.Name) && MatchesApplicationProcess(target.Process);
+
+    public bool MatchesApplicationProcess(string? process) =>
+        !RequiresApplicationLaunchBeforeTarget || TargetLabel is null ||
+        ApplicationProcesses.TryGetValue(Application ?? "", out var expected) &&
+        expected.Contains(process ?? "", StringComparer.OrdinalIgnoreCase);
 }
 
 public static class ComputerUseTaskAuthorization
@@ -248,7 +265,7 @@ public static class ComputerUseObservationFilter
                 ? windows.EnumerateArray().Take(CompanionElementLimit + 1).Select(window => JsonSerializer.SerializeToElement(new
                     {
                         elementId = Read(window, "windowId"), windowId = Read(window, "windowId"), controlType = "Window",
-                        name = Read(window, "title"), nameTruncated = false, isPassword = false,
+                        name = Read(window, "title"), process = Read(window, "process"), nameTruncated = false, isPassword = false,
                         allowedActions = window.TryGetProperty("allowedActions", out var actions) && actions.ValueKind == JsonValueKind.Array
                             ? actions.EnumerateArray().Where(action => action.ValueKind == JsonValueKind.String).Select(action => action.GetString()!).ToArray()
                             : Array.Empty<string>()
@@ -261,9 +278,16 @@ public static class ComputerUseObservationFilter
         {
             if (sourceTruncated || sourcePartial || controls.Length > CompanionElementLimit)
                 return new("observation_truncated", [], [], true);
+            var appWindowIds = observation.TryGetProperty("windows", out var appWindows) && appWindows.ValueKind == JsonValueKind.Array
+                ? appWindows.EnumerateArray()
+                    .Where(window => scope.MatchesApplicationProcess(Read(window, "process")))
+                    .Select(window => Read(window, "windowId"))
+                    .Where(id => !string.IsNullOrWhiteSpace(id)).Cast<string>().ToHashSet(StringComparer.Ordinal)
+                : new HashSet<string>(StringComparer.Ordinal);
             var operation = TargetUiOperation(scope);
             var requiredAction = RequiredObservedAction(operation);
             var matches = controls.Where(element => !IsTrue(element, "isPassword") && !IsTrue(element, "nameTruncated") &&
+                    (!scope.RequiresApplicationLaunchBeforeTarget || appWindowIds.Contains(Read(element, "windowId") ?? "")) &&
                     scope.MatchesTarget(Read(element, "controlType"), Read(element, "name")) &&
                     (HasAction(element, requiredAction) || IsExplicitButtonApproval(element, scope, operation, requiredAction)))
                 .ToArray();
@@ -324,7 +348,7 @@ public sealed class ComputerUseTurnState
     {
         var observationScope = ObservationScope(scope);
         IReadOnlyDictionary<string, ComputerUseObservedTarget> scopedTargets = observationScope.TargetLabel is null ? targets : targets.Where(pair =>
-                observationScope.MatchesTarget(pair.Value.ControlType, pair.Value.Name) &&
+                observationScope.MatchesObservedTarget(pair.Value) &&
                 pair.Value.AllowedActions.Contains(ComputerUseObservationFilter.RequiredObservedAction(
                     ComputerUseObservationFilter.TargetUiOperation(observationScope))))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
