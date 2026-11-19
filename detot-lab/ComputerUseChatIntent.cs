@@ -58,13 +58,14 @@ public static class ComputerUseChatIntent
 
 public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperations, string? Application = null,
     string? ObservationTarget = null, string? RequestedValue = null, string? TargetLabel = null,
-    string? TargetControlType = null)
+    string? TargetControlType = null, bool RequiresApplicationLaunchBeforeTarget = false)
 {
     public bool Allows(ComputerUseAgentAction action)
     {
         if (!AllowedOperations.Contains(action.Operation, StringComparer.Ordinal)) return false;
         if (action.Operation == "open_application" && action.Application != Application) return false;
-        if (action.Operation != "open_application" && action.Application is not null) return false;
+        if (action.Operation == "open_workspace" && Application != "workspace") return false;
+        if (action.Operation is not ("open_application" or "open_workspace") && action.Application is not null) return false;
         if (action.Operation is "activate_window" or "click" or "select_tab" or "select" or "expand" or "collapse" &&
             (action.Value is not null || action.Direction is not null)) return false;
         if ((action.Operation is "open_workspace_item" or "read_workspace_item") && action.Value != RequestedValue) return false;
@@ -80,6 +81,10 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
 
 public static class ComputerUseTaskAuthorization
 {
+    private static readonly Regex ExplicitTwoStepRequest = new(
+        @"^\s*(?<first>[^\r\n]{1,256}?)\s+(?:rồi|sau\s+đó|then)\s+(?<second>[^\r\n]{1,384}?)\s*[.!?]*\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private static readonly (string Operation, string ControlType, Regex Pattern)[] NamedUiRequests =
     [
         ("activate_window", "Window", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:chuyển|đổi|focus|activate)\s+(?:sang\s+)?(?:cửa\s+sổ|window)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
@@ -121,6 +126,31 @@ public static class ComputerUseTaskAuthorization
     {
         if (string.IsNullOrWhiteSpace(message) || message.Length > 640 || message.Contains('\n') || message.Contains('\r') ||
             message.Contains('`') || message.Contains('"') || message.Contains('\'')) return null;
+        var compound = ExplicitTwoStepRequest.Match(message);
+        if (compound.Success)
+        {
+            var first = FromSingleRequest(compound.Groups["first"].Value.Trim());
+            var second = FromSingleRequest(compound.Groups["second"].Value.Trim());
+            if (first is null || second is null ||
+                first.AllowedOperations.Any(operation => operation is not ("observe" or "open_application" or "open_workspace")) ||
+                first.Application is null ||
+                !second.AllowedOperations.Contains("observe", StringComparer.Ordinal) ||
+                second.AllowedOperations.Count(operation => operation != "observe") != 1 ||
+                second.TargetLabel is null || second.TargetControlType is null ||
+                second.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal)) return null;
+
+            var action = second.AllowedOperations.Single(operation => operation != "observe");
+            return new(first.Intent + "-then-" + second.Intent,
+                ["observe", .. first.AllowedOperations.Where(operation => operation != "observe"), action],
+                first.Application, RequestedValue: second.RequestedValue,
+                TargetLabel: second.TargetLabel, TargetControlType: second.TargetControlType,
+                RequiresApplicationLaunchBeforeTarget: true);
+        }
+        return FromSingleRequest(message);
+    }
+
+    private static ComputerUseTaskScope? FromSingleRequest(string message)
+    {
         var readItemMatch = ReadWorkspaceItemRequest.Match(message);
         if (readItemMatch.Success)
         {
@@ -231,8 +261,8 @@ public static class ComputerUseObservationFilter
         {
             if (sourceTruncated || sourcePartial || controls.Length > CompanionElementLimit)
                 return new("observation_truncated", [], [], true);
-            var requiredAction = RequiredObservedAction(scope.AllowedOperations.FirstOrDefault(operation => operation != "observe") ?? "");
-            var operation = scope.AllowedOperations.FirstOrDefault(value => value != "observe") ?? "";
+            var operation = TargetUiOperation(scope);
+            var requiredAction = RequiredObservedAction(operation);
             var matches = controls.Where(element => !IsTrue(element, "isPassword") && !IsTrue(element, "nameTruncated") &&
                     scope.MatchesTarget(Read(element, "controlType"), Read(element, "name")) &&
                     (HasAction(element, requiredAction) || IsExplicitButtonApproval(element, scope, operation, requiredAction)))
@@ -259,6 +289,9 @@ public static class ComputerUseObservationFilter
         "scroll" => "scroll-element", "press_key" => "press-key", _ => ""
     };
 
+    public static string TargetUiOperation(ComputerUseTaskScope scope) => scope.AllowedOperations.FirstOrDefault(operation =>
+        operation is not ("observe" or "open_application" or "open_workspace")) ?? "";
+
     private static bool HasAction(JsonElement element, string action) =>
         element.TryGetProperty("allowedActions", out var actions) && actions.ValueKind == JsonValueKind.Array &&
         actions.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String && item.GetString() == action);
@@ -280,6 +313,8 @@ public sealed class ComputerUseTurnState
 {
     private readonly Dictionary<string, ComputerUseObservedTarget> observedTargets = new(StringComparer.Ordinal);
     private bool workspaceItemRead;
+    private bool applicationLaunchCompleted;
+    private bool targetActionCompleted;
     public bool RequiresObservation { get; private set; } = true;
     public bool Stopped { get; private set; }
     public bool CanAcceptModelCompletion => !Stopped;
@@ -287,11 +322,13 @@ public sealed class ComputerUseTurnState
     public bool RecordObservation(string? status, IReadOnlyDictionary<string, ComputerUseObservedTarget> targets,
         ComputerUseTaskScope scope)
     {
-        IReadOnlyDictionary<string, ComputerUseObservedTarget> scopedTargets = scope.TargetLabel is null ? targets : targets.Where(pair =>
-                scope.MatchesTarget(pair.Value.ControlType, pair.Value.Name) &&
-                pair.Value.AllowedActions.Contains(RequiredObservedAction(scope.AllowedOperations.FirstOrDefault(operation => operation != "observe") ?? "")))
+        var observationScope = ObservationScope(scope);
+        IReadOnlyDictionary<string, ComputerUseObservedTarget> scopedTargets = observationScope.TargetLabel is null ? targets : targets.Where(pair =>
+                observationScope.MatchesTarget(pair.Value.ControlType, pair.Value.Name) &&
+                pair.Value.AllowedActions.Contains(ComputerUseObservationFilter.RequiredObservedAction(
+                    ComputerUseObservationFilter.TargetUiOperation(observationScope))))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-        if (Stopped || scope.TargetLabel is not null && scopedTargets.Count != 1 ||
+        if (Stopped || observationScope.TargetLabel is not null && scopedTargets.Count != 1 ||
             !ComputerUseTaskAuthorization.HasUsableObservation(status, scopedTargets.Count > 0))
         {
             Stop();
@@ -309,6 +346,12 @@ public sealed class ComputerUseTurnState
         if (Stopped) return false;
         if (action.Operation == "observe") return scope.AllowedOperations.Contains("observe", StringComparer.Ordinal);
         if (!scope.Allows(action)) return false;
+        if (scope.RequiresApplicationLaunchBeforeTarget)
+        {
+            var isLaunch = action.Operation is "open_application" or "open_workspace";
+            if (isLaunch && applicationLaunchCompleted || !isLaunch && !applicationLaunchCompleted) return false;
+            if (!isLaunch && targetActionCompleted) return false;
+        }
         if (action.Operation == "read_workspace_item") return !workspaceItemRead;
         if (RequiresObservation) return false;
         if (action.TargetId is null) return true;
@@ -327,7 +370,8 @@ public sealed class ComputerUseTurnState
         return false;
     }
 
-    public bool RecordAction(string? status, bool succeeded, string? verification, string? operation = null)
+    public bool RecordAction(string? status, bool succeeded, string? verification, string? operation = null,
+        bool singleTargetAction = false)
     {
         if (Stopped || !ComputerUseTaskAuthorization.IsActionVerified(status, succeeded, verification))
         {
@@ -335,10 +379,17 @@ public sealed class ComputerUseTurnState
             return false;
         }
         if (operation == "read_workspace_item") workspaceItemRead = true;
+        if (operation is "open_application" or "open_workspace") applicationLaunchCompleted = true;
+        else if (singleTargetAction) targetActionCompleted = true;
         RequiresObservation = true;
         observedTargets.Clear();
         return true;
     }
+
+    public ComputerUseTaskScope ObservationScope(ComputerUseTaskScope scope) =>
+        scope.RequiresApplicationLaunchBeforeTarget && !applicationLaunchCompleted
+            ? scope with { TargetLabel = null, TargetControlType = null }
+            : scope;
 
     public void Stop()
     {

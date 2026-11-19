@@ -654,6 +654,8 @@ using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text
         "agent Computer Use rejects non-opaque or malformed UI target IDs");
 var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay trời thế nào?");
 var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
+var openThenClickScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm link Pull requests");
+var unsafeCompoundScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm nút Lưu rồi gửi");
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
 var readDocumentScope = ComputerUseTaskAuthorization.FromCurrentMessage("Tóm tắt tài liệu docs/guide.pdf");
 var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
@@ -675,6 +677,36 @@ Check(openEdgeScope is { } scopedEdge && scopedEdge.Allows(new("observe")) &&
       ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "detot_computer_use") &&
       !ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "other_tool"),
     "a direct desktop request authorizes only its matching application and required observation");
+Check(openThenClickScope is { TargetControlType: "Hyperlink", TargetLabel: "Pull requests" } compound &&
+      compound.AllowedOperations.Contains("open_application", StringComparer.Ordinal) &&
+      compound.AllowedOperations.Contains("click", StringComparer.Ordinal) &&
+      compound.Allows(new("open_application", Application: "edge")) &&
+      compound.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !compound.Allows(new("open_application", Application: "vscode")) &&
+      !compound.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef", Application: "vscode")) &&
+      unsafeCompoundScope is null &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Edge rồi bấm link Pull requests") is null,
+    "an explicit two-step request binds one allowlisted app and one exact UI target; compound submits and extra planner grammar stay denied");
+if (openThenClickScope is { } twoStepScope)
+{
+    var state = new ComputerUseTurnState();
+    var targetId = "0123456789abcdef0123456789abcdef";
+    var target = new ComputerUseObservedTarget("Hyperlink", "Pull requests",
+        new(StringComparer.Ordinal) { "click-element" });
+    var initialScope = state.ObservationScope(twoStepScope);
+    var launchAllowed = initialScope.TargetLabel is null && state.RecordObservation("available",
+        new Dictionary<string, ComputerUseObservedTarget> { [targetId] = target }, twoStepScope) &&
+        !state.CanAct(new("click", TargetId: targetId), twoStepScope) &&
+        state.CanAct(new("open_application", Application: "edge"), twoStepScope) &&
+        state.RecordAction("verified", true, "verified", "open_application");
+    var targetScope = state.ObservationScope(twoStepScope);
+    Check(launchAllowed && targetScope.TargetLabel == "Pull requests" &&
+          state.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget> { [targetId] = target }, twoStepScope) &&
+          state.CanAct(new("click", TargetId: targetId), twoStepScope) &&
+          state.RecordAction("verified", true, "verified", "click", singleTargetAction: true) &&
+          !state.CanAct(new("click", TargetId: targetId), twoStepScope),
+        "two-step state observes broadly only before the requested app is verified, then binds one fresh exact target and prevents a repeated target action");
+}
 Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
       openFileScope.Allows(new("observe")) &&
       openFileScope.Allows(new("open_workspace_item", Value: "docs/audit.txt")) &&

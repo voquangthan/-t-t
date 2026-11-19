@@ -1426,15 +1426,16 @@ static async Task<IResult> ContinueComputerUseTurn(JsonElement initialResponse, 
                 return Results.Ok(new { reply, toolUsed = true });
             }
 
+            var observationScope = turnState.ObservationScope(taskScope);
             var toolOutput = await ExecuteComputerUseAgentAction(action, companion, fileReader, workspaceRoot,
-                taskScope, stepCancellation.Token);
+                observationScope, stepCancellation.Token);
             if (!consent.IsCurrent(lease))
                 return Results.Json(new { error = "Quyền Computer Use đã bị thu hồi trong lúc thao tác; đã dừng lượt." }, statusCode: 403);
             using var toolResult = JsonDocument.Parse(toolOutput);
             var toolStatus = ReadComputerUseString(toolResult.RootElement, "status");
             if (action.Operation == "observe")
             {
-                var targets = CollectObservedTargets(toolResult.RootElement, taskScope);
+                var targets = CollectObservedTargets(toolResult.RootElement, observationScope);
                 if (!turnState.RecordObservation(toolStatus, targets, taskScope))
                     return Results.Ok(new { reply = "Mình chưa thể quan sát giao diện đáng tin cậy nên đã dừng; chưa thực hiện thao tác nào.",
                         toolUsed = true, observationStatus = toolStatus ?? "unavailable" });
@@ -1466,7 +1467,9 @@ static async Task<IResult> ContinueComputerUseTurn(JsonElement initialResponse, 
                     return Results.Ok(new { reply = "Thao tác này cần bạn duyệt trước khi thực hiện. Mình chưa thực hiện thao tác đó.",
                         toolUsed = true, approvalRequired = true });
                 }
-                if (!turnState.RecordAction(toolStatus, succeeded, verification, action.Operation))
+                if (!turnState.RecordAction(toolStatus, succeeded, verification, action.Operation,
+                        taskScope.RequiresApplicationLaunchBeforeTarget &&
+                        action.Operation is not ("open_application" or "open_workspace")))
                     return Results.Ok(new { reply = "Thao tác chưa được Backend xác minh thành công nên mình đã dừng. Không có bước tiếp theo nào được thực hiện.",
                         toolUsed = true, actionStatus = toolStatus ?? "unknown", verification = verification ?? "not_verified" });
             }

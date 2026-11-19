@@ -2,12 +2,11 @@
 
 ## Current Universal Windows Computer Use status (19/11/2026)
 
-- PR #4 is open on `codex/universal-windows-ui`, base `codex/computer-use-vscode-fix`. Current local and remote HEAD is `a179e9879c21811fbded8ad245ee1fccba3e5e6f`; CI run `44466446746` passed. Work comment `7000859233` is **REVISE** for this exact SHA (repository owner `voquangthan`; not independent reviewer identity evidence).
-- The approved Button click flow is one-use, owner-bound, expires after 60 seconds, supports cancel/replay protection and rechecks consent. New REVISE finding: `AutomationElement.Click()` can use a screen point that is covered by another window. The handler now invokes only the validated Button's UIA InvokePattern and denies if the pattern is unavailable; it has no coordinate-click fallback and continues to report the effect as unverified.
-- Added regression cases for the covered-target route: absent InvokePattern produces no input, supported InvokePattern calls only the target-bound delegate, changed control type is denied, and provider failure does not fall back to a coordinate click. `AGENTS.md` is unrelated and stays untracked.
-- Verification for this fix: `git diff --check` passes. Local .NET build/operator tests are **BLOCKED** because `dotnet` is not installed/on PATH in this Codex runtime; require Windows CI on the next commit. Earlier approved-click commit's CI 170/170 was before this fix and is not evidence for this revision.
-- No live Chat/UI click E2E was run; do not claim desktop action verified. Keep Autonomous Controller hard-blocked and do not merge.
-- Next: commit/push only the three Computer Use source/test files and this checkpoint to PR #4, then verify CI and Work feedback against the exact new HEAD SHA. Keep `AGENTS.md` out of the commit.
+- PR #4 remains open on `codex/universal-windows-ui`, based on `codex/computer-use-vscode-fix`. Local and remote HEAD `ddceb01dbf6ce9a282b2b352d83ca492943b0095` has Windows CI #46 **success** and Work comment #7001252607 **PASS** for that exact SHA. The comment author is repository owner `voquangthan`; it is not evidence of an independent GitHub reviewer identity. No merge was performed.
+- The approved Button flow invokes only the freshly revalidated Button's UIA InvokePattern, has no coordinate-click fallback, and continues to report the effect as unverified. Companion build/regressions and CI results are recorded in that PASS comment.
+- Current follow-on change: an explicitly worded two-step request may combine one allowlisted app/workspace launch with one exact named UI action. Compound send/delete requests and unbounded action chains remain denied. Regression coverage is added; local `dotnet` is unavailable, so this revision is not yet verified until Windows CI runs.
+- `AGENTS.md` is untracked and must remain outside commits. Keep the Autonomous Controller hard-blocked, do not merge, and do not claim a live desktop E2E from code/CI tests.
+- Next: inspect diff, run `git diff --check`, commit only `ComputerUseChatIntent.cs`, its focused test, and this checkpoint; push to the PR head; then verify CI and Work verdict against the exact resulting SHA. Preserve all unrelated `main` worktree changes.
 
 ## Universal Windows Computer Use — scoped workspace document read (19/11/2026)
 
