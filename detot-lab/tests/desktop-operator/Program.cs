@@ -42,6 +42,9 @@ Check(ComputerUsePolicy.CanObserve("desktop-ui"), "general desktop UI observatio
 Check(ComputerUsePolicy.CanObserve("workspace-explorer") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("workspace-explorer", StringComparison.Ordinal),
     "File Explorer observation is limited to the configured workspace");
+Check(ComputerUsePolicy.CanObserve("windows-settings") &&
+      JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("windows-settings", StringComparison.Ordinal),
+    "Windows Settings observation is explicitly read-only");
 Check(ComputerUseChatIntent.DetectDirectRequest("Quan sát giao diện") == "read-desktop-ui" &&
       ComputerUseChatIntent.ObservationTargetForAction("read-desktop-ui") == "desktop-ui",
     "a bounded natural-language request reaches the general UI observation action");
@@ -220,6 +223,7 @@ Check(!ComputerUsePolicy.AllowedUiActions("Edit", false, false, false,
     "disabled and offscreen elements expose no actions");
 Check(DesktopCompanionProtocol.IsAllowedAction("read-workspace") &&
       DesktopCompanionProtocol.IsAllowedAction("observe-workspace") &&
+      DesktopCompanionProtocol.IsAllowedAction("observe-settings") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-pull-requests") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-account"),
     "Desktop Companion exposes only explicit read action IDs");
@@ -432,13 +436,15 @@ Check(cappedChecks.Truncated && cappedChecks.TotalCount == 120 &&
 var testPipeName = $"detot-test-{Guid.NewGuid():N}";
 using (var serverShutdown = new CancellationTokenSource())
 {
+    var firstActionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var firstActionCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var actionCount = 0;
-    var pipeServer = new DesktopCompanionPipeServer(testPipeName, requestDeadlineMilliseconds: 3_000);
+    var pipeServer = new DesktopCompanionPipeServer(testPipeName, requestDeadlineMilliseconds: 10_000);
     var serverTask = pipeServer.RunAsync(async (request, token) =>
     {
         if (Interlocked.Increment(ref actionCount) == 1)
         {
+            firstActionStarted.TrySetResult();
             try { await Task.Delay(TimeSpan.FromSeconds(5), token); }
             catch (OperationCanceledException) { firstActionCancelled.TrySetResult(); throw; }
         }
@@ -446,11 +452,24 @@ using (var serverShutdown = new CancellationTokenSource())
     }, serverShutdown.Token);
     try
     {
-        using var clientADeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        using var clientADeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var clientATask = new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientADeadline.Token);
+        await firstActionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(100);
+        clientADeadline.Cancel();
         var clientACancelled = false;
-        try { _ = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientADeadline.Token); }
+        try { _ = await clientATask; }
         catch (OperationCanceledException) { clientACancelled = true; }
-        await firstActionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        // Keep the assertion margin outside the server deadline so scheduler
+        // jitter cannot race a valid cancellation with the test timeout.
+        try
+        {
+            await firstActionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException error)
+        {
+            throw new TimeoutException($"First pipe action did not cancel; count={actionCount}; clientCancelled={clientACancelled}.", error);
+        }
         using var clientBDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var clientB = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientBDeadline.Token);
         Check(clientACancelled && clientB.TryGetProperty("action", out var acceptedAction) &&
@@ -503,6 +522,9 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Xem ứng dụng đang mở") =
 Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra File Explorer của workspace") == "read-workspace-explorer" &&
       ComputerUseChatIntent.ObservationTargetForAction("read-workspace-explorer") == "workspace-explorer",
     "a direct File Explorer request observes only the configured workspace state");
+Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra Windows Settings") == "read-windows-settings" &&
+      ComputerUseChatIntent.ObservationTargetForAction("read-windows-settings") == "windows-settings",
+    "a direct Windows Settings request remains a bounded read-only observation");
 Check(ComputerUseChatIntent.DetectDirectRequest("Làm sao để mở Edge?") is null,
     "a how-to question does not launch an application");
 Check(ComputerUseChatIntent.DetectDirectRequest("Trong ví dụ này: mở Edge") is null,

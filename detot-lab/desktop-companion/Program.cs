@@ -147,6 +147,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         {
             "observe-applications" => ObserveApplications(),
             "observe-workspace" => ObserveWorkspaceExplorer(),
+            "observe-settings" => ObserveReadOnlyApplication("SystemSettings", "Windows Settings"),
             "observe-desktop-ui" => ObserveDesktopUi(),
             "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key" or "expand-element" or "collapse-element"
                 => InteractWithUi(request),
@@ -811,6 +812,27 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             workspaceVerified = snapshot.WorkspaceVerified,
             sessionId = snapshot.SessionId
         };
+    }
+
+    private object ObserveReadOnlyApplication(string processName, string label)
+    {
+        try
+        {
+            using var automation = new UIA3Automation();
+            var windowCount = Process.GetProcessesByName(processName).Sum(process =>
+            {
+                using (process)
+                {
+                    if (SafeSessionId(process) != Process.GetCurrentProcess().SessionId) return 0;
+                    return automation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)))
+                        .Where(window => !SafeBoolean(() => window.Properties.IsOffscreen.ValueOrDefault))
+                        .Count();
+                }
+            });
+            return new { observationStatus = windowCount == 0 ? "empty" : "available", application = label,
+                readOnly = true, windowCount };
+        }
+        catch { return new { observationStatus = "unavailable", application = label, readOnly = true, windowCount = 0 }; }
     }
 
     private object OpenWorkspaceItem(string relativePath)

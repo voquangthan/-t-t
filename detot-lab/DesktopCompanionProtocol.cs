@@ -7,7 +7,7 @@ public static class DesktopCompanionProtocol
 {
     private static readonly HashSet<string> Actions = new(StringComparer.Ordinal)
     {
-        "observe-applications", "observe-workspace", "open-workspace", "open-edge", "open-github",
+        "observe-applications", "observe-workspace", "observe-settings", "open-workspace", "open-edge", "open-github",
         "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
         "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
         "select-element", "type-text", "scroll-element", "press-key", "open-settings",
@@ -278,15 +278,17 @@ public sealed class DesktopCompanionPipeServer(string pipeName, int requestDeadl
             }
 
             action = execute(request, deadline.Token);
-            while (!action.IsCompleted && !deadline.IsCancellationRequested)
+            using var disconnectMonitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+            var disconnectMonitor = MonitorClientDisconnectAsync(pipe, deadline, disconnectMonitorCancellation.Token);
+            var completed = await Task.WhenAny(action, disconnectMonitor);
+            if (completed == disconnectMonitor)
             {
-                await Task.Delay(100, deadline.Token);
-                if (!pipe.IsConnected)
-                {
-                    deadline.Cancel();
-                    break;
-                }
+                await disconnectMonitor;
+                return;
             }
+            disconnectMonitorCancellation.Cancel();
+            try { await disconnectMonitor; }
+            catch (OperationCanceledException) when (disconnectMonitorCancellation.IsCancellationRequested) { }
             var result = await action;
             if (pipe.IsConnected && !deadline.IsCancellationRequested)
                 await TryWriteResponseAsync(pipe, writer,
@@ -312,5 +314,19 @@ public sealed class DesktopCompanionPipeServer(string pipeName, int requestDeadl
     {
         if (!pipe.IsConnected) return;
         await writer.WriteLineAsync(response.AsMemory(), cancellationToken);
+    }
+
+    private static async Task MonitorClientDisconnectAsync(NamedPipeServerStream pipe, CancellationTokenSource deadline,
+        CancellationToken monitorCancellationToken)
+    {
+        try
+        {
+            var probe = new byte[1];
+            _ = await pipe.ReadAsync(probe.AsMemory(), monitorCancellationToken);
+            deadline.Cancel();
+        }
+        catch (OperationCanceledException) when (monitorCancellationToken.IsCancellationRequested) { }
+        catch (IOException) { deadline.Cancel(); }
+        catch (ObjectDisposedException) { deadline.Cancel(); }
     }
 }

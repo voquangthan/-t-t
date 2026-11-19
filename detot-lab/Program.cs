@@ -259,6 +259,8 @@ app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRe
         return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-desktop-ui", cancellationToken));
     if (request.Target == "workspace-explorer")
         return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-workspace", cancellationToken));
+    if (request.Target == "windows-settings")
+        return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-settings", cancellationToken));
     if (request.Target == "approved-applications")
     {
         return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-applications", cancellationToken));
@@ -1834,6 +1836,23 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
                 : "Có File Explorer đang mở, nhưng chưa xác minh nó hiển thị workspace đã cấu hình.";
         return Results.Ok(new { reply, toolUsed = true, computerUseAction = action,
             computerUseObservationStatus = status, explorerWindowFound = found, workspaceVerified = verified });
+    }
+
+    if (action == "read-windows-settings")
+    {
+        var result = await companion.ExecuteAsync("observe-settings", cancellationToken);
+        if (result.TryGetProperty("error", out _)) return BrowserActionResult(result);
+        var status = ReadComputerUseString(result, "observationStatus") ?? "unavailable";
+        var windowCount = result.TryGetProperty("windowCount", out var countValue) && countValue.TryGetInt32(out var count)
+            ? count : 0;
+        var reply = status switch
+        {
+            "empty" => "Không thấy cửa sổ Windows Settings trong phiên hiện tại.",
+            "available" => "Windows Settings đang mở; Đệ Tốt chỉ quan sát và không thay đổi cài đặt.",
+            _ => "Chưa thể quan sát Windows Settings trong phiên hiện tại."
+        };
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action,
+            computerUseObservationStatus = status, readOnly = true, windowCount });
     }
 
     var companionAction = action switch
