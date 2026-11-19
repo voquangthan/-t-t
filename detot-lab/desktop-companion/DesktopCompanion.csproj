@@ -11,5 +11,6 @@
     <Compile Include="../DesktopOperator.cs" Link="DesktopOperator.cs" />
     <Compile Include="../DesktopCompanionProtocol.cs" Link="DesktopCompanionProtocol.cs" />
     <Compile Include="../DesktopCompanionVerification.cs" Link="DesktopCompanionVerification.cs" />
+    <Compile Include="../ComputerUsePolicy.cs" Link="ComputerUsePolicy.cs" />
   </ItemGroup>
 </Project>

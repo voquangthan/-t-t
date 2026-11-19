@@ -66,6 +66,35 @@ public sealed class UniversalFileReader
         return new(name, string.IsNullOrWhiteSpace(mediaType) ? "application/octet-stream" : mediaType, hash, excerpts);
     }
 
+    public async Task<ExtractedDocument> ReadWorkspaceFileAsync(string? workspaceRoot, string? relativePath,
+        CancellationToken cancellationToken)
+    {
+        if (!DesktopOperator.IsSafeWorkspaceDocumentPath(relativePath))
+            throw new InvalidDataException("Đường dẫn tài liệu không nằm trong phạm vi đọc cho phép.");
+        if (string.Equals(Path.GetExtension(relativePath), ".zip", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Không hỗ trợ đọc ZIP theo phạm vi workspace; hãy chọn một tài liệu được phép bên trong workspace.");
+        var fullPath = DesktopOperator.ResolveWorkspaceItemPath(workspaceRoot, relativePath);
+        if (fullPath is null || Directory.Exists(fullPath))
+            throw new FileNotFoundException("Không tìm thấy tệp trong workspace được phép.");
+
+        var extension = Path.GetExtension(fullPath).ToLowerInvariant();
+        var mediaType = extension switch
+        {
+            ".pdf" => "application/pdf",
+            ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".md" or ".markdown" => "text/markdown",
+            ".txt" => "text/plain",
+            _ => "application/octet-stream"
+        };
+        await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            32 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length > MaxFileBytes)
+            throw new InvalidDataException($"Tệp vượt giới hạn {MaxFileBytes / 1024 / 1024} MiB.");
+        return await ReadAsync(Path.GetFileName(fullPath), mediaType, stream, cancellationToken);
+    }
+
     private static List<DocumentExcerpt> ReadText(string name, byte[] bytes)
     {
         string text;

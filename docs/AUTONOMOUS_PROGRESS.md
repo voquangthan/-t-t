@@ -1,5 +1,50 @@
 # Đệ Tốt Pro — checkpoint
 
+## Current Universal Windows Computer Use status (19/11/2026)
+
+- PR #4 remains open on `codex/universal-windows-ui`, based on `codex/computer-use-vscode-fix`. The current remote HEAD is `528a299075bf7cb59db3ea36107605b453f242cf`. CI #51 (`44489097954`) failed at Backend build; later steps were skipped. No Work verdict matches this SHA. The previous d453dd0 CI/Work PASS remains valid only for that older commit. The failure log still needs inspection; local .NET SDK/compiler is absent. Independent Work reviewer identity is still unverified; no merge was performed.
+- The approved Button flow invokes only the freshly revalidated Button's UIA InvokePattern, has no coordinate-click fallback, and continues to report the effect as unverified. Companion build/regressions and CI results are recorded in that PASS comment.
+- The newer Computer Use corrections were committed as `0c2957f`; its CI and exact-SHA Work PASS are recorded above. Do not reuse the older review for newer commits. `git diff --check` passed before commit; local `dotnet` was unavailable.
+- `AGENTS.md` is untracked and must remain outside commits. Keep the Autonomous Controller hard-blocked, do not merge, and do not claim a live desktop E2E from code/CI tests.
+- Follow-up: corrected `docs/COMPUTER_USE.md` to describe the existing one-time, owner-bound Button approval and denied UI actions. Commit `d453dd0aedf6c317f220b7784b4f0bd04722db86` is pushed to PR #4. CI #50 completed successfully and Work comment #7003227922 is **PASS** for that SHA, with the scope limited to the documentation diff. The author is the repository owner `voquangthan`, so independent reviewer identity remains unverified. Preserve untracked `AGENTS.md`; no force-push or merge.
+- Local Computer Use adds natural-language, process-scoped inspection for one allowlisted app, at most two safe navigation actions, and a fresh observation between actions. It rejects click, typing, arbitrary keys, URLs, workspace file reads, ambiguous apps, mutating intent and partial observations. Fixed app launches now include Windows Notepad, Calculator and Paint via known System32 targets. Regressions cover intent, process isolation, empty/partial observation, launch binding, app mapping and action limits. Commit `609bdb3` contains the planner; commit `528a299` adds the utility apps and documentation. Both were pushed. `git diff --check` passed, but the local .NET SDK/compiler is absent. CI #51 failed in Backend build on `528a299`; retrieve its log and fix before claiming test success. A Codex execution quota error prevented retrieving the log in the current session. GCM displayed two indistinguishable account prompts earlier; the subsequent push succeeded non-interactively using the already-approved `voquangthan` account. No Work verdict matches `528a299`; do not reuse the prior PASS. Preserve untracked `AGENTS.md`, do not merge.
+
+## Universal Windows Computer Use — scoped workspace document read (19/11/2026)
+
+- PR #4 added one exact workspace-relative file read through Universal File Reader. The path is bound to the current user request, blocked credential/runtime/state/database/log/backup paths are denied, known credential patterns are redacted, and a distinct `workspace_files / direct_request / DeepSeek` grant is required. This read does not require UI-control grants or a running Companion. Documentation describes the scope and limits.
+- No live Chat/DeepSeek read was run, and no document contents were sent externally. The tool was not verified through the running UI. Do not claim E2E.
+
+## Universal Windows Computer Use — P1 protocol and CI review passed (19/11/2026)
+
+- The named-target interaction chain is now complete on `codex/universal-windows-ui`: Backend scope → authenticated named pipe → Companion live revalidation. Click/select/expand/collapse/text/scroll actions carry both the exact accessible label and control type; missing, duplicate, partial, truncated, unreadable, changed, disabled, offscreen, expired, or cross-session targets stop before interaction.
+- The direct local API follows the same protocol contract. A caller cannot bypass revalidation by posting only a target ID. Companion returns a refreshed observation after an attempted action and does not report success unless its operation-specific postcondition is observed.
+- PR #4 HEAD `249d27cec0303b46e06f29eda89d9230c241f405` has Windows Regression CI **success** (run `44332092497`) and ChatGPT Work **PASS** for that exact SHA. The review was verified through the GitHub App `chatgpt-codex-connector`; stale REVISE comments for earlier commits are not treated as current.
+- Local regression still available in this runner: `git diff --check` PASS and GitHub Reader tests 11/11 PASS. The local runner has no .NET SDK; C# compilation/operator tests are established by the successful Windows CI rather than claimed locally.
+- P1 now covers bounded UI observation, low-risk window activation, Tab/List/Tree selection in safe containers, navigation-only tree expansion/collapse, non-password Edit value entry, named Document scrolling, and Hyperlink invocation. Dangerous buttons, menu commands, account/settings changes, submits, arbitrary keys, file writes, shell commands and code execution remain blocked or require a future explicit approval path.
+- **Next scope:** P2 application adapters, starting with a read-only File Explorer observer and a workspace-only open path. Preserve P1 behavior and do not claim Windows UI E2E until the interactive smoke proves a real action and verified postcondition.
+
+## Universal Windows Computer Use — P2 File Explorer observer (19/11/2026)
+
+- Added the first P2 application adapter by extending the existing authenticated Companion instead of adding a new runtime. `observe-workspace` reports only whether same-session File Explorer is open and whether it displays the configured workspace; it does not enumerate drives, arbitrary Explorer paths, filenames, or file contents.
+- Natural requests to inspect File Explorer are routed only to this bounded observation. Existing “Mở File Explorer” remains an alias for `open-workspace`, so it opens the configured workspace rather than an arbitrary location. Opening one explicitly named relative file/folder remains restricted to an existing non-reparse item inside the workspace.
+- The direct Chat dispatcher reports the three distinct results truthfully: no Explorer window, Explorer visible but not the configured workspace, or the configured workspace verified. It does not expose another Explorer path when verification fails.
+- Added contract regressions for policy exposure, intent mapping and protocol allowlisting. C# compilation/operator tests must be confirmed by Windows CI; no live Explorer action is claimed from this runner.
+
+## P2 File Explorer verification correction (19/11/2026)
+
+- Work review correctly rejected title-only workspace verification. Explorer now reports `workspaceVerified=true` only when a readable address bar value resolves exactly to the configured workspace (including a `file:` URI form). A matching/containing title, a same-basename folder elsewhere, or an unreadable address remains not verified.
+- Local verification after the correction: Desktop Companion build **0 warnings / 0 errors**; Desktop Operator regression **149/149 PASS**. The companion pipe cancellation message in the regression is the expected client-disconnect fixture, followed by the asserted second-client success. CI and Work review on the new SHA are still required; no interactive Explorer E2E has been claimed.
+
+## P2 File Explorer evidence-source correction (19/11/2026)
+
+- Work review found that an unrelated Explorer Edit (for example Search) could contain the workspace path. The observer now carries the evidence source with each value and accepts only a recognized location/address control inside an Explorer toolbar. Unknown controls, untrusted sources, wrong locations, matching titles, and unreadable addresses all fail closed.
+- Local verification after this correction: Backend build **0 warnings / 0 errors**; Companion build **0 warnings / 0 errors**; Desktop Operator **149/149 PASS**. Regression covers trusted exact location, file URI, wrong path, same-basename elsewhere, untrusted search text containing the expected path, and missing address. CI/Work review for this commit and interactive Windows evidence remain pending.
+
+## P2 File Explorer committed-location correction (19/11/2026)
+
+- Address-bar edits are no longer evidence at all. The Explorer observer now maps UIA window HWND to the read-only `Shell.Application` committed `LocationURL` for that exact window. A draft typed into the address bar, a pending/cancelled navigation, search text, title, or any unavailable Shell location cannot set `workspaceVerified=true`.
+- Local verification: Companion build **0 warnings / 0 errors**; Desktop Operator **149/149 PASS**. Fixture coverage includes committed exact path/file URI, a different location, same basename elsewhere, and absent committed location. CI/Work review on the new SHA and interactive Explorer E2E remain pending.
+
 ## Memory Core V2 — M2 Semantic Memory
 
 - M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.
@@ -233,3 +278,19 @@
 - Companion PR payload now preserves merged status and head/base branch names alongside the aggregate CI fields. Added view-model contract/render-output tests with exact Companion-shaped account, merged PR, and 9-check hidden failure fixtures; frontend test script includes them.
 - Local direct Node regression: **7/7 PASS**. Local pnpm install/build could not run: pnpm attempted a package-store symlink outside the writable workspace and Windows returned EPERM. The PR CI remains the required frontend build verification. `dotnet` is also unavailable in this Codex runtime, so C# confirmation remains CI-based.
 - Next: push this scoped UI/DTO fix, verify CI on its exact SHA, then read the new Work review. No interactive Windows smoke has been run; do not claim E2E workspace PASS.
+
+## Universal Windows UI — P1 implementation checkpoint (18/11/2026)
+
+- Worktree `codex/computer-use-vscode-fix` was clean at P0 commit `b4b341bc7a980595d84d5196c5c0c07327af94df`; PR #3 is still open and Work PASS applies only to that SHA. P1 changes are uncommitted on top of that reviewed head.
+- Extended the existing Desktop Companion/Named Pipe protocol and local Backend API instead of adding another runtime. New `desktop-ui` observation returns bounded top-level windows and accessible controls (six windows, twelve elements each, depth four), ephemeral target IDs, control state, bounds, dialog/focus hints, and explicit truncation. Password values are not read; password controls are redacted.
+- Added target-bound interaction requests: activate window, select supported tab/list/tree item, click hyperlink, bounded text set on non-password editable fields, vertical scroll and navigation-only key input. The Companion revalidates target ID, expiry, HWND/process/session, visibility and enabled state, invalidates IDs after action, and returns a fresh observation. Generic buttons/menu/toggles and double-click return `approval_required`; Enter/submit, arbitrary keys, shell, scripts and file paths remain rejected.
+- Added `/api/desktop/observe` target `desktop-ui`, fixed-action POST support under `/api/desktop/actions`, and a direct natural-language chat request to observe the desktop. Generic natural-language planning/execution through Chat/Planner is still not integrated; it belongs to P3.
+- Added regression cases for UI policy classification, password/disabled/offscreen denial, strict target protocol, duplicate fields, key/text bounds, response-size cap and chat observation intent.
+- Verification so far: `node --test detot-lab/tests/desktop-operator/github-checks.test.mjs` **11/11 PASS**; `git diff --check` PASS. Local Companion build and C# tests are unavailable because `dotnet`/`csc`/`msbuild` are not installed or on PATH in this runner. CI on a feature PR is required before considering these edits verified. No interactive UI smoke has been run for this code; do not report E2E PASS.
+- Next: complete static API review and the scoped local/CI regressions; stack a new feature branch on the reviewed PR #3 head rather than changing its accepted head, then create a PR targeting `codex/computer-use-vscode-fix`. Fix CI/review findings before moving to P2/P3.
+
+## PR #4 — current review follow-up (19/11/2026)
+
+- HEAD `89e8e2aed67201c6e64e7e25f87af994b380759c` has a matching `REVISE` comment on PR #4. It confirms process binding for control targets, but finds that `CollectObservedTargets` drops `Process` for `Window` targets before turn-state validation. GitHub shows the matching CI check succeeded (1/1); this does not clear the review finding.
+- Moved observation-to-target conversion into `ComputerUseObservationFilter.CollectObservedTargets` so the executable and regression tests share the same code path. Window targets now retain the bounded title and process. Added end-to-end state tests for correct, mismatched, and missing process values.
+- Local `git diff --check` passes. C# tests could not run because this environment has no `dotnet` executable. Commit `0c2957fdb0a6fffcec257b7363a90d93ba728ba7` is pushed and is the PR #4 HEAD. GitHub shows the HEAD check green; latest Work comment #7002393441 reports CI #49 completed successfully and posts `VERDICT: PASS` for this exact SHA. The comment author is `voquangthan`, so record the Work verdict but do not treat it as proof of an independent GitHub reviewer identity. Do not merge; the reviewed commit remains unchanged.

@@ -34,6 +34,87 @@ public static class DesktopOperator
         return null;
     }
 
+    public static bool IsSafeWorkspaceRelativePath(string? relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Length > 512 ||
+            Path.IsPathRooted(relativePath) || relativePath.Contains(':') || relativePath.Contains('\0')) return false;
+        var segments = relativePath.Replace('\\', '/').Split('/');
+        return segments.Length > 0 && segments.All(segment => segment.Length > 0 && segment is not ("." or ".."));
+    }
+
+    public static bool IsSafeWorkspaceDocumentPath(string? relativePath)
+    {
+        if (!IsSafeWorkspaceRelativePath(relativePath)) return false;
+        var segments = relativePath!.Replace('\\', '/').Split('/');
+        if (segments.Any(segment => segment.EndsWith('.') || segment.EndsWith(' '))) return false;
+        if (segments.Any(segment => segment.StartsWith(".env", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("credential", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("password", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("private-key", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("private_key", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("service-account", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("service_account", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("oauth", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("cookie", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("api-key", StringComparison.OrdinalIgnoreCase) ||
+            segment.Contains("api_key", StringComparison.OrdinalIgnoreCase))) return false;
+        if (segments.Any(segment => segment.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals(".local", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals(".state", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals(".openclaw", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals(".ssh", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals(".aws", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals(".azure", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("logs", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("backups", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("credentials", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("secrets", StringComparison.OrdinalIgnoreCase))) return false;
+
+        var fileName = segments[^1];
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        return !fileName.Equals("auth-profiles.json", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.Equals(".npmrc", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.Equals(".netrc", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.Equals("nuget.config", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.Equals(".git-credentials", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.StartsWith("id_rsa", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.StartsWith("id_ed25519", StringComparison.OrdinalIgnoreCase) &&
+            extension is not (".cer" or ".crt" or ".der" or ".key" or ".pem" or ".pfx" or ".p12" or
+                ".jks" or ".keystore" or ".ppk" or ".token" or ".tokens" or ".db" or ".db3" or
+                ".sqlite" or ".sqlite3" or ".dump" or ".log");
+    }
+
+    public static string? ResolveWorkspaceItemPath(string? workspaceRoot, string? relativePath)
+    {
+        if (workspaceRoot is null || !Directory.Exists(workspaceRoot) || !IsSafeWorkspaceRelativePath(relativePath)) return null;
+        try
+        {
+            var root = Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var target = Path.GetFullPath(Path.Combine(root, relativePath!.Replace('\\', Path.DirectorySeparatorChar)
+                .Replace('/', Path.DirectorySeparatorChar)));
+            var prefix = root + Path.DirectorySeparatorChar;
+            if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                (!File.Exists(target) && !Directory.Exists(target))) return null;
+
+            var current = root;
+            foreach (var segment in Path.GetRelativePath(root, target).Split(Path.DirectorySeparatorChar))
+            {
+                current = Path.Combine(current, segment);
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return null;
+            }
+            return target;
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     public static async Task<WorkspaceStatus> ReadWorkspaceStatusAsync(string? repositoryRoot,
         CancellationToken cancellationToken = default)
     {

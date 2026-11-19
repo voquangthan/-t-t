@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.IO.Pipes;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.DataProtection;
 
 var checks = 0;
 void Check(bool condition, string name)
@@ -30,6 +32,26 @@ var nonWindowActionResponse = DesktopOperator.ToChatActionResponse(
     new DesktopOperator.ActionResult(true, "Read complete."), "read-workspace");
 Check(nonWindowActionResponse.WindowVerified is null,
     "chat response preserves unavailable window-verification status for other actions");
+var obscuredButtonInvokeCount = 0;
+var blockedButtonInvoked = ComputerUsePolicy.TryInvokeApprovedButton(isButton: true, supportsInvoke: false,
+    () => throw new InvalidOperationException("Invocation must not run without InvokePattern."), out var blockedButtonStatus);
+Check(!blockedButtonInvoked && blockedButtonStatus == "invoke_pattern_unavailable" &&
+      obscuredButtonInvokeCount == 0,
+    "approved click refuses any input when InvokePattern is unavailable, even if another window covers the target");
+var invokedButton = ComputerUsePolicy.TryInvokeApprovedButton(isButton: true, supportsInvoke: true,
+    () => obscuredButtonInvokeCount++, out var invokedButtonStatus);
+Check(invokedButton && invokedButtonStatus == "click_sent_unverified" && obscuredButtonInvokeCount == 1 &&
+      !invokedButtonStatus.Equals("verified", StringComparison.Ordinal),
+    "approved click invokes only the validated UIA button and does not claim postcondition verification");
+var nonButtonInvokeCount = 0;
+Check(!ComputerUsePolicy.TryInvokeApprovedButton(isButton: false, supportsInvoke: true,
+          () => nonButtonInvokeCount++, out var nonButtonStatus) && nonButtonStatus == "target_stale" &&
+      nonButtonInvokeCount == 0,
+    "approved button invocation rejects a target whose live control type changed");
+Check(!ComputerUsePolicy.TryInvokeApprovedButton(isButton: true, supportsInvoke: true,
+          () => throw new InvalidOperationException("synthetic invocation failure"), out var invokeErrorStatus) &&
+      invokeErrorStatus == "action_failed",
+    "approved button invocation reports provider failure without falling back to a coordinate click");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
@@ -37,6 +59,16 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+Check(ComputerUsePolicy.CanObserve("desktop-ui"), "general desktop UI observation is explicitly allowed");
+Check(ComputerUsePolicy.CanObserve("workspace-explorer") &&
+      JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("workspace-explorer", StringComparison.Ordinal),
+    "File Explorer observation is limited to the configured workspace");
+Check(ComputerUsePolicy.CanObserve("windows-settings") &&
+      JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("windows-settings", StringComparison.Ordinal),
+    "Windows Settings observation is explicitly read-only");
+Check(ComputerUseChatIntent.DetectDirectRequest("Quan sát giao diện") == "read-desktop-ui" &&
+      ComputerUseChatIntent.ObservationTargetForAction("read-desktop-ui") == "desktop-ui",
+    "a bounded natural-language request reaches the general UI observation action");
 var emptyApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation([], available: true, partial: false);
 Check(emptyApplicationObservation.Status == "empty" && emptyApplicationObservation.Applications.Count == 0,
     "a successful empty desktop observation is distinct from an error");
@@ -65,12 +97,161 @@ Check(successfulEmptyMessage.Status == "empty" && successfulEmptyMessage.Reply i
       successfulEmptyMessage.Reply.Contains("không thấy ứng dụng nào", StringComparison.OrdinalIgnoreCase),
     "only a successful complete empty observation may report no apps");
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
+Check(ComputerUsePolicy.CanNavigate("open-settings") && ComputerUsePolicy.CanNavigate("open-task-manager") &&
+      ComputerUsePolicy.CanNavigate("open-word") && ComputerUsePolicy.CanNavigate("open-excel") &&
+      ComputerUsePolicy.CanNavigate("open-powerpoint") && ComputerUsePolicy.CanNavigate("open-pdf-reader") &&
+      ComputerUsePolicy.CanNavigate("open-notepad") && ComputerUsePolicy.CanNavigate("open-calculator") &&
+      ComputerUsePolicy.CanNavigate("open-paint"),
+    "only fixed Windows, document and built-in utility app launch actions are allowlisted");
+Check(ComputerUsePolicy.IsReadOnlyDesktopApplication("SystemSettings") &&
+      ComputerUsePolicy.IsReadOnlyDesktopApplication("Taskmgr") &&
+      !ComputerUsePolicy.CanInteractWithApplication("SystemSettings", "type-text") &&
+      !ComputerUsePolicy.CanInteractWithApplication("Taskmgr", "click-element") &&
+      ComputerUsePolicy.CanInteractWithApplication("SystemSettings", "activate-window") &&
+      ComputerUsePolicy.CanInteractWithApplication("WINWORD", "type-text"),
+    "Settings and Task Manager stay observation-only while app activation remains available");
+Check(ComputerUsePolicy.CanInteract("press-key") && !ComputerUsePolicy.CanInteract("run-shell"),
+    "UI interaction exposes a fixed key action while arbitrary commands stay denied");
+Check(ComputerUsePolicy.CanInteract("expand-element") && ComputerUsePolicy.CanInteract("collapse-element") &&
+      !ComputerUsePolicy.RequiresUiApproval("MenuItem", "expand-element") &&
+      ComputerUsePolicy.RequiresUiApproval("MenuItem", "click-element"),
+    "menu expansion is a bounded navigation action while selecting menu commands stays gated");
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
+var safeUiActions = ComputerUsePolicy.AllowedUiActions("Hyperlink", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false, supportsScroll: false);
+Check(safeUiActions.SequenceEqual(["click-element"]) &&
+      !ComputerUsePolicy.AllowedUiActions("RadioButton", true, false, false,
+          supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false, supportsScroll: false)
+          .Contains("press-key", StringComparer.Ordinal) &&
+      ComputerUsePolicy.CanInteractWithApplication("WINWORD", "press-key") &&
+      !ComputerUsePolicy.CanPressKeyOn("RadioButton", "ArrowDown") &&
+      !ComputerUsePolicy.CanPressKeyOn("ComboBox", "ArrowDown") &&
+      ComputerUsePolicy.CanPressKeyOn("Edit", "ArrowLeft") &&
+      !ComputerUsePolicy.CanPressKeyOn("Edit", "ArrowDown") &&
+      ComputerUsePolicy.RequiresUiApproval("RadioButton", "press-key", "ArrowDown"),
+    "key navigation is limited to non-selection edit controls; radio and combo key effects require approval");
+var collapsedMenuActions = ComputerUsePolicy.AllowedUiActions("MenuItem", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Collapsed");
+var expandedComboActions = ComputerUsePolicy.AllowedUiActions("ComboBox", true, false, false,
+    supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Expanded");
+Check(collapsedMenuActions.Contains("expand-element", StringComparer.Ordinal) &&
+      !collapsedMenuActions.Contains("collapse-element", StringComparer.Ordinal) &&
+      expandedComboActions.Contains("collapse-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("Button", true, false, false,
+          supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "Collapsed")
+          .Contains("expand-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("MenuItem", true, false, false,
+          supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false, supportsExpandCollapse: true, expandCollapseState: "LeafNode")
+          .Contains("expand-element", StringComparer.Ordinal),
+    "expand/collapse is advertised only for known navigation controls in a verified state");
+var safeListSelection = ComputerUsePolicy.AllowedUiActions("ListItem", true, false, false,
+    supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, safeSelectionContainer: true);
+var safeTreeSelection = ComputerUsePolicy.AllowedUiActions("TreeItem", true, false, false,
+    supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+    supportsScroll: false, safeSelectionContainer: true);
+Check(safeListSelection.Contains("select-element", StringComparer.Ordinal) &&
+      safeTreeSelection.Contains("select-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.AllowedUiActions("RadioButton", true, false, false,
+          supportsInvoke: true, supportsSelection: true, supportsValue: false, valueReadOnly: false,
+          supportsScroll: false).Contains("select-element", StringComparer.Ordinal) &&
+      !ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element", safeSelectionContainer: true) &&
+      !ComputerUsePolicy.RequiresUiApproval("TreeItem", "select-element", safeSelectionContainer: true) &&
+      ComputerUsePolicy.RequiresUiApproval("RadioButton", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("ComboBox", "select-element") &&
+      ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element") &&
+      ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: false) &&
+      ComputerUsePolicy.IsSafeSelectionContext("TreeItem", "Tree", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: true) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", "ComboBox", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("TreeItem", "Tree", insideComboBox: true) &&
+      new[] { "ListItem", "List", "ComboBox", "Window" }.Any(ComputerUsePolicy.IsUnsafeSelectionAncestor),
+    "selection is permitted only for a proven list/tree/tab container outside ComboBox ancestry");
+Check(ComputerUsePolicy.IsSafeSelectionContext("TabItem", "Tab", insideComboBox: false) &&
+      !ComputerUsePolicy.IsSafeSelectionContext("ListItem", null, insideComboBox: false) &&
+      !ComputerUsePolicy.CanSelectInContext("ListItem", "select-element", safeSelectionContainer: false),
+    "unknown or changed selection containers fail closed at action time");
+Check(ComputerUsePolicy.MatchesExpectedUiTarget("TabItem", "Lịch", "TabItem", "Lịch") &&
+      !ComputerUsePolicy.MatchesExpectedUiTarget("TabItem", "Gmail", "TabItem", "Lịch") &&
+      !ComputerUsePolicy.MatchesExpectedUiTarget("Hyperlink", null, "Hyperlink", "Help"),
+    "a UI target is valid only while its live readable name and control type still match the authorized scope");
+var sameLabelActionCount = 0;
+var changedLabelActionCount = 0;
+var unreadableLabelActionCount = 0;
+var sameLabelRan = ComputerUsePolicy.TryRunExpectedUiAction("TabItem", "Lịch",
+    () => (true, "TabItem", "Lịch"), () => { sameLabelActionCount++; return "ran"; }, out var sameLabelResult, out _);
+var changedLabelRan = ComputerUsePolicy.TryRunExpectedUiAction("Hyperlink", "Docs",
+    () => (true, "Hyperlink", "Other link"), () => { changedLabelActionCount++; return "ran"; }, out _, out var changedLabelStatus);
+var unreadableLabelRan = ComputerUsePolicy.TryRunExpectedUiAction("TabItem", "Lịch",
+    () => (false, "TabItem", (string?)null), () => { unreadableLabelActionCount++; return "ran"; }, out _, out var unreadableLabelStatus);
+Check(sameLabelRan && sameLabelResult == "ran" && sameLabelActionCount == 1 &&
+      !changedLabelRan && changedLabelActionCount == 0 && changedLabelStatus == "target_stale" &&
+      !unreadableLabelRan && unreadableLabelActionCount == 0 && unreadableLabelStatus == "target_state_unavailable",
+    "live label/type revalidation runs immediately before the action and rejects changed or unreadable targets");
+var safeAtObservation = ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: false);
+var unsafeAtAction = ComputerUsePolicy.IsSafeSelectionContext("ListItem", "List", insideComboBox: true);
+Check(safeAtObservation && !unsafeAtAction &&
+      ComputerUsePolicy.RequiresUiApproval("ListItem", "select-element", safeSelectionContainer: unsafeAtAction),
+    "selection is denied when its ComboBox ancestry changes between observation and execution");
+var keyEventOrder = new List<string>();
+ComputerUsePolicy.PressAndRelease("Tab", key => keyEventOrder.Add("down:" + key), key => keyEventOrder.Add("up:" + key));
+Check(keyEventOrder.SequenceEqual(["down:Tab", "up:Tab"]), "a key action always emits a matching release");
+try
+{
+    ComputerUsePolicy.PressAndRelease("Tab", _ => throw new InvalidOperationException("fixture"), _ => keyEventOrder.Add("released-after-error"));
+}
+catch (InvalidOperationException) { }
+Check(keyEventOrder.Last() == "released-after-error", "key release runs even when key-down throws");
+Check(ComputerUsePolicy.VerificationStatus(false) == "reobserve_required" &&
+      ComputerUsePolicy.VerificationStatus(true) == "verified",
+    "sending a key without an observed UI postcondition never claims it was verified");
+Check(!ComputerUsePolicy.AllowedUiActions("Button", true, false, false,
+        supportsInvoke: true, supportsSelection: false, supportsValue: false, valueReadOnly: false, supportsScroll: false)
+      .Contains("click-element", StringComparer.Ordinal) &&
+      ComputerUsePolicy.RequiresUiApproval("Button", "click-element"),
+    "generic button invocation requires approval instead of inferring risk from its label");
+Check(!ComputerUsePolicy.AllowedUiActions("Edit", true, false, true,
+        supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false)
+      .Contains("type-text", StringComparer.Ordinal),
+    "password UI elements never advertise text entry");
+var valueWrites = 0;
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, true), () => (true, false),
+        _ => valueWrites++, "synthetic") == "password_input_denied" && valueWrites == 0,
+    "a target that changes to password is denied before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, false), () => (true, true),
+        _ => valueWrites++, "synthetic") == "target_read_only" && valueWrites == 0,
+    "a target that changes to read-only is denied before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (false, false), () => (true, false),
+        _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
+    "an unsupported password flag fails closed before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, false), () => (false, false),
+        _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
+    "an unsupported read-only flag fails closed before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => throw new InvalidOperationException(), () => (true, false),
+        _ => valueWrites++, "synthetic") == "target_security_state_unavailable" && valueWrites == 0,
+    "an unreadable password flag fails closed before SetValue");
+Check(ComputerUsePolicy.TrySetProtectedTextValue(true, () => true, () => (true, false), () => (true, false),
+        _ => valueWrites++, "synthetic") == "set" && valueWrites == 1,
+    "a freshly revalidated non-password editable value can be set");
+Check(!ComputerUsePolicy.AllowedUiActions("Edit", false, false, false,
+        supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false).Any() &&
+      !ComputerUsePolicy.AllowedUiActions("Edit", true, true, false,
+        supportsInvoke: false, supportsSelection: false, supportsValue: true, valueReadOnly: false, supportsScroll: false).Any(),
+    "disabled and offscreen elements expose no actions");
 Check(DesktopCompanionProtocol.IsAllowedAction("read-workspace") &&
+      DesktopCompanionProtocol.IsAllowedAction("observe-workspace") &&
+      DesktopCompanionProtocol.IsAllowedAction("observe-settings") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-pull-requests") &&
-      DesktopCompanionProtocol.IsAllowedAction("read-github-account"),
+      DesktopCompanionProtocol.IsAllowedAction("read-github-account") &&
+      DesktopCompanionProtocol.IsAllowedAction("open-notepad") &&
+      DesktopCompanionProtocol.IsAllowedAction("open-calculator") &&
+      DesktopCompanionProtocol.IsAllowedAction("open-paint"),
     "Desktop Companion exposes only explicit read action IDs");
 Check(!DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
       !DesktopCompanionProtocol.IsAllowedAction("open-url:https://attacker.example") &&
@@ -80,9 +261,131 @@ var companionRequest = DesktopCompanionProtocol.SerializeRequest("open-vscode", 
 Check(DesktopCompanionProtocol.TryParseRequest(companionRequest, out var parsedCompanionRequest) &&
       parsedCompanionRequest?.Action == "open-vscode",
     "Desktop Companion protocol accepts a fixed action and opaque request ID");
+var workspaceItemRequest = DesktopCompanionProtocol.SerializeRequest("open-workspace-item", Guid.NewGuid().ToString("N"), value: "docs/audit.txt");
+Check(DesktopCompanionProtocol.TryParseRequest(workspaceItemRequest, out var parsedWorkspaceItem) &&
+      parsedWorkspaceItem?.Value == "docs/audit.txt" &&
+      !DesktopCompanionProtocol.IsValidArguments("open-workspace-item", null, "../private.txt", null),
+    "Explorer navigation accepts only a relative workspace item path");
 Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"open-edge\",\"requestId\":\"00000000000000000000000000000000\",\"command\":\"whoami\"}", out _) &&
       !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"run-shell\",\"requestId\":\"00000000000000000000000000000000\"}", out _),
     "Desktop Companion rejects injected properties and unknown actions");
+var uiTargetId = Guid.NewGuid().ToString("N");
+var uiRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"), uiTargetId, "search text",
+    expectedName: "Search", expectedControlType: "Edit");
+Check(DesktopCompanionProtocol.TryParseRequest(uiRequest, out var parsedUiRequest) &&
+      parsedUiRequest is { Action: "type-text", TargetId: not null, Value: "search text", ExpectedName: "Search", ExpectedControlType: "Edit" } &&
+      parsedUiRequest.TargetId == uiTargetId,
+    "UIA request carries an observed opaque target, bounded text, and an exact target context");
+Check(!DesktopCompanionProtocol.TryParseRequest("{\"action\":\"type-text\",\"requestId\":\"00000000000000000000000000000000\",\"targetId\":\"00000000000000000000000000000000\",\"value\":\"x\",\"value\":\"y\"}", out _) &&
+      !DesktopCompanionProtocol.TryParseRequest("{\"action\":\"press-key\",\"requestId\":\"00000000000000000000000000000000\",\"targetId\":\"00000000000000000000000000000000\",\"value\":\"Enter\"}", out _),
+    "UIA IPC rejects duplicate fields and submit/command keys");
+Check(DesktopCompanionProtocol.TryParseRequest(
+        DesktopCompanionProtocol.SerializeRequest("press-key", Guid.NewGuid().ToString("N"), uiTargetId, "ArrowDown"), out var keyRequest) &&
+      keyRequest?.Value == "ArrowDown" &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeRequest("expand-element", Guid.NewGuid().ToString("N"), uiTargetId,
+          expectedName: "Tài liệu", expectedControlType: "TreeItem"), out var expandRequest) &&
+      expandRequest?.Action == "expand-element" &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeRequest("collapse-element", Guid.NewGuid().ToString("N"), uiTargetId,
+          expectedName: "Tài liệu", expectedControlType: "TreeItem"), out var collapseRequest) &&
+      collapseRequest?.Action == "collapse-element" &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null) &&
+      !DesktopCompanionProtocol.IsValidArguments("expand-element", uiTargetId, null, null) &&
+      !DesktopCompanionProtocol.IsValidArguments("click-element", uiTargetId, null, null) &&
+      !DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
+      !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, new string('x', 513), null),
+    "UIA input enforces navigation keys, stateful menu actions, and text size bounds");
+var scopedSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Lịch", expectedControlType: "TabItem");
+var scopedHyperlinkRequest = DesktopCompanionProtocol.SerializeRequest("click-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Tài liệu hướng dẫn", expectedControlType: "Hyperlink");
+var scopedApprovedButtonRequest = DesktopCompanionProtocol.SerializeRequest("confirm-click-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Lưu", expectedControlType: "Button");
+var scopedTextRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"),
+    uiTargetId, "tìm kiếm tài liệu", expectedName: "Tìm kiếm", expectedControlType: "Edit");
+var scopedTreeSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Tài liệu", expectedControlType: "TreeItem");
+var scopedWindowRequest = DesktopCompanionProtocol.SerializeRequest("activate-window", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Visual Studio Code", expectedControlType: "Window");
+var scopedScrollRequest = DesktopCompanionProtocol.SerializeRequest("scroll-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, direction: "down", expectedName: "Hướng dẫn", expectedControlType: "Document");
+var clickButtonScope = ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu");
+var compoundButtonScope = ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu rồi xóa file");
+var buttonTargetId = Guid.NewGuid().ToString("N");
+using (var buttonObservation = JsonDocument.Parse(JsonSerializer.Serialize(new
+{
+    observationStatus = "available", truncated = false,
+    elements = new[] { new
+    {
+        elementId = buttonTargetId, windowId = "0123456789abcdef0123456789abcdef", controlType = "Button",
+        name = "Lưu", nameTruncated = false, isPassword = false, allowedActions = Array.Empty<string>(),
+        approvalRequiredActions = new[] { "click-element" }
+    } }
+})))
+{
+    var selectedButton = ComputerUseObservationFilter.Select(buttonObservation.RootElement, clickButtonScope!);
+    var observedButton = new ComputerUseObservedTarget("Button", "Lưu", new(StringComparer.Ordinal) { "click-element" },
+        "Tài liệu", "WINWORD");
+    var buttonTurn = new ComputerUseTurnState();
+    Check(clickButtonScope is { TargetControlType: "Button", TargetLabel: "Lưu" } && compoundButtonScope is null &&
+          selectedButton.Status == "ok" && selectedButton.Elements.Length == 1,
+        "button click request must be exact, non-compound, and target one observed approval-gated button");
+    var buttonObservationRecorded = clickButtonScope is not null && buttonTurn.RecordObservation("available",
+        new Dictionary<string, ComputerUseObservedTarget> { [buttonTargetId] = observedButton }, clickButtonScope);
+    var buttonTargetRetrieved = buttonTurn.TryGetObservedTarget(buttonTargetId, out var scopedButton);
+    Check(buttonObservationRecorded && buttonTargetRetrieved &&
+          scopedButton is { ControlType: "Button", Name: "Lưu", WindowTitle: "Tài liệu", Process: "WINWORD" },
+        "approved target state retains exact control, label, application, and window evidence");
+    Check(clickButtonScope is not null && buttonTurn.CanAct(new("click", TargetId: buttonTargetId), clickButtonScope) &&
+          !buttonTurn.CanAct(new("click", TargetId: Guid.NewGuid().ToString("N")), clickButtonScope),
+        "click action accepts only the observed target bound to the current user request");
+}
+
+var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-11-19T00:00:00Z"));
+var approvalStore = new PendingComputerClickApprovalStore(clock);
+var firstApproval = approvalStore.Create("user-a", Guid.NewGuid(), buttonTargetId, "Lưu", "Tài liệu", "WINWORD");
+Check(firstApproval is not null && PendingComputerClickApprovalStore.IsValidId(firstApproval.ApprovalId) &&
+      firstApproval.ExpiresAt == clock.GetUtcNow() + PendingComputerClickApprovalStore.Lifetime &&
+      !approvalStore.TryConsume(firstApproval.ApprovalId, "user-b", out _, out var mismatchStatus) && mismatchStatus == "owner_mismatch" &&
+      approvalStore.TryConsume(firstApproval.ApprovalId, "user-a", out var consumedApproval, out var consumeStatus) &&
+      consumedApproval == firstApproval && consumeStatus == "consumed" &&
+      !approvalStore.TryConsume(firstApproval.ApprovalId, "user-a", out _, out var replayStatus) && replayStatus == "not_found",
+    "click approvals are owner-bound, survive a wrong-owner attempt, and can be consumed only once");
+var expiringApproval = approvalStore.Create("user-a", null, buttonTargetId, "Lưu");
+clock.Advance(PendingComputerClickApprovalStore.Lifetime);
+Check(expiringApproval is not null &&
+      !approvalStore.TryConsume(expiringApproval.ApprovalId, "user-a", out _, out var expiredStatus) && expiredStatus == "expired" &&
+      approvalStore.Create("user-a", null, buttonTargetId, "bad\nlabel") is null &&
+      approvalStore.Create("user-a", null, "../target", "Lưu") is null,
+    "click approvals expire and reject malformed targets or labels");
+var revocableApproval = approvalStore.Create("user-a", null, buttonTargetId, "Lưu");
+Check(revocableApproval is not null && !approvalStore.Revoke(revocableApproval.ApprovalId, "user-b") &&
+      approvalStore.Revoke(revocableApproval.ApprovalId, "user-a") &&
+      !approvalStore.TryConsume(revocableApproval.ApprovalId, "user-a", out _, out _),
+    "only the owning user can cancel a pending approval and canceled approval cannot be replayed");
+Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
+      parsedScopedSelection is { ExpectedName: "Lịch", ExpectedControlType: "TabItem" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedHyperlinkRequest, out var parsedScopedHyperlink) &&
+      parsedScopedHyperlink is { ExpectedName: "Tài liệu hướng dẫn", ExpectedControlType: "Hyperlink" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedApprovedButtonRequest, out var parsedApprovedButton) &&
+      parsedApprovedButton is { Action: "confirm-click-element", ExpectedName: "Lưu", ExpectedControlType: "Button" } &&
+      !ComputerUsePolicy.CanInteract("confirm-click-element") && !ComputerUsePolicy.CanNavigate("confirm-click-element") &&
+      !DesktopCompanionProtocol.IsValidArguments("confirm-click-element", uiTargetId, null, null, "Lưu", "Hyperlink") &&
+      DesktopCompanionProtocol.TryParseRequest(scopedTextRequest, out var parsedScopedText) &&
+      parsedScopedText is { ExpectedName: "Tìm kiếm", ExpectedControlType: "Edit", Value: "tìm kiếm tài liệu" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedTreeSelectionRequest, out var parsedScopedTreeSelection) &&
+      parsedScopedTreeSelection is { ExpectedName: "Tài liệu", ExpectedControlType: "TreeItem" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedWindowRequest, out var parsedScopedWindow) &&
+      parsedScopedWindow is { ExpectedName: "Visual Studio Code", ExpectedControlType: "Window" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedScrollRequest, out var parsedScopedScroll) &&
+      parsedScopedScroll is { ExpectedName: "Hướng dẫn", ExpectedControlType: "Document", Direction: "down" } &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Hyperlink") &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", "Edit") &&
+      !DesktopCompanionProtocol.IsValidArguments("type-text", uiTargetId, "x", null, "Tìm kiếm", "TabItem") &&
+      !DesktopCompanionProtocol.IsValidArguments("select-element", uiTargetId, null, null, "Lịch", null),
+    "the authenticated Companion protocol carries a bounded backend-authorized target label/type pair and rejects mismatches");
+var cappedUiResponse = DesktopCompanionProtocol.SerializeResponse(Guid.NewGuid().ToString("N"), new { data = new string('x', 32 * 1024) });
+Check(cappedUiResponse.Length < 1024 && cappedUiResponse.Contains("response_too_large", StringComparison.Ordinal),
+    "desktop IPC caps oversized UI observations to a bounded protocol error");
 var dedicatedEdgeCommand = "msedge.exe --user-data-dir=\"C:\\Users\\Tester\\AppData\\Local\\DetotLab\\Edge Profile\" --new-window https://github.com/owner/repo/pulls";
 Check(DesktopCompanionVerification.IsDedicatedEdgeCommandLine(dedicatedEdgeCommand,
       "C:\\Users\\Tester\\AppData\\Local\\DetotLab\\Edge Profile") &&
@@ -111,6 +414,12 @@ Check(DesktopCompanionVerification.WorkspaceLabelMatches("D:\\work\\codex-comput
       !DesktopCompanionVerification.WorkspaceLabelMatches("D:\\work\\codex-computer-use", "Visual Studio Code",
       ["another-workspace"], []),
     "VS Code workspace verification requires an accessible root label or full path; title alone is insufficient");
+Check(DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", "D:\\work\\repo") &&
+      DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", "file:///D:/work/repo") &&
+      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", "C:\\archive\\repo-backup") &&
+      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", "C:\\other\\repo") &&
+      !DesktopCompanionVerification.ExplorerWorkspaceMatches("D:\\work\\repo", null),
+    "Explorer workspace verification requires the committed Shell location for its own window, never a draft address, search input, or title");
 var reusedWindowWorkspace = DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,
     "codex-computer-use - Visual Studio Code", ["Open Editors", "codex-computer-use"], []);
 var wrongWindowWorkspace = DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,
@@ -211,15 +520,19 @@ Check(cappedChecks.Truncated && cappedChecks.TotalCount == 120 &&
     "GitHub reader marks results incomplete if the API pagination cap is reached");
 
 var testPipeName = $"detot-test-{Guid.NewGuid():N}";
+if (!args.Contains("--skip-local-pipe", StringComparer.Ordinal))
+{
 using (var serverShutdown = new CancellationTokenSource())
 {
+    var firstActionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var firstActionCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var actionCount = 0;
-    var pipeServer = new DesktopCompanionPipeServer(testPipeName, requestDeadlineMilliseconds: 3_000);
+    var pipeServer = new DesktopCompanionPipeServer(testPipeName, requestDeadlineMilliseconds: 10_000);
     var serverTask = pipeServer.RunAsync(async (request, token) =>
     {
         if (Interlocked.Increment(ref actionCount) == 1)
         {
+            firstActionStarted.TrySetResult();
             try { await Task.Delay(TimeSpan.FromSeconds(5), token); }
             catch (OperationCanceledException) { firstActionCancelled.TrySetResult(); throw; }
         }
@@ -227,11 +540,31 @@ using (var serverShutdown = new CancellationTokenSource())
     }, serverShutdown.Token);
     try
     {
-        using var clientADeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        using var clientADeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var clientATask = new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientADeadline.Token);
+        try { await firstActionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (TimeoutException error)
+        {
+            var clientStatus = clientATask.IsCompleted
+                ? (await clientATask).ToString()
+                : "still_waiting";
+            throw new TimeoutException($"First pipe action did not start; client={clientStatus}; server={serverTask.Status}.", error);
+        }
+        await Task.Delay(100);
+        clientADeadline.Cancel();
         var clientACancelled = false;
-        try { _ = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientADeadline.Token); }
+        try { _ = await clientATask; }
         catch (OperationCanceledException) { clientACancelled = true; }
-        await firstActionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        // Keep the assertion margin outside the server deadline so scheduler
+        // jitter cannot race a valid cancellation with the test timeout.
+        try
+        {
+            await firstActionCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException error)
+        {
+            throw new TimeoutException($"First pipe action did not cancel; count={actionCount}; clientCancelled={clientACancelled}.", error);
+        }
         using var clientBDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var clientB = await new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientBDeadline.Token);
         Check(clientACancelled && clientB.TryGetProperty("action", out var acceptedAction) &&
@@ -244,6 +577,8 @@ using (var serverShutdown = new CancellationTokenSource())
         await serverTask.WaitAsync(TimeSpan.FromSeconds(3));
     }
 }
+}
+else Console.WriteLine("SKIP: local named-pipe disconnect integration was explicitly skipped by the caller.");
 Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:voquangthan"),
     "GCM account selection remains denied without a trusted pending Git transaction");
 Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:bottom"),
@@ -265,12 +600,38 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở Edge đi") == "open-edge",
     "a direct chat request maps to an allowlisted Edge action");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đệ Tốt, mở VS Code giúp t") == "open-vscode",
     "a direct chat request maps to an allowlisted VS Code action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở File Explorer") == "open-workspace" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở trình quản lý tệp") == "open-workspace",
+    "File Explorer requests open only the configured workspace rather than an arbitrary path");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở Windows Settings") == "open-settings" &&
+      ComputerUseChatIntent.DetectDirectRequest("Open Task Manager") == "open-task-manager" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Word") == "open-word" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Excel") == "open-excel" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở PowerPoint") == "open-powerpoint" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở PDF Reader") == "open-pdf-reader" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở máy tính") == "open-calculator" &&
+      ComputerUseChatIntent.DetectDirectRequest("Open Paint") == "open-paint" &&
+      ComputerUseChatIntent.DetectDirectRequest("Open Paint and delete the image") is null,
+    "fixed application launch intents are recognized without accepting trailing commands");
 Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra tài khoản GitHub hiện tại") == "read-github-account",
     "a direct GitHub account inspection request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-github-pull-requests",
     "a direct PR and CI inspection request is recognized");
+var explicitButtonScope = ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu");
+Check(explicitButtonScope is { TargetControlType: "Button", TargetLabel: "Lưu" } &&
+      explicitButtonScope.Allows(new("observe")) && explicitButtonScope.Allows(new("click", TargetId: uiTargetId)) &&
+      !explicitButtonScope.Allows(new("click", TargetId: uiTargetId, Value: "Submit")) &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu rồi gửi") is null,
+    "button approval scope binds only an explicit exact label and rejects compound requests");
 Check(ComputerUseChatIntent.DetectDirectRequest("Xem ứng dụng đang mở") == "read-approved-applications",
     "a direct approved-app observation request is recognized");
+Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra File Explorer của workspace") == "read-workspace-explorer" &&
+      ComputerUseChatIntent.ObservationTargetForAction("read-workspace-explorer") == "workspace-explorer",
+    "a direct File Explorer request observes only the configured workspace state");
+Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra Windows Settings") == "read-windows-settings" &&
+      ComputerUseChatIntent.ObservationTargetForAction("read-windows-settings") == "windows-settings",
+    "a direct Windows Settings request remains a bounded read-only observation");
 Check(ComputerUseChatIntent.DetectDirectRequest("Làm sao để mở Edge?") is null,
     "a how-to question does not launch an application");
 Check(ComputerUseChatIntent.DetectDirectRequest("Trong ví dụ này: mở Edge") is null,
@@ -283,6 +644,469 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở GitHub") is { } openGithub
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") is { } readGitHub &&
       ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(readGitHub)),
     "chat observation intents remain within the observation permission set");
+using (var validAgentAction = JsonDocument.Parse("{\"operation\":\"click\",\"targetId\":\"0123456789abcdef0123456789abcdef\"}"))
+    Check(ComputerUseAgentAction.TryParse(validAgentAction.RootElement, out var parsedAgentAction) &&
+          parsedAgentAction is { Operation: "click", TargetId: "0123456789abcdef0123456789abcdef" },
+        "agent Computer Use accepts only a typed action with an opaque target ID");
+using (var validExpandAction = JsonDocument.Parse("{\"operation\":\"expand\",\"targetId\":\"0123456789abcdef0123456789abcdef\"}"))
+    Check(ComputerUseAgentAction.TryParse(validExpandAction.RootElement, out var parsedExpandAction) &&
+          parsedExpandAction is { Operation: "expand", TargetId: "0123456789abcdef0123456789abcdef" },
+        "agent Computer Use accepts a bounded observed-target menu expansion");
+using (var builtInAppAction = JsonDocument.Parse("{\"operation\":\"open_application\",\"application\":\"notepad\"}"))
+    Check(ComputerUseAgentAction.TryParse(builtInAppAction.RootElement, out var parsedBuiltInApp) &&
+          parsedBuiltInApp is { Operation: "open_application", Application: "notepad" },
+        "agent Computer Use parses only the fixed identifier for a built-in utility launch");
+using (var arbitraryAgentAction = JsonDocument.Parse("{\"operation\":\"run_shell\",\"value\":\"whoami\"}"))
+    Check(!ComputerUseAgentAction.TryParse(arbitraryAgentAction.RootElement, out _),
+        "agent Computer Use rejects arbitrary execution operations");
+using (var extraAgentAction = JsonDocument.Parse("{\"operation\":\"observe\",\"shell\":\"whoami\"}"))
+    Check(!ComputerUseAgentAction.TryParse(extraAgentAction.RootElement, out _),
+        "agent Computer Use rejects arguments outside its strict schema");
+using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text\",\"targetId\":\"stale\",\"value\":\"hello\"}"))
+    Check(!ComputerUseAgentAction.TryParse(badTargetAgentAction.RootElement, out _),
+        "agent Computer Use rejects non-opaque or malformed UI target IDs");
+var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay trời thế nào?");
+var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
+var openThenClickScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm link Pull requests");
+var unsafeCompoundScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm nút Lưu rồi gửi");
+var inspectEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Kiểm tra trang hiện tại trong Edge");
+var inspectNotepadScope = ComputerUseTaskAuthorization.FromCurrentMessage("Đọc nội dung trong Notepad");
+var inspectCalculatorScope = ComputerUseTaskAuthorization.FromCurrentMessage("Kiểm tra máy tính");
+var inspectPaintScope = ComputerUseTaskAuthorization.FromCurrentMessage("Review Paint");
+var inspectGithubScope = ComputerUseTaskAuthorization.FromCurrentMessage("Review the current pull request in GitHub");
+var openThenInspectScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi kiểm tra trang hiện tại");
+var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
+var readDocumentScope = ComputerUseTaskAuthorization.FromCurrentMessage("Tóm tắt tài liệu docs/guide.pdf");
+var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
+var selectListScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn danh sách Báo cáo tháng");
+var selectTreeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn cây Tài liệu");
+var typeFieldScope = ComputerUseTaskAuthorization.FromCurrentMessage("Nhập tìm kiếm tài liệu vào ô Tìm kiếm");
+var activateWindowScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chuyển sang cửa sổ Visual Studio Code");
+var scrollDocumentScope = ComputerUseTaskAuthorization.FromCurrentMessage("Cuộn xuống trong tài liệu Hướng dẫn");
+var unrelatedFakeGatewayCalls = new[] { "detot_computer_use" };
+Check(unrelatedScope is null &&
+      !ComputerUseTaskAuthorization.ShouldExposeTool(unrelatedScope, interactionConsent: true, observationConsent: true) &&
+      !unrelatedFakeGatewayCalls.Any(name => ComputerUseTaskAuthorization.ShouldDispatchToolCall(unrelatedScope, name)),
+    "unrelated chat exposes no UI labels and cannot dispatch a fake tool call even when both consent grants exist");
+Check(openEdgeScope is { } scopedEdge && scopedEdge.Allows(new("observe")) &&
+      ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: true, observationConsent: true) &&
+      scopedEdge.Allows(new("open_application", Application: "edge")) &&
+      !scopedEdge.Allows(new("open_application", Application: "vscode")) &&
+      !scopedEdge.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "detot_computer_use") &&
+      !ComputerUseTaskAuthorization.ShouldDispatchToolCall(openEdgeScope, "other_tool"),
+    "a direct desktop request authorizes only its matching application and required observation");
+Check(inspectEdgeScope is { Intent: "planned-app-inspection", Application: "edge", BindApplicationProcess: true,
+          RequiresApplicationLaunchBeforeTarget: true, MaximumTargetActions: 2 } inspection &&
+      inspectGithubScope is null &&
+      openThenInspectScope is { Intent: "open-edge-then-planned-app-inspection", Application: "edge",
+          BindApplicationProcess: true, MaximumTargetActions: 2 } &&
+      inspection.AllowedOperations.Contains("select_tab", StringComparer.Ordinal) &&
+      inspection.AllowedOperations.Contains("scroll", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("click", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("type_text", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("press_key", StringComparer.Ordinal) &&
+      !inspection.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal) &&
+      ComputerUseTaskAuthorization.RequiresToolInvocation(inspectEdgeScope) &&
+      ComputerUseTaskAuthorization.RequiresToolInvocation(openThenInspectScope) &&
+      inspectNotepadScope is { Application: "notepad", BindApplicationProcess: true } notepadInspection &&
+      notepadInspection.Allows(new("open_application", Application: "notepad")) &&
+      notepadInspection.MatchesApplicationProcess("Notepad") &&
+      !notepadInspection.MatchesApplicationProcess("Code") &&
+      inspectCalculatorScope is { Application: "calculator" } calculatorInspection &&
+      calculatorInspection.MatchesApplicationProcess("CalculatorApp") &&
+      inspectPaintScope is { Application: "paint" } paintInspection &&
+      paintInspection.MatchesApplicationProcess("mspaint") &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Review Edge and Visual Studio Code") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi kiểm tra trang trong VS Code") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Check Edge and send an email") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Review https://github.com/voquangthan/-t-t") is null &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Check the current page") is null,
+    "natural app inspection requires one named allowlisted application and excludes writes, submission, arbitrary keys, and file reads; GitHub uses its scoped reader");
+if (inspectEdgeScope is { } appInspection)
+{
+    const string tabId = "0123456789abcdef0123456789abcdef";
+    const string treeId = "1123456789abcdef0123456789abcdef";
+    using var appObservation = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"edge-window","process":"msedge","title":"Edge"},
+                    {"windowId":"code-window","process":"Code","title":"Private editor"}],
+         "elements":[{"elementId":"0123456789abcdef0123456789abcdef","windowId":"edge-window","controlType":"TabItem","name":"Home","nameTruncated":false,"isPassword":false,"allowedActions":["select-element"]},
+                     {"elementId":"1123456789abcdef0123456789abcdef","windowId":"code-window","controlType":"TreeItem","name":"Private files","nameTruncated":false,"isPassword":false,"allowedActions":["expand-element"]}]}
+        """);
+    var appObservationSelection = ComputerUseObservationFilter.Select(appObservation.RootElement, appInspection);
+    Check(appObservationSelection.Status == "available" && appObservationSelection.Elements.Length == 1 &&
+          appObservationSelection.Elements[0].GetProperty("elementId").GetString() == tabId &&
+          appObservationSelection.WindowIds.SequenceEqual(new[] { "edge-window" }),
+        "planned inspection sends only windows and controls belonging to the one requested application process");
+
+    using var absentAppObservation = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"code-window","process":"Code","title":"Private editor"}],
+         "elements":[{"elementId":"1123456789abcdef0123456789abcdef","windowId":"code-window","controlType":"TreeItem","name":"Private files","nameTruncated":false,"isPassword":false,"allowedActions":["expand-element"]}]}
+        """);
+    var absentAppSelection = ComputerUseObservationFilter.Select(absentAppObservation.RootElement, appInspection);
+    Check(absentAppSelection.Status == "empty" && absentAppSelection.Elements.Length == 0 &&
+          absentAppSelection.WindowIds.Length == 0,
+        "an unopened requested app produces an empty scoped observation instead of exposing other apps");
+
+    var emptyStartState = new ComputerUseTurnState();
+    Check(emptyStartState.RecordObservation("empty", new Dictionary<string, ComputerUseObservedTarget>(), appInspection) &&
+          emptyStartState.CanAct(new("open_application", Application: "edge"), appInspection),
+        "an empty, app-scoped initial observation permits launching the explicitly requested app");
+    var partialObservationState = new ComputerUseTurnState();
+    Check(!partialObservationState.RecordObservation("partial", new Dictionary<string, ComputerUseObservedTarget>
+          { [tabId] = new("TabItem", "Home", new(StringComparer.Ordinal) { "select-element" }, "Edge", "msedge") },
+          appInspection) && partialObservationState.Stopped,
+        "planned app inspection stops instead of using a partial or truncated observation");
+
+    var state = new ComputerUseTurnState();
+    var broadScope = state.ObservationScope(appInspection);
+    var beforeLaunchTargets = new Dictionary<string, ComputerUseObservedTarget>
+    {
+        [tabId] = new("TabItem", "Home", new(StringComparer.Ordinal) { "select-element" }, "Edge", "msedge"),
+        [treeId] = new("TreeItem", "Files", new(StringComparer.Ordinal) { "expand-element" }, "Project", "Code")
+    };
+    var scopedBeforeLaunch = broadScope.BindApplicationProcess &&
+        state.RecordObservation("available", beforeLaunchTargets, appInspection) &&
+        state.CanAct(new("open_application", Application: "edge"), appInspection) &&
+        !state.CanAct(new("open_application", Application: "vscode"), appInspection) &&
+        state.RecordAction("verified", true, "verified", "open_application");
+    var targetScope = state.ObservationScope(appInspection);
+    var firstAction = scopedBeforeLaunch && targetScope.BindApplicationProcess &&
+        state.RecordObservation("available", beforeLaunchTargets, appInspection) &&
+        state.CanAct(new("select_tab", TargetId: tabId), appInspection) &&
+        !state.CanAct(new("expand", TargetId: treeId), appInspection) &&
+        state.RecordAction("verified", true, "verified", "select_tab", singleTargetAction: true);
+    var secondAction = firstAction && state.RecordObservation("available", beforeLaunchTargets, appInspection) &&
+        state.CanAct(new("expand", TargetId: treeId), appInspection) &&
+        state.RecordAction("verified", true, "verified", "expand", singleTargetAction: true) &&
+        !state.CanAct(new("select_tab", TargetId: tabId), appInspection);
+    Check(scopedBeforeLaunch && firstAction && secondAction && state.RequiresObservation,
+        "planned inspection binds evidence to the launched app, requires re-observation, and stops after two target actions");
+
+    var wrongProcessState = new ComputerUseTurnState();
+    var wrongProcessRejected = wrongProcessState.RecordAction("verified", true, "verified", "open_application") &&
+        !wrongProcessState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+        {
+            [tabId] = new("TabItem", "Home", new(StringComparer.Ordinal) { "select-element" }, "Editor", "Code")
+        }, appInspection) && wrongProcessState.Stopped;
+    Check(wrongProcessRejected,
+        "planned inspection rejects observation targets from another application's process after launch");
+}
+Check(openThenClickScope is { TargetControlType: "Hyperlink", TargetLabel: "Pull requests" } compound &&
+      compound.AllowedOperations.Contains("open_application", StringComparer.Ordinal) &&
+      compound.AllowedOperations.Contains("click", StringComparer.Ordinal) &&
+      compound.Allows(new("open_application", Application: "edge")) &&
+      compound.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !compound.Allows(new("open_application", Application: "vscode")) &&
+      !compound.Allows(new("click", TargetId: "0123456789abcdef0123456789abcdef", Application: "vscode")) &&
+      unsafeCompoundScope is null &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Edge rồi bấm link Pull requests") is null,
+    "an explicit two-step request binds one allowlisted app and one exact UI target; compound submits and extra planner grammar stay denied");
+if (openThenClickScope is { } twoStepScope)
+{
+    var state = new ComputerUseTurnState();
+    var targetId = "0123456789abcdef0123456789abcdef";
+    var target = new ComputerUseObservedTarget("Hyperlink", "Pull requests",
+        new(StringComparer.Ordinal) { "click-element" });
+    var initialScope = state.ObservationScope(twoStepScope);
+    var launchAllowed = initialScope.TargetLabel is null && state.RecordObservation("available",
+        new Dictionary<string, ComputerUseObservedTarget> { [targetId] = target }, twoStepScope) &&
+        !state.CanAct(new("click", TargetId: targetId), twoStepScope) &&
+        state.CanAct(new("open_application", Application: "edge"), twoStepScope) &&
+        state.RecordAction("verified", true, "verified", "open_application");
+    var targetScope = state.ObservationScope(twoStepScope);
+    Check(launchAllowed && targetScope.TargetLabel == "Pull requests" &&
+          state.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+          {
+              [targetId] = target with { Process = "msedge" }
+          }, twoStepScope) &&
+          state.CanAct(new("click", TargetId: targetId), twoStepScope) &&
+          state.RecordAction("verified", true, "verified", "click", singleTargetAction: true) &&
+          !state.CanAct(new("click", TargetId: targetId), twoStepScope),
+        "two-step state observes broadly only before the requested app is verified, then binds one fresh exact target and prevents a repeated target action");
+
+    using var wrongAppOnly = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"other-window","process":"other-app","title":"Other app"}],
+         "elements":[{"elementId":"other-target","windowId":"other-window","controlType":"Hyperlink","name":"Pull requests","nameTruncated":false,"isPassword":false,"allowedActions":["click-element"]}]}
+        """);
+    var wrongAppSelection = ComputerUseObservationFilter.Select(wrongAppOnly.RootElement, targetScope);
+    Check(wrongAppSelection.Status == "target_not_found" && wrongAppSelection.Elements.Length == 0,
+        "a same-label control in another process cannot satisfy a two-step application's target scope");
+    using var matchingAndDecoy = JsonDocument.Parse("""
+        {"observationStatus":"available","truncated":false,
+         "windows":[{"windowId":"word-window","process":"WINWORD","title":"Document"},{"windowId":"other-window","process":"other-app","title":"Other app"}],
+         "elements":[{"elementId":"word-target","windowId":"word-window","controlType":"Hyperlink","name":"Pull requests","nameTruncated":false,"isPassword":false,"allowedActions":["click-element"]},{"elementId":"other-target","windowId":"other-window","controlType":"Hyperlink","name":"Pull requests","nameTruncated":false,"isPassword":false,"allowedActions":["click-element"]}]}
+        """);
+    var appBoundSelection = ComputerUseObservationFilter.Select(matchingAndDecoy.RootElement,
+        targetScope with { Application = "word" });
+    Check(appBoundSelection.Status == "ok" && appBoundSelection.Elements.Length == 1 &&
+          appBoundSelection.Elements[0].GetProperty("elementId").GetString() == "word-target",
+        "when duplicate labels exist, only the target owned by the requested application's process remains eligible");
+
+    var wrongAppState = new ComputerUseTurnState();
+    var wrongAppLaunch = wrongAppState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+        { [targetId] = target with { Process = "other-app" } }, twoStepScope) &&
+        wrongAppState.CanAct(new("open_application", Application: "edge"), twoStepScope) &&
+        wrongAppState.RecordAction("verified", true, "verified", "open_application");
+    Check(wrongAppLaunch && !wrongAppState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+          { [targetId] = target with { Process = "other-app" } }, twoStepScope) &&
+          !wrongAppState.CanAct(new("click", TargetId: targetId), twoStepScope),
+        "turn-state authorization independently rejects a target whose observed process is outside the launched application");
+}
+Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
+      openFileScope.Allows(new("observe")) &&
+      openFileScope.Allows(new("open_workspace_item", Value: "docs/audit.txt")) &&
+      !openFileScope.Allows(new("open_workspace_item", Value: "docs/other.txt")) &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Mở file ../private.txt") is null,
+    "workspace navigation scope binds the exact safe relative path requested by the current user message");
+using (var readWorkspaceAction = JsonDocument.Parse("{\"operation\":\"read_workspace_item\",\"value\":\"docs/guide.pdf\"}"))
+{
+    var readActionValid = ComputerUseAgentAction.TryParse(readWorkspaceAction.RootElement, out var readAction);
+    Check(readDocumentScope is { Intent: "read-workspace-item", RequestedValue: "docs/guide.pdf" } &&
+          readActionValid && readAction is { Operation: "read_workspace_item", Value: "docs/guide.pdf" } &&
+          readDocumentScope.Allows(readAction!) && !readDocumentScope.Allows(new("read_workspace_item", Value: "docs/other.pdf")) &&
+          ComputerUseTaskAuthorization.ShouldExposeTool(readDocumentScope, interactionConsent: false,
+              observationConsent: false, workspaceFileConsent: true) &&
+          !ComputerUseTaskAuthorization.ShouldExposeTool(readDocumentScope, interactionConsent: true,
+              observationConsent: true, workspaceFileConsent: false) &&
+          !ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: false,
+              observationConsent: true, workspaceFileConsent: true) &&
+          !ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: true,
+              observationConsent: false, workspaceFileConsent: true) &&
+          ComputerUseTaskAuthorization.RequiresToolInvocation(readDocumentScope) &&
+          !ComputerUseTaskAuthorization.RequiresToolInvocation(openEdgeScope) &&
+          new ComputerUseTurnState().CanAct(readAction!, readDocumentScope),
+        "document reads require their distinct file consent and tool invocation, while UI actions still require both UI grants");
+    var readTurn = new ComputerUseTurnState();
+    Check(readTurn.CanAct(readAction!, readDocumentScope!) &&
+          readTurn.RecordAction("verified", true, "verified", "read_workspace_item") &&
+          !readTurn.CanAct(readAction!, readDocumentScope!) && readTurn.CanAcceptModelCompletion,
+        "one document task reads its exact file at most once and may then return a model answer");
+}
+Check(DesktopOperator.IsSafeWorkspaceDocumentPath("docs/guide.pdf") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("../private.pdf") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath(".env") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("settings/client-secret.json") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath(".state/memory.sqlite") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("docs/audit.log") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("docs/credential-notes.txt"),
+    "workspace document reads reject traversal, credentials, runtime state, databases, and logs");
+var sanitizedWorkspaceExcerpt = ComputerUsePolicy.RedactWorkspaceExcerpt(
+    "API_KEY=synthetic-secret; Authorization: Bearer synthetic-token\n-----BEGIN PRIVATE KEY-----\nprivate-sentinel");
+Check(!sanitizedWorkspaceExcerpt.Contains("synthetic-secret", StringComparison.Ordinal) &&
+      !sanitizedWorkspaceExcerpt.Contains("synthetic-token", StringComparison.Ordinal) &&
+      !sanitizedWorkspaceExcerpt.Contains("private-sentinel", StringComparison.Ordinal) &&
+      ComputerUsePolicy.RedactWorkspaceExcerpt("GitHub token ghp_12345678901234567890123456789012")
+          .Contains("[REDACTED]", StringComparison.Ordinal) &&
+      !ComputerUsePolicy.RedactWorkspaceExcerpt("<client_secret>xml-secret-sentinel</client_secret>")
+          .Contains("xml-secret-sentinel", StringComparison.Ordinal),
+    "workspace document excerpts redact credential assignments, XML secrets, private key blocks, and recognizable tokens");
+var documentRoot = CreateIsolatedTestDirectory("workspace-document-read");
+var documentPath = Path.Combine(documentRoot, "guide.md");
+try
+{
+    await File.WriteAllTextAsync(documentPath, "Smoke test document.\nLine two.");
+    var document = await new UniversalFileReader().ReadWorkspaceFileAsync(documentRoot, "guide.md", CancellationToken.None);
+    Check(document.Name == "guide.md" && document.Excerpts.Any(item => item.Text.Contains("Smoke test document.", StringComparison.Ordinal)) &&
+          document.Sha256.Length == 64,
+        "the bounded workspace document reader extracts a selected UTF-8 file with content hash and citation");
+}
+finally
+{
+    if (File.Exists(documentPath)) File.Delete(documentPath);
+    if (Directory.Exists(documentRoot)) Directory.Delete(documentRoot);
+}
+var archiveRoot = CreateIsolatedTestDirectory("workspace-document-archive");
+var archivePath = Path.Combine(archiveRoot, "bundle.zip");
+try
+{
+    await using (var archiveStream = File.Create(archivePath))
+    using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create))
+    {
+        foreach (var (entryName, content) in new[]
+        {
+            (".state/session.json", "PRIVATE-MEMORY-SENTINEL"),
+            ("logs/session.json", "PRIVATE-LOG-SENTINEL"),
+            ("backups/note.txt", "PRIVATE-BACKUP-SENTINEL"),
+            ("credentials/client-secret.json", "PRIVATE-CREDENTIAL-SENTINEL"),
+            ("docs/guide.md", "Allowed documentation entry.")
+        })
+        {
+            var entry = archive.CreateEntry(entryName);
+            await using var entryStream = entry.Open();
+            await using var writer = new StreamWriter(entryStream, Encoding.UTF8);
+            await writer.WriteAsync(content);
+        }
+    }
+
+    var archiveRejected = false;
+    try
+    {
+        await new UniversalFileReader().ReadWorkspaceFileAsync(archiveRoot, "bundle.zip", CancellationToken.None);
+    }
+    catch (InvalidDataException error)
+    {
+        archiveRejected = error.Message.Contains("ZIP", StringComparison.OrdinalIgnoreCase);
+    }
+    Check(archiveRejected,
+        "scoped workspace reads reject ZIP containers before any entry can become model-bound excerpts");
+}
+finally
+{
+    if (Directory.Exists(archiveRoot)) Directory.Delete(archiveRoot, recursive: true);
+}
+Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cáo tháng" } &&
+      selectListScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      !selectListScope.Allows(new("select_tab", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      selectTreeScope is { TargetControlType: "TreeItem", TargetLabel: "Tài liệu" } &&
+      selectTreeScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      typeFieldScope is { TargetControlType: "Edit", TargetLabel: "Tìm kiếm", RequestedValue: "tìm kiếm tài liệu" } &&
+      typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "tìm kiếm tài liệu")) &&
+      !typeFieldScope.Allows(new("type_text", TargetId: "0123456789abcdef0123456789abcdef", Value: "khác")) &&
+      activateWindowScope is { TargetControlType: "Window", TargetLabel: "Visual Studio Code" } &&
+      activateWindowScope.Allows(new("activate_window", TargetId: "0123456789abcdef0123456789abcdef")) &&
+      scrollDocumentScope is { TargetControlType: "Document", TargetLabel: "Hướng dẫn", RequestedValue: "down" } &&
+      scrollDocumentScope.Allows(new("scroll", TargetId: "0123456789abcdef0123456789abcdef", Direction: "down")) &&
+      !scrollDocumentScope.Allows(new("scroll", TargetId: "0123456789abcdef0123456789abcdef", Direction: "up")),
+    "named list selection, text entry, window activation, and scroll direction bind exact requested scope");
+var tabTargetId = "1123456789abcdef0123456789abcdef";
+var tabTarget = new ComputerUseObservedTarget("TabItem", "Lịch", new(StringComparer.Ordinal) { "select-element" });
+var tabTurnState = new ComputerUseTurnState();
+Check(selectTabScope is { TargetControlType: "TabItem", TargetLabel: "Lịch" } &&
+      tabTurnState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget> { [tabTargetId] = tabTarget }, selectTabScope) &&
+      tabTurnState.CanAct(new("select_tab", TargetId: tabTargetId), selectTabScope) &&
+      !tabTurnState.CanAct(new("click", TargetId: tabTargetId), selectTabScope),
+    "an explicit tab request exposes only the single named TabItem and its selection operation");
+JsonDocument MakeObservationFixture(int[] matchingIndices, bool truncated = false, int controlCount = 27, bool partialStatus = false)
+{
+    var controls = Enumerable.Range(0, controlCount).Select(index => new
+    {
+        elementId = $"target-{index}", windowId = $"window-{index % 3}", controlType = "TabItem",
+        name = matchingIndices.Contains(index) ? "Lịch" : $"Tab {index}", nameTruncated = false, isPassword = false,
+        allowedActions = new[] { "select-element" }
+    }).ToArray();
+    return JsonDocument.Parse(JsonSerializer.Serialize(new { observationStatus = truncated || partialStatus ? "partial" : "available", truncated, elements = controls }));
+}
+using (var duplicateAcrossBackendLimit = MakeObservationFixture([1, 25]))
+{
+    var selection = ComputerUseObservationFilter.Select(duplicateAcrossBackendLimit.RootElement, selectTabScope!);
+    Check(selection.Status == "target_ambiguous" && selection.Elements.Length == 0 &&
+          !ComputerUseObservationFilter.IsUsableForNamedAction(selection),
+        "duplicate matches across all 27 bounded controls are rejected by the same gate that prevents action dispatch");
+}
+using (var uniqueAfterBackendLimit = MakeObservationFixture([25]))
+{
+    var selection = ComputerUseObservationFilter.Select(uniqueAfterBackendLimit.RootElement, selectTabScope!);
+    Check(selection.Status == "ok" && selection.Elements.Length == 1 &&
+          selection.Elements[0].GetProperty("elementId").GetString() == "target-25" &&
+          ComputerUseObservationFilter.IsUsableForNamedAction(selection),
+        "a unique matching control after the former 24-item cutoff remains discoverable");
+}
+using (var truncatedNamedObservation = MakeObservationFixture([1], truncated: true))
+    Check(ComputerUseObservationFilter.Select(truncatedNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
+        "a truncated source observation cannot be used to claim a unique target");
+using (var overLimitNamedObservation = MakeObservationFixture([1], controlCount: 73))
+    Check(ComputerUseObservationFilter.Select(overLimitNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
+        "a response exceeding the Companion's documented 72-control bound fails closed for named actions");
+using (var partialNamedObservation = MakeObservationFixture([1], partialStatus: true))
+    Check(ComputerUseObservationFilter.Select(partialNamedObservation.RootElement, selectTabScope!).Status == "observation_truncated",
+        "partial observation status cannot be treated as proof of a unique named target");
+using (var namedWindowObservation = JsonDocument.Parse("""
+    {"observationStatus":"available","truncated":false,"windows":[
+      {"windowId":"0123456789abcdef0123456789abcdef","title":"Visual Studio Code","allowedActions":["activate-window"]},
+      {"windowId":"1123456789abcdef0123456789abcdef","title":"Edge","allowedActions":["activate-window"]}
+    ],"elements":[]}
+    """))
+{
+    var selection = ComputerUseObservationFilter.Select(namedWindowObservation.RootElement, activateWindowScope!);
+    Check(selection.Status == "ok" && selection.Elements.Length == 1 &&
+          selection.Elements[0].GetProperty("elementId").GetString() == "0123456789abcdef0123456789abcdef" &&
+          selection.WindowIds.SequenceEqual(["0123456789abcdef0123456789abcdef"]),
+        "named window activation resolves exactly one observed top-level window instead of an arbitrary UI element");
+}
+var compoundWindowScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Word rồi chuyển sang cửa sổ Báo cáo");
+const string observedWordWindowId = "0123456789abcdef0123456789abcdef";
+static bool AcceptsCompoundWindowObservation(string json, ComputerUseTaskScope scope)
+{
+    using var observation = JsonDocument.Parse(json);
+    var targets = ComputerUseObservationFilter.CollectObservedTargets(observation.RootElement, scope);
+    var state = new ComputerUseTurnState();
+    return state.RecordObservation("available", targets, scope) &&
+        state.CanAct(new("open_application", Application: "word"), scope) &&
+        state.RecordAction("verified", true, "verified", "open_application") &&
+        state.RecordObservation("available", targets, scope) &&
+        state.CanAct(new("activate_window", TargetId: observedWordWindowId), scope) &&
+        state.TryGetObservedTarget(observedWordWindowId, out var target) &&
+        target is { WindowTitle: "Báo cáo", Process: "WINWORD" };
+}
+var validWordWindowObservation = """
+    {"observationStatus":"available","truncated":false,
+     "windows":[{"windowId":"0123456789abcdef0123456789abcdef","title":"Báo cáo","process":"WINWORD","allowedActions":["activate-window"]}],"elements":[]}
+    """;
+var wrongProcessWindowObservation = validWordWindowObservation.Replace("WINWORD", "msedge", StringComparison.Ordinal);
+var missingProcessWindowObservation = validWordWindowObservation.Replace(",\"process\":\"WINWORD\"", "", StringComparison.Ordinal);
+Check(compoundWindowScope is { RequiresApplicationLaunchBeforeTarget: true, TargetControlType: "Window" } windowScope &&
+      AcceptsCompoundWindowObservation(validWordWindowObservation, windowScope),
+    "JSON window process and title survive target collection and turn-state validation for a compound activate_window request");
+Check(compoundWindowScope is { } scopedWindow &&
+      !AcceptsCompoundWindowObservation(wrongProcessWindowObservation, scopedWindow) &&
+      !AcceptsCompoundWindowObservation(missingProcessWindowObservation, scopedWindow),
+    "compound window activation rejects JSON observations with a mismatched or missing process");
+using (var cappedUnscopedObservation = MakeObservationFixture([]))
+{
+    var selection = ComputerUseObservationFilter.Select(cappedUnscopedObservation.RootElement,
+        new ComputerUseTaskScope("open-edge", ["observe", "open_application"], "edge"));
+    Check(selection.Elements.Length == 24 && selection.Truncated && selection.Status == "partial",
+        "the unscoped observation payload marks Backend-side control truncation accurately");
+}
+var ambiguousTabState = new ComputerUseTurnState();
+Check(selectTabScope is not null && !ambiguousTabState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { [tabTargetId] = tabTarget, ["2123456789abcdef0123456789abcdef"] = tabTarget }, selectTabScope) &&
+      !ambiguousTabState.CanAct(new("select_tab", TargetId: tabTargetId), selectTabScope),
+    "duplicate matching UI labels stop before selection instead of choosing arbitrarily");
+var failedObserveState = new ComputerUseTurnState();
+Check(openEdgeScope is not null && !failedObserveState.RecordObservation("unavailable", new Dictionary<string, ComputerUseObservedTarget>(), openEdgeScope) &&
+      !failedObserveState.CanAct(new("open_application", Application: "edge"), openEdgeScope) &&
+      !failedObserveState.CanAcceptModelCompletion,
+    "failed observation stops the turn before actions or model success claims");
+var failedActionState = new ComputerUseTurnState();
+var testClickScope = new ComputerUseTaskScope("test", ["observe", "click"]);
+var clickTarget = new ComputerUseObservedTarget("Hyperlink", "Help", new(StringComparer.Ordinal) { "click-element" });
+Check(failedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { ["0123456789abcdef0123456789abcdef"] = clickTarget }, testClickScope) &&
+      failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      !failedActionState.RecordAction("not_verified", false, "not_verified") &&
+      !failedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>(), testClickScope) &&
+      !failedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      !failedActionState.CanAcceptModelCompletion,
+    "an unverified action cannot be followed by observe/action or accepted as model completion");
+var verifiedActionState = new ComputerUseTurnState();
+Check(verifiedActionState.RecordObservation("available", new Dictionary<string, ComputerUseObservedTarget>
+      { ["0123456789abcdef0123456789abcdef"] = clickTarget }, testClickScope) &&
+      verifiedActionState.RecordAction("completed", true, "verified") &&
+      !verifiedActionState.CanAct(new("click", TargetId: "0123456789abcdef0123456789abcdef"), testClickScope) &&
+      verifiedActionState.CanAct(new("observe"), testClickScope),
+    "a verified action invalidates old targets and requires a new observation before another action");
+var agentConsentRoot = Path.Combine(Path.GetTempPath(), "detot-computer-use-consent-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var agentConsent = new ConsentPolicy(agentConsentRoot, new EphemeralDataProtectionProvider());
+    var agentConsentSnapshot = agentConsent.Get("synthetic-owner");
+    Check(agentConsentSnapshot.Options.Any(option => option.Source == "computer_use" && option.Destination == "local_only") &&
+          agentConsentSnapshot.Options.Any(option => option.Source == "desktop_ui" && option.Destination == "DeepSeek") &&
+          agentConsentSnapshot.Options.Any(option => option.Source == "workspace_files" && option.Destination == "DeepSeek") &&
+          !agentConsent.IsAllowed("synthetic-owner", "computer_use", "direct_request", "local_only") &&
+          !agentConsent.IsAllowed("synthetic-owner", "desktop_ui", "direct_request", "DeepSeek") &&
+          !agentConsent.IsAllowed("synthetic-owner", "workspace_files", "direct_request", "DeepSeek"),
+        "agent interaction and external UI observation permissions are explicit and disabled by default");
+}
+finally
+{
+    if (Directory.Exists(agentConsentRoot)) Directory.Delete(agentConsentRoot, recursive: true);
+}
 var computerUseExecutions = 0;
 Task<string> FakeComputerUseExecutor(string action)
 {
@@ -360,8 +1184,30 @@ var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUs
 Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
     "the exposed permission description keeps code execution disabled");
 Check(WindowsDesktopAutomation.ReadOpenApprovedApplications().All(name =>
-        name is "Visual Studio Code" or "Microsoft Edge" or "File Explorer" or "Visual Studio" or "Notepad" or "Windows Terminal"),
+        name is "Visual Studio Code" or "Microsoft Edge" or "File Explorer" or "Visual Studio" or "Notepad" or "Windows Terminal" or
+            "Windows Settings (read-only)" or "Task Manager (read-only)" or "Microsoft Word" or "Microsoft Excel" or
+            "Microsoft PowerPoint" or "PDF Reader"),
     "application observation returns only approved app identities");
+var eightLeafRoot = new UiTreeFixtureNode();
+for (var index = 0; index < 8; index++) eightLeafRoot.Children.Add(new UiTreeFixtureNode());
+var eightLeafNodes = ComputerUsePolicy.CollectBoundedDescendants(eightLeafRoot, 13, 4,
+    (node, index) => index < node.Children.Count ? node.Children[index] : null, out var eightLeafTruncated);
+Check(eightLeafNodes.Count == 8 && !eightLeafTruncated,
+    "bounded UI traversal visits all eight leaf siblings below its element limit");
+var oversizedRoot = new UiTreeFixtureNode();
+for (var index = 0; index < 14; index++) oversizedRoot.Children.Add(new UiTreeFixtureNode());
+var oversizedNodes = ComputerUsePolicy.CollectBoundedDescendants(oversizedRoot, 13, 4,
+    (node, index) => index < node.Children.Count ? node.Children[index] : null, out var oversizedTruncated);
+Check(oversizedNodes.Count == 13 && oversizedTruncated,
+    "bounded UI traversal marks sibling overflow as partial");
+var deepRoot = new UiTreeFixtureNode();
+var deepChild = new UiTreeFixtureNode();
+deepChild.Children.Add(new UiTreeFixtureNode());
+deepRoot.Children.Add(deepChild);
+var deepNodes = ComputerUsePolicy.CollectBoundedDescendants(deepRoot, 13, 1,
+    (node, index) => index < node.Children.Count ? node.Children[index] : null, out var deepTruncated);
+Check(deepNodes.Count == 1 && deepTruncated,
+    "bounded UI traversal marks descendants beyond the depth limit as partial");
 Check(DesktopOperator.SafeGitHubUrl("https://github.com/voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
     "HTTPS GitHub remote is canonicalized");
 Check(DesktopOperator.SafeGitHubUrl("git@github.com:voquangthan/-t-t.git") == "https://github.com/voquangthan/-t-t",
@@ -387,6 +1233,16 @@ try
     Directory.CreateDirectory(Path.Combine(repo, "nested", "folder"));
     Check(DesktopOperator.FindRepositoryRoot(Path.Combine(repo, "nested", "folder")) == repo,
         "repository root is discovered from a nested path");
+    Directory.CreateDirectory(Path.Combine(repo, "documents"));
+    File.WriteAllText(Path.Combine(repo, "documents", "audit.txt"), "synthetic workspace item\n");
+    Check(DesktopOperator.ResolveWorkspaceItemPath(repo, "documents/audit.txt") == Path.Combine(repo, "documents", "audit.txt") &&
+          DesktopOperator.ResolveWorkspaceItemPath(repo, "documents") == Path.Combine(repo, "documents"),
+        "only existing workspace files and folders resolve for Explorer navigation");
+    Check(DesktopOperator.ResolveWorkspaceItemPath(repo, "../outside.txt") is null &&
+          DesktopOperator.ResolveWorkspaceItemPath(repo, Path.Combine(temporaryRoot, "outside.txt")) is null &&
+          DesktopOperator.ResolveWorkspaceItemPath(repo, "missing.txt") is null &&
+          !DesktopOperator.IsSafeWorkspaceRelativePath("documents/../outside.txt"),
+        "workspace navigation rejects traversal, rooted paths, and missing items");
     var status = await DesktopOperator.ReadWorkspaceStatusAsync(repo);
     Check(status.Available && status.Branch == "main", "read-only Git inspection returns the current branch");
     Check(status.HasTrackedChanges == true, "staged tracked change is detected without returning its path");
@@ -546,4 +1402,16 @@ static string CreateIsolatedTestDirectory(string purpose)
     var directory = Path.Combine(root, purpose + "-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
     return directory;
+}
+
+sealed class UiTreeFixtureNode
+{
+    public List<UiTreeFixtureNode> Children { get; } = [];
+}
+
+sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+{
+    private DateTimeOffset current = now;
+    public override DateTimeOffset GetUtcNow() => current;
+    public void Advance(TimeSpan duration) => current += duration;
 }

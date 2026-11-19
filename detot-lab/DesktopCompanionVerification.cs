@@ -55,6 +55,25 @@ public static partial class DesktopCompanionVerification
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
         => EvaluateWorkspace(expectedWorkspace, true, windowTitle, rootTreeLabels, accessiblePaths).Verified;
 
+    // This consumes Shell.LocationURL: a committed location bound to the native Explorer HWND,
+    // not an editable address/search control which may contain a draft the user has not opened.
+    public static bool ExplorerWorkspaceMatches(string? expectedWorkspace, string? committedLocation)
+    {
+        if (string.IsNullOrWhiteSpace(expectedWorkspace) || string.IsNullOrWhiteSpace(committedLocation)) return false;
+        string expected;
+        try { expected = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
+        catch (ArgumentException) { return false; }
+        var path = committedLocation.Trim();
+        if (Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
+            path = Uri.UnescapeDataString(uri.LocalPath);
+        try
+        {
+            return string.Equals(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                expected, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException) { return false; }
+    }
+
     public static WorkspaceEvidence EvaluateWorkspace(string expectedWorkspace, bool windowFound, string? windowTitle,
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
     {

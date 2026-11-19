@@ -7,9 +7,18 @@ public static class DesktopCompanionProtocol
 {
     private static readonly HashSet<string> Actions = new(StringComparer.Ordinal)
     {
-        "observe-applications", "open-workspace", "open-edge", "open-github",
-        "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests"
+        "observe-applications", "observe-workspace", "observe-settings", "open-workspace", "open-edge", "open-github",
+        "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
+        "observe-desktop-ui", "activate-window", "click-element", "confirm-click-element", "double-click-element",
+        "select-element", "type-text", "scroll-element", "press-key", "open-settings",
+        "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader",
+        "open-notepad", "open-calculator", "open-paint",
+        "open-workspace-item", "expand-element", "collapse-element"
     };
+    private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
+        { "activate-window", "click-element", "confirm-click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key", "expand-element", "collapse-element" };
+    private static readonly HashSet<string> NavigationKeys = new(StringComparer.Ordinal)
+        { "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" };
 
     public static string PipeNameForCurrentUser()
     {
@@ -19,6 +28,14 @@ public static class DesktopCompanionProtocol
     }
 
     public static bool IsAllowedAction(string? action) => action is not null && Actions.Contains(action);
+
+    public static string SerializeResponse(string requestId, object result)
+    {
+        var response = JsonSerializer.Serialize(new { requestId, result });
+        return response.Length <= 30 * 1024
+            ? response
+            : JsonSerializer.Serialize(new { requestId, result = new { error = "response_too_large" } });
+    }
 
     public static async Task<string?> ReadBoundedLineAsync(StreamReader reader, int maximumCharacters,
         CancellationToken cancellationToken = default)
@@ -39,11 +56,64 @@ public static class DesktopCompanionProtocol
         }
     }
 
-    public static string SerializeRequest(string? action, string requestId)
+    public static string SerializeRequest(string? action, string requestId, string? targetId = null,
+        string? value = null, string? direction = null, string? expectedName = null,
+        string? expectedControlType = null)
     {
         if (!IsAllowedAction(action)) throw new ArgumentException("Desktop action is not allowed.", nameof(action));
         if (!Guid.TryParseExact(requestId, "N", out _)) throw new ArgumentException("Invalid request id.", nameof(requestId));
-        return JsonSerializer.Serialize(new { action = action!, requestId });
+        if (!IsValidArguments(action!, targetId, value, direction, expectedName, expectedControlType))
+            throw new ArgumentException("Desktop action arguments are invalid.", nameof(targetId));
+        var request = new Dictionary<string, string?> { ["action"] = action!, ["requestId"] = requestId };
+        if (targetId is not null) request["targetId"] = targetId;
+        if (value is not null) request["value"] = value;
+        if (direction is not null) request["direction"] = direction;
+        if (expectedName is not null) request["expectedName"] = expectedName;
+        if (expectedControlType is not null) request["expectedControlType"] = expectedControlType;
+        var serialized = JsonSerializer.Serialize(request);
+        if (serialized.Length > 4096) throw new ArgumentException("Desktop request exceeded its protocol limit.", nameof(value));
+        return serialized;
+    }
+
+    public static bool IsValidArguments(string action, string? targetId, string? value, string? direction,
+        string? expectedName = null, string? expectedControlType = null)
+    {
+        if ((expectedName is null) != (expectedControlType is null)) return false;
+        if (action is "activate-window" or "select-element" or "expand-element" or "collapse-element" or "click-element" or "confirm-click-element" or "type-text" or "scroll-element")
+        {
+            if (expectedName is null || expectedControlType is null) return false;
+        }
+        if (expectedName is not null && (expectedName.Length is 0 or > 96 || expectedName.Any(char.IsControl) ||
+            expectedControlType is not ("Window" or "TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Button" or "Edit" or "Document") ||
+            (action switch
+            {
+                "activate-window" => expectedControlType != "Window",
+                "select-element" => expectedControlType is not ("TabItem" or "ListItem" or "TreeItem"),
+                "expand-element" or "collapse-element" => expectedControlType != "TreeItem",
+                "click-element" => expectedControlType != "Hyperlink",
+                "confirm-click-element" => expectedControlType != "Button",
+                "type-text" => expectedControlType != "Edit",
+                "scroll-element" => expectedControlType != "Document",
+                _ => true
+            }))) return false;
+        if (TargetActions.Contains(action) && (targetId is null || !Guid.TryParseExact(targetId, "N", out _))) return false;
+        if (!TargetActions.Contains(action) && targetId is not null) return false;
+        if (action == "type-text")
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 512 || value.Contains('\r') || value.Contains('\n') || value.Contains('\0') || direction is not null)
+                return false;
+        }
+        else if (action == "press-key")
+        {
+            if (value is null || !NavigationKeys.Contains(value) || direction is not null) return false;
+        }
+        else if (action == "open-workspace-item")
+        {
+            if (value is null || !DesktopOperator.IsSafeWorkspaceRelativePath(value) || direction is not null) return false;
+        }
+        else if (value is not null) return false;
+        if (action == "scroll-element") return direction is "up" or "down";
+        return direction is null;
     }
 
     public static bool TryParseRequest(string? json, out Request? request)
@@ -54,17 +124,37 @@ public static class DesktopCompanionProtocol
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 2 ||
+            JsonProperty[] properties = root.ValueKind == JsonValueKind.Object
+                ? root.EnumerateObject().ToArray() : Array.Empty<JsonProperty>();
+            if (root.ValueKind != JsonValueKind.Object || properties.Any(p => p.Name is not ("action" or "requestId" or "targetId" or "value" or "direction" or "expectedName" or "expectedControlType")) ||
+                properties.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length ||
                 !root.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String ||
                 !root.TryGetProperty("requestId", out var id) || id.ValueKind != JsonValueKind.String ||
                 !IsAllowedAction(action.GetString()) || !Guid.TryParseExact(id.GetString(), "N", out _)) return false;
-            request = new Request(action.GetString()!, id.GetString()!);
+            var targetId = ReadOptionalString(root, "targetId");
+            var value = ReadOptionalString(root, "value");
+            var direction = ReadOptionalString(root, "direction");
+            var expectedName = ReadOptionalString(root, "expectedName");
+            var expectedControlType = ReadOptionalString(root, "expectedControlType");
+            if (targetId == InvalidOptionalString || value == InvalidOptionalString || direction == InvalidOptionalString ||
+                expectedName == InvalidOptionalString || expectedControlType == InvalidOptionalString ||
+                !IsValidArguments(action.GetString()!, targetId, value, direction, expectedName, expectedControlType)) return false;
+            request = new Request(action.GetString()!, id.GetString()!, targetId, value, direction, expectedName, expectedControlType);
             return true;
         }
         catch (JsonException) { return false; }
     }
 
-    public sealed record Request(string Action, string RequestId);
+    private const string InvalidOptionalString = "\0invalid";
+    private static string? ReadOptionalString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value)) return null;
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : InvalidOptionalString;
+    }
+
+    public sealed record Request(string Action, string RequestId, string? TargetId = null,
+        string? Value = null, string? Direction = null, string? ExpectedName = null,
+        string? ExpectedControlType = null);
 }
 
 public sealed record DesktopGithubCheck(string Name, string? Status, string? Conclusion);
@@ -108,6 +198,11 @@ public sealed class DesktopCompanionClient
     public DesktopCompanionClient(string? pipeName = null) => this.pipeName = pipeName ?? DesktopCompanionProtocol.PipeNameForCurrentUser();
 
     public async Task<JsonElement> ExecuteAsync(string action, CancellationToken cancellationToken = default)
+        => await ExecuteAsync(action, null, null, null, cancellationToken);
+
+    public async Task<JsonElement> ExecuteAsync(string action, string? targetId, string? value = null,
+        string? direction = null, CancellationToken cancellationToken = default, string? expectedName = null,
+        string? expectedControlType = null)
     {
         if (!DesktopCompanionProtocol.IsAllowedAction(action))
             return JsonSerializer.SerializeToElement(new { error = "action_not_allowed" });
@@ -120,7 +215,8 @@ public sealed class DesktopCompanionClient
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 1024, leaveOpen: true);
             await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
             var requestId = Guid.NewGuid().ToString("N");
-            await writer.WriteLineAsync(DesktopCompanionProtocol.SerializeRequest(action, requestId).AsMemory(), timeout.Token);
+            await writer.WriteLineAsync(DesktopCompanionProtocol.SerializeRequest(action, requestId,
+                targetId, value, direction, expectedName, expectedControlType).AsMemory(), timeout.Token);
             var responseLine = await DesktopCompanionProtocol.ReadBoundedLineAsync(reader, 32 * 1024, timeout.Token);
             if (responseLine is null) return Error("companion_protocol_error");
             using var document = JsonDocument.Parse(responseLine);
@@ -133,6 +229,7 @@ public sealed class DesktopCompanionClient
         catch (IOException) { return Error("companion_unavailable"); }
         catch (JsonException) { return Error("companion_protocol_error"); }
         catch (UnauthorizedAccessException) { return Error("companion_unauthorized"); }
+        catch (ArgumentException) { return Error("invalid_action_arguments"); }
     }
 
     private static JsonElement Error(string error) => JsonSerializer.SerializeToElement(new { error });
@@ -183,19 +280,21 @@ public sealed class DesktopCompanionPipeServer(string pipeName, int requestDeadl
             }
 
             action = execute(request, deadline.Token);
-            while (!action.IsCompleted && !deadline.IsCancellationRequested)
+            using var disconnectMonitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
+            var disconnectMonitor = MonitorClientDisconnectAsync(pipe, deadline, disconnectMonitorCancellation.Token);
+            var completed = await Task.WhenAny(action, disconnectMonitor);
+            if (completed == disconnectMonitor)
             {
-                await Task.Delay(100, deadline.Token);
-                if (!pipe.IsConnected)
-                {
-                    deadline.Cancel();
-                    break;
-                }
+                await disconnectMonitor;
+                return;
             }
+            disconnectMonitorCancellation.Cancel();
+            try { await disconnectMonitor; }
+            catch (OperationCanceledException) when (disconnectMonitorCancellation.IsCancellationRequested) { }
             var result = await action;
             if (pipe.IsConnected && !deadline.IsCancellationRequested)
                 await TryWriteResponseAsync(pipe, writer,
-                    JsonSerializer.Serialize(new { requestId = request.RequestId, result }), deadline.Token);
+                    DesktopCompanionProtocol.SerializeResponse(request.RequestId, result), deadline.Token);
         }
         catch (OperationCanceledException)
         {
@@ -217,5 +316,19 @@ public sealed class DesktopCompanionPipeServer(string pipeName, int requestDeadl
     {
         if (!pipe.IsConnected) return;
         await writer.WriteLineAsync(response.AsMemory(), cancellationToken);
+    }
+
+    private static async Task MonitorClientDisconnectAsync(NamedPipeServerStream pipe, CancellationTokenSource deadline,
+        CancellationToken monitorCancellationToken)
+    {
+        try
+        {
+            var probe = new byte[1];
+            _ = await pipe.ReadAsync(probe.AsMemory(), monitorCancellationToken);
+            deadline.Cancel();
+        }
+        catch (OperationCanceledException) when (monitorCancellationToken.IsCancellationRequested) { }
+        catch (IOException) { deadline.Cancel(); }
+        catch (ObjectDisposedException) { deadline.Cancel(); }
     }
 }
