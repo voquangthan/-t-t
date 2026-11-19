@@ -105,6 +105,8 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
 
 public static class ComputerUseTaskAuthorization
 {
+    private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled;
+
     private static readonly Regex ExplicitTwoStepRequest = new(
         @"^\s*(?<first>[^\r\n]{1,256}?)\s+(?:rồi|sau\s+đó|then)\s+(?<second>[^\r\n]{1,384}?)\s*[.!?]*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
