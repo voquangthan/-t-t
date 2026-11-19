@@ -149,7 +149,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             "observe-workspace" => ObserveWorkspaceExplorer(),
             "observe-settings" => ObserveReadOnlyApplication("SystemSettings", "Windows Settings"),
             "observe-desktop-ui" => ObserveDesktopUi(),
-            "activate-window" or "click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key" or "expand-element" or "collapse-element"
+            "activate-window" or "click-element" or "confirm-click-element" or "double-click-element" or "select-element" or "type-text" or "scroll-element" or "press-key" or "expand-element" or "collapse-element"
                 => InteractWithUi(request),
             "open-workspace" => OpenWorkspace(),
             "open-workspace-item" => OpenWorkspaceItem(request.Value!),
@@ -312,7 +312,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             : GetAllowedUiActions(target.Element, currentControlType, currentlyEnabled,
                 currentlyOffscreen, passwordKnown ? isPassword : true,
                 IsSafeSelectionContext(target.Element, currentControlType));
-        if (!freshAllowedActions.Contains(request.Action, StringComparer.Ordinal) ||
+        var explicitlyApprovedButtonClick = request.Action == "confirm-click-element" &&
+            currentControlType == "Button" && request.ExpectedControlType == "Button";
+        if ((!freshAllowedActions.Contains(request.Action, StringComparer.Ordinal) && !explicitlyApprovedButtonClick) ||
             (request.Action == "press-key" && !ComputerUsePolicy.CanPressKeyOn(currentControlType, request.Value)))
             return new { succeeded = false,
                 status = IsApprovalRequired(currentControlType, request.Action, request.Value,
@@ -373,6 +375,13 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             case "click-element":
                 target.Element.Click();
                 break;
+            case "confirm-click-element":
+                if (SafeControlType(target.Element) != "Button")
+                    return new { succeeded = false, status = "target_stale", verification = "not_run" };
+                target.Element.Click();
+                if (request.TargetId is not null) uiTargets.Remove(request.TargetId);
+                return new { succeeded = true, status = "click_sent_unverified", verification = "reobserve_required",
+                    targetInvalidated = true };
             case "double-click-element":
                 return new { succeeded = false, status = "approval_required", verification = "not_run" };
             case "type-text":

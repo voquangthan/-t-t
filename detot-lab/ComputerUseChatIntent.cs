@@ -65,6 +65,8 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
         if (!AllowedOperations.Contains(action.Operation, StringComparer.Ordinal)) return false;
         if (action.Operation == "open_application" && action.Application != Application) return false;
         if (action.Operation != "open_application" && action.Application is not null) return false;
+        if (action.Operation is "activate_window" or "click" or "select_tab" or "select" or "expand" or "collapse" &&
+            (action.Value is not null || action.Direction is not null)) return false;
         if ((action.Operation is "open_workspace_item" or "read_workspace_item") && action.Value != RequestedValue) return false;
         if (action.Operation == "type_text" && action.Value != RequestedValue) return false;
         if (action.Operation == "scroll" && action.Direction != RequestedValue) return false;
@@ -87,6 +89,7 @@ public static class ComputerUseTaskAuthorization
         ("scroll", "Document", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:cuộn|scroll)\s+(?<direction>lên|xuống|up|down)\s+(?:trong|in)\s+(?:tài\s+liệu|document)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("expand", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở\s+rộng|expand)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("collapse", "TreeItem", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:thu\s+gọn|collapse)\s+(?:mục|item|thư\s+mục|folder)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
+        ("click", "Button", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:bấm|nhấn|click)\s+(?:vào\s+)?(?:nút|button)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled)),
         ("click", "Hyperlink", new(@"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:bấm|nhấn|click)\s+(?:vào\s+)?(?:link|liên\s+kết)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled))
     ];
 
@@ -153,7 +156,7 @@ public static class ComputerUseTaskAuthorization
                 ? match.Groups["direction"].Value.Equals("lên", StringComparison.OrdinalIgnoreCase) ||
                   match.Groups["direction"].Value.Equals("up", StringComparison.OrdinalIgnoreCase) ? "up" : "down"
                 : null;
-            return label.Length is > 0 and <= 96
+            return label.Length is > 0 and <= 96 && !(operation == "click" && IsCompoundClickRequest(label))
                 ? new("named-ui-" + operation, ["observe", operation], RequestedValue: direction,
                     TargetLabel: label, TargetControlType: controlType)
                 : null;
@@ -176,6 +179,10 @@ public static class ComputerUseTaskAuthorization
         return new(intent, operations, application);
     }
 
+    private static bool IsCompoundClickRequest(string label) => Regex.IsMatch(label,
+        @"\b(?:rồi|sau\s+đó|tiếp\s+theo|then|and\s+then)\b|\b(?:và|and)\s+(?:xóa|gửi|đóng|lưu|áp\s+dụng|delete|send|close|save|submit|apply|remove)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     public static bool HasUsableObservation(string? status, bool hasTarget) => status switch
     {
         "available" or "partial" => hasTarget,
@@ -187,7 +194,8 @@ public static class ComputerUseTaskAuthorization
         status != "approval_required" && succeeded && verification == "verified";
 }
 
-public sealed record ComputerUseObservedTarget(string ControlType, string Name, HashSet<string> AllowedActions);
+public sealed record ComputerUseObservedTarget(string ControlType, string Name, HashSet<string> AllowedActions,
+    string? WindowTitle = null, string? Process = null);
 
 public sealed record ComputerUseObservationSelection(string Status, JsonElement[] Elements, string[] WindowIds,
     bool Truncated);
@@ -224,9 +232,10 @@ public static class ComputerUseObservationFilter
             if (sourceTruncated || sourcePartial || controls.Length > CompanionElementLimit)
                 return new("observation_truncated", [], [], true);
             var requiredAction = RequiredObservedAction(scope.AllowedOperations.FirstOrDefault(operation => operation != "observe") ?? "");
+            var operation = scope.AllowedOperations.FirstOrDefault(value => value != "observe") ?? "";
             var matches = controls.Where(element => !IsTrue(element, "isPassword") && !IsTrue(element, "nameTruncated") &&
                     scope.MatchesTarget(Read(element, "controlType"), Read(element, "name")) &&
-                    HasAction(element, requiredAction))
+                    (HasAction(element, requiredAction) || IsExplicitButtonApproval(element, scope, operation, requiredAction)))
                 .ToArray();
             if (matches.Length == 0) return new("target_not_found", [], [], false);
             if (matches.Length != 1) return new("target_ambiguous", [], [], false);
@@ -254,6 +263,12 @@ public static class ComputerUseObservationFilter
         element.TryGetProperty("allowedActions", out var actions) && actions.ValueKind == JsonValueKind.Array &&
         actions.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String && item.GetString() == action);
 
+    private static bool IsExplicitButtonApproval(JsonElement element, ComputerUseTaskScope scope,
+        string operation, string action) => scope.TargetControlType == "Button" && operation == "click" &&
+        action == "click-element" && Read(element, "controlType") == "Button" &&
+        element.TryGetProperty("approvalRequiredActions", out var actions) && actions.ValueKind == JsonValueKind.Array &&
+        actions.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String && item.GetString() == action);
+
     private static bool IsTrue(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.True;
 
@@ -263,7 +278,7 @@ public static class ComputerUseObservationFilter
 
 public sealed class ComputerUseTurnState
 {
-    private readonly Dictionary<string, HashSet<string>> observedTargets = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ComputerUseObservedTarget> observedTargets = new(StringComparer.Ordinal);
     private bool workspaceItemRead;
     public bool RequiresObservation { get; private set; } = true;
     public bool Stopped { get; private set; }
@@ -284,7 +299,7 @@ public sealed class ComputerUseTurnState
         }
         observedTargets.Clear();
         foreach (var (id, target) in scopedTargets)
-            observedTargets[id] = new(target.AllowedActions, StringComparer.Ordinal);
+            observedTargets[id] = target with { AllowedActions = new(target.AllowedActions, StringComparer.Ordinal) };
         RequiresObservation = false;
         return true;
     }
@@ -297,8 +312,19 @@ public sealed class ComputerUseTurnState
         if (action.Operation == "read_workspace_item") return !workspaceItemRead;
         if (RequiresObservation) return false;
         if (action.TargetId is null) return true;
-        return observedTargets.TryGetValue(action.TargetId, out var actions) &&
-            actions.Contains(RequiredObservedAction(action.Operation));
+        return observedTargets.TryGetValue(action.TargetId, out var target) &&
+            target.AllowedActions.Contains(RequiredObservedAction(action.Operation));
+    }
+
+    public bool TryGetObservedTarget(string? targetId, out ComputerUseObservedTarget? target)
+    {
+        if (targetId is not null && observedTargets.TryGetValue(targetId, out var found))
+        {
+            target = found;
+            return true;
+        }
+        target = null;
+        return false;
     }
 
     public bool RecordAction(string? status, bool succeeded, string? verification, string? operation = null)

@@ -9,13 +9,13 @@ public static class DesktopCompanionProtocol
     {
         "observe-applications", "observe-workspace", "observe-settings", "open-workspace", "open-edge", "open-github",
         "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
-        "observe-desktop-ui", "activate-window", "click-element", "double-click-element",
+        "observe-desktop-ui", "activate-window", "click-element", "confirm-click-element", "double-click-element",
         "select-element", "type-text", "scroll-element", "press-key", "open-settings",
         "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader",
         "open-workspace-item", "expand-element", "collapse-element"
     };
     private static readonly HashSet<string> TargetActions = new(StringComparer.Ordinal)
-        { "activate-window", "click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key", "expand-element", "collapse-element" };
+        { "activate-window", "click-element", "confirm-click-element", "double-click-element", "select-element", "type-text", "scroll-element", "press-key", "expand-element", "collapse-element" };
     private static readonly HashSet<string> NavigationKeys = new(StringComparer.Ordinal)
         { "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" };
 
@@ -78,18 +78,19 @@ public static class DesktopCompanionProtocol
         string? expectedName = null, string? expectedControlType = null)
     {
         if ((expectedName is null) != (expectedControlType is null)) return false;
-        if (action is "activate-window" or "select-element" or "expand-element" or "collapse-element" or "click-element" or "type-text" or "scroll-element")
+        if (action is "activate-window" or "select-element" or "expand-element" or "collapse-element" or "click-element" or "confirm-click-element" or "type-text" or "scroll-element")
         {
             if (expectedName is null || expectedControlType is null) return false;
         }
         if (expectedName is not null && (expectedName.Length is 0 or > 96 || expectedName.Any(char.IsControl) ||
-            expectedControlType is not ("Window" or "TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Edit" or "Document") ||
+            expectedControlType is not ("Window" or "TabItem" or "ListItem" or "TreeItem" or "Hyperlink" or "Button" or "Edit" or "Document") ||
             (action switch
             {
                 "activate-window" => expectedControlType != "Window",
                 "select-element" => expectedControlType is not ("TabItem" or "ListItem" or "TreeItem"),
                 "expand-element" or "collapse-element" => expectedControlType != "TreeItem",
                 "click-element" => expectedControlType != "Hyperlink",
+                "confirm-click-element" => expectedControlType != "Button",
                 "type-text" => expectedControlType != "Edit",
                 "scroll-element" => expectedControlType != "Document",
                 _ => true

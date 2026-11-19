@@ -2,10 +2,12 @@
 
 ## Current Universal Windows Computer Use status (19/11/2026)
 
-- PR #4 is open on `codex/universal-windows-ui`, current HEAD `faf0a7b347ad9b0dd557804d7763ad10900a2f9e`. CI run `44445969890` passed. A matching REVISE comment is visible for this SHA; it is posted under the repository owner account via ChatGPT Codex Connector, so independent reviewer identity is not established.
-- The review found ZIP entry paths bypass workspace read exclusions. The current local fix rejects `.zip` in `ReadWorkspaceFileAsync` before opening it; general upload reading is unchanged. A regression fixture contains blocked state/log/backup/credential entries plus an allowed guide entry.
-- `git diff --check` passes. Local .NET SDK is unavailable, so local build/operator tests could not run. Push CI and review of a new SHA remain pending. No live document content was sent externally; no Windows/Chat E2E is claimed.
-- A separate untracked root `AGENTS.md` is retained from repository cleanup and is outside the PR fix; do not include it in the PR commit. Keep autonomous code execution hard-blocked and do not merge.
+- PR #4 is open on `codex/universal-windows-ui`, base `codex/computer-use-vscode-fix`. Edge verified remote HEAD `6dfd7170ca2a6160d693fdd27717ece4948f7625`, matching local HEAD at the start of this work. `Computer Use CI` passed for that SHA (run `44447394563`). A `PASS` comment also matches `6dfd717`; it was posted by repository owner `voquangthan` via ChatGPT Codex Connector, so it is Work feedback but not independent reviewer identity evidence.
+- Current uncommitted work adds exact-label Button click intent and a one-use owner-bound approval flow (60-second expiry, replay protection, cancel, consent recheck); Companion reports the click as unverified and invalidates the target. Generic `/api/desktop/actions` cannot invoke the special action. `AGENTS.md` is unrelated and must remain outside the PR.
+- Added regression coverage for compound/mismatched requests, target/window context, approval owner binding, expiry, replay and cancellation. The direct click parser rejects compound action phrases and scope rejects extra action fields.
+- Verification: full Desktop Operator + Adapter suite **170/170 PASS** when run in normal Windows user context. The restricted process context returned `companion_unauthorized`; the same full suite passed after rerunning with reviewed host access. Frontend `npm test` **7/7 PASS**; TypeScript/Vite build passed to ignored `.local` output; DesktopCompanion build passed. `git diff --check` passes. NuGet vulnerability metadata could not be fetched offline (NU1900 warning); Vite reports existing inline script/chunk-size advisories.
+- No live Chat/UI click E2E was run; do not claim desktop action verified. New uncommitted changes have not yet been pushed or reviewed, so their PR/CI/Work status is **PENDING**. Keep Autonomous Controller execution hard-blocked and do not merge.
+- Next: finish scoped code review, run final regression after any fixes, update this checkpoint, commit/push only Computer Use changes to the existing PR #4 branch, then verify CI and Work feedback against the new exact HEAD SHA. Keep untracked `AGENTS.md` out of that commit.
 
 ## Universal Windows Computer Use — scoped workspace document read (19/11/2026)
 

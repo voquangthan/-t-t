@@ -273,6 +273,8 @@ var scopedSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-e
     uiTargetId, expectedName: "Lịch", expectedControlType: "TabItem");
 var scopedHyperlinkRequest = DesktopCompanionProtocol.SerializeRequest("click-element", Guid.NewGuid().ToString("N"),
     uiTargetId, expectedName: "Tài liệu hướng dẫn", expectedControlType: "Hyperlink");
+var scopedApprovedButtonRequest = DesktopCompanionProtocol.SerializeRequest("confirm-click-element", Guid.NewGuid().ToString("N"),
+    uiTargetId, expectedName: "Lưu", expectedControlType: "Button");
 var scopedTextRequest = DesktopCompanionProtocol.SerializeRequest("type-text", Guid.NewGuid().ToString("N"),
     uiTargetId, "tìm kiếm tài liệu", expectedName: "Tìm kiếm", expectedControlType: "Edit");
 var scopedTreeSelectionRequest = DesktopCompanionProtocol.SerializeRequest("select-element", Guid.NewGuid().ToString("N"),
@@ -281,10 +283,68 @@ var scopedWindowRequest = DesktopCompanionProtocol.SerializeRequest("activate-wi
     uiTargetId, expectedName: "Visual Studio Code", expectedControlType: "Window");
 var scopedScrollRequest = DesktopCompanionProtocol.SerializeRequest("scroll-element", Guid.NewGuid().ToString("N"),
     uiTargetId, direction: "down", expectedName: "Hướng dẫn", expectedControlType: "Document");
+var clickButtonScope = ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu");
+var compoundButtonScope = ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu rồi xóa file");
+var buttonTargetId = Guid.NewGuid().ToString("N");
+using (var buttonObservation = JsonDocument.Parse(JsonSerializer.Serialize(new
+{
+    observationStatus = "available", truncated = false,
+    elements = new[] { new
+    {
+        elementId = buttonTargetId, windowId = "0123456789abcdef0123456789abcdef", controlType = "Button",
+        name = "Lưu", nameTruncated = false, isPassword = false, allowedActions = Array.Empty<string>(),
+        approvalRequiredActions = new[] { "click-element" }
+    } }
+})))
+{
+    var selectedButton = ComputerUseObservationFilter.Select(buttonObservation.RootElement, clickButtonScope!);
+    var observedButton = new ComputerUseObservedTarget("Button", "Lưu", new(StringComparer.Ordinal) { "click-element" },
+        "Tài liệu", "WINWORD");
+    var buttonTurn = new ComputerUseTurnState();
+    Check(clickButtonScope is { TargetControlType: "Button", TargetLabel: "Lưu" } && compoundButtonScope is null &&
+          selectedButton.Status == "ok" && selectedButton.Elements.Length == 1,
+        "button click request must be exact, non-compound, and target one observed approval-gated button");
+    var buttonObservationRecorded = clickButtonScope is not null && buttonTurn.RecordObservation("available",
+        new Dictionary<string, ComputerUseObservedTarget> { [buttonTargetId] = observedButton }, clickButtonScope);
+    var buttonTargetRetrieved = buttonTurn.TryGetObservedTarget(buttonTargetId, out var scopedButton);
+    Check(buttonObservationRecorded && buttonTargetRetrieved &&
+          scopedButton is { ControlType: "Button", Name: "Lưu", WindowTitle: "Tài liệu", Process: "WINWORD" },
+        "approved target state retains exact control, label, application, and window evidence");
+    Check(clickButtonScope is not null && buttonTurn.CanAct(new("click", TargetId: buttonTargetId), clickButtonScope) &&
+          !buttonTurn.CanAct(new("click", TargetId: Guid.NewGuid().ToString("N")), clickButtonScope),
+        "click action accepts only the observed target bound to the current user request");
+}
+
+var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-11-19T00:00:00Z"));
+var approvalStore = new PendingComputerClickApprovalStore(clock);
+var firstApproval = approvalStore.Create("user-a", Guid.NewGuid(), buttonTargetId, "Lưu", "Tài liệu", "WINWORD");
+Check(firstApproval is not null && PendingComputerClickApprovalStore.IsValidId(firstApproval.ApprovalId) &&
+      firstApproval.ExpiresAt == clock.GetUtcNow() + PendingComputerClickApprovalStore.Lifetime &&
+      !approvalStore.TryConsume(firstApproval.ApprovalId, "user-b", out _, out var mismatchStatus) && mismatchStatus == "owner_mismatch" &&
+      approvalStore.TryConsume(firstApproval.ApprovalId, "user-a", out var consumedApproval, out var consumeStatus) &&
+      consumedApproval == firstApproval && consumeStatus == "consumed" &&
+      !approvalStore.TryConsume(firstApproval.ApprovalId, "user-a", out _, out var replayStatus) && replayStatus == "not_found",
+    "click approvals are owner-bound, survive a wrong-owner attempt, and can be consumed only once");
+var expiringApproval = approvalStore.Create("user-a", null, buttonTargetId, "Lưu");
+clock.Advance(PendingComputerClickApprovalStore.Lifetime);
+Check(expiringApproval is not null &&
+      !approvalStore.TryConsume(expiringApproval.ApprovalId, "user-a", out _, out var expiredStatus) && expiredStatus == "expired" &&
+      approvalStore.Create("user-a", null, buttonTargetId, "bad\nlabel") is null &&
+      approvalStore.Create("user-a", null, "../target", "Lưu") is null,
+    "click approvals expire and reject malformed targets or labels");
+var revocableApproval = approvalStore.Create("user-a", null, buttonTargetId, "Lưu");
+Check(revocableApproval is not null && !approvalStore.Revoke(revocableApproval.ApprovalId, "user-b") &&
+      approvalStore.Revoke(revocableApproval.ApprovalId, "user-a") &&
+      !approvalStore.TryConsume(revocableApproval.ApprovalId, "user-a", out _, out _),
+    "only the owning user can cancel a pending approval and canceled approval cannot be replayed");
 Check(DesktopCompanionProtocol.TryParseRequest(scopedSelectionRequest, out var parsedScopedSelection) &&
       parsedScopedSelection is { ExpectedName: "Lịch", ExpectedControlType: "TabItem" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedHyperlinkRequest, out var parsedScopedHyperlink) &&
       parsedScopedHyperlink is { ExpectedName: "Tài liệu hướng dẫn", ExpectedControlType: "Hyperlink" } &&
+      DesktopCompanionProtocol.TryParseRequest(scopedApprovedButtonRequest, out var parsedApprovedButton) &&
+      parsedApprovedButton is { Action: "confirm-click-element", ExpectedName: "Lưu", ExpectedControlType: "Button" } &&
+      !ComputerUsePolicy.CanInteract("confirm-click-element") && !ComputerUsePolicy.CanNavigate("confirm-click-element") &&
+      !DesktopCompanionProtocol.IsValidArguments("confirm-click-element", uiTargetId, null, null, "Lưu", "Hyperlink") &&
       DesktopCompanionProtocol.TryParseRequest(scopedTextRequest, out var parsedScopedText) &&
       parsedScopedText is { ExpectedName: "Tìm kiếm", ExpectedControlType: "Edit", Value: "tìm kiếm tài liệu" } &&
       DesktopCompanionProtocol.TryParseRequest(scopedTreeSelectionRequest, out var parsedScopedTreeSelection) &&
@@ -529,6 +589,12 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra tài khoản GitHub 
     "a direct GitHub account inspection request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-github-pull-requests",
     "a direct PR and CI inspection request is recognized");
+var explicitButtonScope = ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu");
+Check(explicitButtonScope is { TargetControlType: "Button", TargetLabel: "Lưu" } &&
+      explicitButtonScope.Allows(new("observe")) && explicitButtonScope.Allows(new("click", TargetId: uiTargetId)) &&
+      !explicitButtonScope.Allows(new("click", TargetId: uiTargetId, Value: "Submit")) &&
+      ComputerUseTaskAuthorization.FromCurrentMessage("Bấm nút Lưu rồi gửi") is null,
+    "button approval scope binds only an explicit exact label and rejects compound requests");
 Check(ComputerUseChatIntent.DetectDirectRequest("Xem ứng dụng đang mở") == "read-approved-applications",
     "a direct approved-app observation request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra File Explorer của workspace") == "read-workspace-explorer" &&
@@ -614,9 +680,9 @@ using (var readWorkspaceAction = JsonDocument.Parse("{\"operation\":\"read_works
           new ComputerUseTurnState().CanAct(readAction!, readDocumentScope),
         "document reads require their distinct file consent and tool invocation, while UI actions still require both UI grants");
     var readTurn = new ComputerUseTurnState();
-    Check(readTurn.CanAct(readAction!, readDocumentScope) &&
+    Check(readTurn.CanAct(readAction!, readDocumentScope!) &&
           readTurn.RecordAction("verified", true, "verified", "read_workspace_item") &&
-          !readTurn.CanAct(readAction!, readDocumentScope) && readTurn.CanAcceptModelCompletion,
+          !readTurn.CanAct(readAction!, readDocumentScope!) && readTurn.CanAcceptModelCompletion,
         "one document task reads its exact file at most once and may then return a model answer");
 }
 Check(DesktopOperator.IsSafeWorkspaceDocumentPath("docs/guide.pdf") &&
@@ -1112,4 +1178,11 @@ static string CreateIsolatedTestDirectory(string purpose)
 sealed class UiTreeFixtureNode
 {
     public List<UiTreeFixtureNode> Children { get; } = [];
+}
+
+sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+{
+    private DateTimeOffset current = now;
+    public override DateTimeOffset GetUtcNow() => current;
+    public void Advance(TimeSpan duration) => current += duration;
 }

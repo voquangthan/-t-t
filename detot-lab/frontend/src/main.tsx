@@ -58,6 +58,17 @@ function dailyEventEnd(event: DailyEvent) {
   return event.end?.dateTime ?? (event.end?.date ? `${event.end.date}T23:59:59+07:00` : "");
 }
 type LearningIntent = { topic: string; domains: string[]; exactUrl?: string; collect?: boolean };
+type PendingComputerApproval = {
+  approvalId?: string;
+  conversationId: string;
+  messageId: string;
+  label: string;
+  application?: string;
+  windowTitle?: string;
+  expiresAt: number;
+  status: "pending" | "approving" | "sent" | "unknown" | "cancelled" | "expired";
+  detail?: string;
+};
 function parseLearningIntent(text: string): LearningIntent | null {
   const match = text.trim().match(/^(?:đệ tốt[, ]*)?(tìm và học|học kiến thức từ|học|cập nhật kiến thức|tìm tài liệu)\s+(.+)$/i);
   if (!match) return null;
@@ -133,6 +144,7 @@ function App() {
   });
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
+  const [pendingComputerApproval, setPendingComputerApproval] = useState<PendingComputerApproval>();
   const [attachments, setAttachments] = useState<File[]>([]);
   const [side, setSide] = useState(false);
   const [dark, setDark] = useState(() => remoteWorkspace || localStorage.getItem("detot.theme") !== "light");
@@ -190,6 +202,26 @@ function App() {
     try { localStorage.setItem(storageKey, JSON.stringify(items)); }
     catch { setError("Không thể lưu lịch sử trên trình duyệt này."); }
   }, [items]);
+  useEffect(() => {
+    if (!pendingComputerApproval || pendingComputerApproval.status !== "pending") return;
+    const delay = pendingComputerApproval.expiresAt - Date.now();
+    if (delay <= 0) {
+      const approvalId = pendingComputerApproval.approvalId;
+      setPendingComputerApproval(current => current?.messageId === pendingComputerApproval.messageId
+        ? { ...current, approvalId: undefined, status: "expired", detail: "Đã hết hạn; chưa bấm nút. Gửi yêu cầu mới nếu vẫn cần thao tác." } : current);
+      if (approvalId) void fetch("/api/desktop/cancel-click", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approvalId }) }).catch(() => {});
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      const approvalId = pendingComputerApproval.approvalId;
+      setPendingComputerApproval(current => current?.messageId === pendingComputerApproval.messageId
+        ? { ...current, approvalId: undefined, status: "expired", detail: "Đã hết hạn; chưa bấm nút. Gửi yêu cầu mới nếu vẫn cần thao tác." } : current);
+      if (approvalId) void fetch("/api/desktop/cancel-click", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approvalId }) }).catch(() => {});
+    }, delay);
+    return () => window.clearTimeout(timeout);
+  }, [pendingComputerApproval]);
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     if (!remoteWorkspace) localStorage.setItem("detot.theme", dark ? "dark" : "light");
@@ -341,8 +373,18 @@ function App() {
             eventUrl = candidate.toString();
         } catch { /* Ignore malformed URLs returned by the provider. */ }
       }
-      const assistant: Message = { id: uid(), role: "assistant", text: data.reply + (eventUrl ? `\n\n[Mở sự kiện trong Google Calendar](${eventUrl})` : ""),
-        tool: data.googleCalendarCreated ? "Google Calendar" : data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
+      const assistantId = uid();
+      const approvalId = response.headers.get("X-Detot-Computer-Approval") || undefined;
+      if (approvalId && data.approvalRequired === true) {
+        setPendingComputerApproval({ approvalId, conversationId: target.id, messageId: assistantId,
+          label: typeof data.approvalLabel === "string" ? data.approvalLabel : "nút đã yêu cầu",
+          application: typeof data.approvalApplication === "string" ? data.approvalApplication : undefined,
+          windowTitle: typeof data.approvalWindow === "string" ? data.approvalWindow : undefined,
+          expiresAt: Date.now() + (typeof data.approvalExpiresInSeconds === "number" ? data.approvalExpiresInSeconds : 60) * 1000,
+          status: "pending" });
+      }
+      const assistant: Message = { id: assistantId, role: "assistant", text: data.reply + (eventUrl ? `\n\n[Mở sự kiện trong Google Calendar](${eventUrl})` : ""),
+        tool: data.approvalRequired ? undefined : data.googleCalendarCreated ? "Google Calendar" : data.calendarCreated ? "Đã tạo sự kiện trong lịch thử" : data.toolUsed ? "Công cụ lab đã hoàn tất" : undefined,
         calendarContext: data.calendarContext };
       const completed = { ...target, messages: [...target.messages, assistant] };
       save(completed);
@@ -355,6 +397,36 @@ function App() {
     } finally {
       request.current = null;
       setBusy(false);
+    }
+  }
+
+  async function approveComputerClick(approval: PendingComputerApproval) {
+    if (!approval.approvalId || approval.status !== "pending") return;
+    const approvalId = approval.approvalId;
+    setPendingComputerApproval(current => current?.approvalId === approvalId
+      ? { ...current, approvalId: undefined, status: "approving" } : current);
+    try {
+      const response = await fetch("/api/desktop/approve-click", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approvalId }) });
+      const data = await response.json().catch(() => ({}));
+      setPendingComputerApproval(current => current?.messageId === approval.messageId
+        ? { ...current, status: response.ok && data.status === "click_sent_unverified" ? "sent" : "unknown",
+          detail: typeof data.message === "string" ? data.message : "Kết quả chưa được xác minh. Không tự bấm lại." } : current);
+    } catch {
+      setPendingComputerApproval(current => current?.messageId === approval.messageId
+        ? { ...current, status: "unknown", detail: "Không nhận được xác nhận từ Backend. Không tự bấm lại để tránh thao tác trùng." } : current);
+    }
+  }
+
+  async function cancelComputerClick(approval: PendingComputerApproval) {
+    const approvalId = approval.approvalId;
+    setPendingComputerApproval(current => current?.messageId === approval.messageId
+      ? { ...current, approvalId: undefined, status: "cancelled", detail: "Bạn đã hủy thao tác; chưa bấm nút." } : current);
+    if (approvalId) {
+      try {
+        await fetch("/api/desktop/cancel-click", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approvalId }) });
+      } catch { /* The server token expires shortly and is never persisted in browser storage. */ }
     }
   }
 
@@ -523,6 +595,16 @@ function App() {
             {!conversation?.messages.length&&<div className="welcome"><div className="mark">✦</div><h1>Hôm nay bạn muốn làm gì?</h1><p>Trò chuyện với Đệ Tốt hoặc tạo một sự kiện trong lịch thử.</p></div>}
             {conversation?.messages.map((message,index)=><article key={message.id} className={message.role}><div className="author">{message.role==="user"?"Bạn":"Đệ Tốt"}</div>{message.tool&&<div className="tool">✓ {message.tool}</div>}
               {message.role==="assistant"?<Markdown remarkPlugins={[gfm]} components={{code:Code,img:({alt})=><span>{alt||"[Hình ảnh]"}</span>,a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>}}>{message.text}</Markdown>:<div className="user-text">{message.text}</div>}
+              {pendingComputerApproval?.conversationId===conversation?.id&&pendingComputerApproval.messageId===message.id&&<section className="computer-approval-card" aria-label="Duyệt thao tác máy tính">
+                <div><strong>Chưa bấm nút</strong><p>Đệ Tốt muốn bấm <b>{pendingComputerApproval.label}</b>{pendingComputerApproval.application?` trong ${pendingComputerApproval.application}`:""}{pendingComputerApproval.windowTitle?` · ${pendingComputerApproval.windowTitle}`:""}.</p>
+                  {pendingComputerApproval.status==="pending"&&<small>Phê duyệt này dùng một lần và hết hạn sau 60 giây. Kiểm tra đúng ứng dụng và nút trước khi cho phép.</small>}
+                  {pendingComputerApproval.detail&&<small role="status">{pendingComputerApproval.detail}</small>}
+                  {pendingComputerApproval.status==="sent"&&<small role="status">Đã gửi thao tác bấm; kết quả chưa được xác minh. Hãy quan sát lại trước khi tiếp tục.</small>}
+                  {pendingComputerApproval.status==="unknown"&&<small role="status">Trạng thái chưa rõ. Không tự bấm lại.</small>}
+                  {pendingComputerApproval.status==="expired"&&<small role="status">Phê duyệt đã hết hạn. Chưa có thao tác bấm nào được gửi.</small>}
+                </div>
+                {pendingComputerApproval.status==="pending"&&<div className="computer-approval-actions"><button type="button" onClick={()=>void approveComputerClick(pendingComputerApproval)}>Cho phép bấm một lần</button><button type="button" onClick={()=>void cancelComputerClick(pendingComputerApproval)}>Hủy</button></div>}
+              </section>}
               {message.role==="user"&&<button className="action" disabled={busy} onClick={()=>{const text=window.prompt("Sửa tin nhắn và tạo nhánh mới",message.text)?.trim();if(text&&conversation)void send(text,{...conversation,id:uid(),pinned:false},forkMessages(conversation.messages,index));}}>Sửa và tạo nhánh</button>}
               {message.role==="assistant"&&index===conversation.messages.length-1&&!message.tool&&!message.calendarContext&&<button className="action" disabled={busy} onClick={()=>{const previous=conversation.messages[index-1];if(previous?.role==="user")void send(previous.text,conversation,forkMessages(conversation.messages,index-1));}}>Tạo lại câu trả lời</button>}
             </article>)}
