@@ -57,6 +57,7 @@ public sealed class ConsentPolicy
         new("device_status", "Trạng thái thiết bị", "proactive_analysis", "Phân tích chủ động", "local_only", "Kiểm tra thiết bị cục bộ", "Chưa có bộ quan sát thiết bị; cấp quyền này chưa kích hoạt việc quét máy."),
         new("computer_use", "Điều khiển Windows", "direct_request", "Yêu cầu trực tiếp", "local_only", "Cho phép Đệ Tốt thao tác giao diện", "Cho phép Chat dùng các hành động UI đã giới hạn khi bạn yêu cầu thao tác trên máy. Hành động cần duyệt vẫn bị chặn; không chạy lệnh hoặc mã tùy ý."),
         new("desktop_ui", "Giao diện Windows", "direct_request", "Yêu cầu trực tiếp", "DeepSeek", "Gửi quan sát giao diện cho DeepSeek", "Cho phép gửi tên cửa sổ và nhãn accessibility cần thiết tới DeepSeek trong lượt Computer Use bạn yêu cầu. Không gửi ảnh màn hình, mật khẩu, cookie hoặc token."),
+        new("workspace_files", "Tài liệu workspace", "direct_request", "Yêu cầu trực tiếp", "DeepSeek", "Đọc tài liệu được chỉ định trong Chat", "Cho phép gửi trích đoạn của đúng một tệp bạn chỉ định trong workspace tới DeepSeek. Tệp thông tin xác thực, state, database, log và backup bị chặn."),
     ];
 
     private readonly object gate = new();

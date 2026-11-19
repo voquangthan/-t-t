@@ -434,6 +434,8 @@ Check(cappedChecks.Truncated && cappedChecks.TotalCount == 120 &&
     "GitHub reader marks results incomplete if the API pagination cap is reached");
 
 var testPipeName = $"detot-test-{Guid.NewGuid():N}";
+if (!args.Contains("--skip-local-pipe", StringComparer.Ordinal))
+{
 using (var serverShutdown = new CancellationTokenSource())
 {
     var firstActionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -454,7 +456,14 @@ using (var serverShutdown = new CancellationTokenSource())
     {
         using var clientADeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var clientATask = new DesktopCompanionClient(testPipeName).ExecuteAsync("read-workspace", clientADeadline.Token);
-        await firstActionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try { await firstActionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (TimeoutException error)
+        {
+            var clientStatus = clientATask.IsCompleted
+                ? (await clientATask).ToString()
+                : "still_waiting";
+            throw new TimeoutException($"First pipe action did not start; client={clientStatus}; server={serverTask.Status}.", error);
+        }
         await Task.Delay(100);
         clientADeadline.Cancel();
         var clientACancelled = false;
@@ -482,6 +491,8 @@ using (var serverShutdown = new CancellationTokenSource())
         await serverTask.WaitAsync(TimeSpan.FromSeconds(3));
     }
 }
+}
+else Console.WriteLine("SKIP: local named-pipe disconnect integration was explicitly skipped by the caller.");
 Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:voquangthan"),
     "GCM account selection remains denied without a trusted pending Git transaction");
 Check(!ComputerUsePolicy.CanSelectGitHubAccount("select-github-account:bottom"),
@@ -557,6 +568,7 @@ using (var badTargetAgentAction = JsonDocument.Parse("{\"operation\":\"type_text
 var unrelatedScope = ComputerUseTaskAuthorization.FromCurrentMessage("Hôm nay trời thế nào?");
 var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge đi");
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
+var readDocumentScope = ComputerUseTaskAuthorization.FromCurrentMessage("Tóm tắt tài liệu docs/guide.pdf");
 var selectTabScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn tab Lịch");
 var selectListScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn danh sách Báo cáo tháng");
 var selectTreeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Chọn cây Tài liệu");
@@ -582,6 +594,63 @@ Check(openFileScope is { RequestedValue: "docs/audit.txt" } &&
       !openFileScope.Allows(new("open_workspace_item", Value: "docs/other.txt")) &&
       ComputerUseTaskAuthorization.FromCurrentMessage("Mở file ../private.txt") is null,
     "workspace navigation scope binds the exact safe relative path requested by the current user message");
+using (var readWorkspaceAction = JsonDocument.Parse("{\"operation\":\"read_workspace_item\",\"value\":\"docs/guide.pdf\"}"))
+{
+    var readActionValid = ComputerUseAgentAction.TryParse(readWorkspaceAction.RootElement, out var readAction);
+    Check(readDocumentScope is { Intent: "read-workspace-item", RequestedValue: "docs/guide.pdf" } &&
+          readActionValid && readAction is { Operation: "read_workspace_item", Value: "docs/guide.pdf" } &&
+          readDocumentScope.Allows(readAction!) && !readDocumentScope.Allows(new("read_workspace_item", Value: "docs/other.pdf")) &&
+          ComputerUseTaskAuthorization.ShouldExposeTool(readDocumentScope, interactionConsent: false,
+              observationConsent: false, workspaceFileConsent: true) &&
+          !ComputerUseTaskAuthorization.ShouldExposeTool(readDocumentScope, interactionConsent: true,
+              observationConsent: true, workspaceFileConsent: false) &&
+          !ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: false,
+              observationConsent: true, workspaceFileConsent: true) &&
+          !ComputerUseTaskAuthorization.ShouldExposeTool(openEdgeScope, interactionConsent: true,
+              observationConsent: false, workspaceFileConsent: true) &&
+          ComputerUseTaskAuthorization.RequiresToolInvocation(readDocumentScope) &&
+          !ComputerUseTaskAuthorization.RequiresToolInvocation(openEdgeScope) &&
+          new ComputerUseTurnState().CanAct(readAction!, readDocumentScope),
+        "document reads require their distinct file consent and tool invocation, while UI actions still require both UI grants");
+    var readTurn = new ComputerUseTurnState();
+    Check(readTurn.CanAct(readAction!, readDocumentScope) &&
+          readTurn.RecordAction("verified", true, "verified", "read_workspace_item") &&
+          !readTurn.CanAct(readAction!, readDocumentScope) && readTurn.CanAcceptModelCompletion,
+        "one document task reads its exact file at most once and may then return a model answer");
+}
+Check(DesktopOperator.IsSafeWorkspaceDocumentPath("docs/guide.pdf") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("../private.pdf") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath(".env") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("settings/client-secret.json") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath(".state/memory.sqlite") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("docs/audit.log") &&
+      !DesktopOperator.IsSafeWorkspaceDocumentPath("docs/credential-notes.txt"),
+    "workspace document reads reject traversal, credentials, runtime state, databases, and logs");
+var sanitizedWorkspaceExcerpt = ComputerUsePolicy.RedactWorkspaceExcerpt(
+    "API_KEY=synthetic-secret; Authorization: Bearer synthetic-token\n-----BEGIN PRIVATE KEY-----\nprivate-sentinel");
+Check(!sanitizedWorkspaceExcerpt.Contains("synthetic-secret", StringComparison.Ordinal) &&
+      !sanitizedWorkspaceExcerpt.Contains("synthetic-token", StringComparison.Ordinal) &&
+      !sanitizedWorkspaceExcerpt.Contains("private-sentinel", StringComparison.Ordinal) &&
+      ComputerUsePolicy.RedactWorkspaceExcerpt("GitHub token ghp_12345678901234567890123456789012")
+          .Contains("[REDACTED]", StringComparison.Ordinal) &&
+      !ComputerUsePolicy.RedactWorkspaceExcerpt("<client_secret>xml-secret-sentinel</client_secret>")
+          .Contains("xml-secret-sentinel", StringComparison.Ordinal),
+    "workspace document excerpts redact credential assignments, XML secrets, private key blocks, and recognizable tokens");
+var documentRoot = CreateIsolatedTestDirectory("workspace-document-read");
+var documentPath = Path.Combine(documentRoot, "guide.md");
+try
+{
+    await File.WriteAllTextAsync(documentPath, "Smoke test document.\nLine two.");
+    var document = await new UniversalFileReader().ReadWorkspaceFileAsync(documentRoot, "guide.md", CancellationToken.None);
+    Check(document.Name == "guide.md" && document.Excerpts.Any(item => item.Text.Contains("Smoke test document.", StringComparison.Ordinal)) &&
+          document.Sha256.Length == 64,
+        "the bounded workspace document reader extracts a selected UTF-8 file with content hash and citation");
+}
+finally
+{
+    if (File.Exists(documentPath)) File.Delete(documentPath);
+    if (Directory.Exists(documentRoot)) Directory.Delete(documentRoot);
+}
 Check(selectListScope is { TargetControlType: "ListItem", TargetLabel: "Báo cáo tháng" } &&
       selectListScope.Allows(new("select", TargetId: "0123456789abcdef0123456789abcdef")) &&
       !selectListScope.Allows(new("select_tab", TargetId: "0123456789abcdef0123456789abcdef")) &&
@@ -693,8 +762,10 @@ try
     var agentConsentSnapshot = agentConsent.Get("synthetic-owner");
     Check(agentConsentSnapshot.Options.Any(option => option.Source == "computer_use" && option.Destination == "local_only") &&
           agentConsentSnapshot.Options.Any(option => option.Source == "desktop_ui" && option.Destination == "DeepSeek") &&
+          agentConsentSnapshot.Options.Any(option => option.Source == "workspace_files" && option.Destination == "DeepSeek") &&
           !agentConsent.IsAllowed("synthetic-owner", "computer_use", "direct_request", "local_only") &&
-          !agentConsent.IsAllowed("synthetic-owner", "desktop_ui", "direct_request", "DeepSeek"),
+          !agentConsent.IsAllowed("synthetic-owner", "desktop_ui", "direct_request", "DeepSeek") &&
+          !agentConsent.IsAllowed("synthetic-owner", "workspace_files", "direct_request", "DeepSeek"),
         "agent interaction and external UI observation permissions are explicit and disabled by default");
 }
 finally

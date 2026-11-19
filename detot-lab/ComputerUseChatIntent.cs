@@ -65,10 +65,10 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
         if (!AllowedOperations.Contains(action.Operation, StringComparer.Ordinal)) return false;
         if (action.Operation == "open_application" && action.Application != Application) return false;
         if (action.Operation != "open_application" && action.Application is not null) return false;
-        if (action.Operation == "open_workspace_item" && action.Value != RequestedValue) return false;
+        if ((action.Operation is "open_workspace_item" or "read_workspace_item") && action.Value != RequestedValue) return false;
         if (action.Operation == "type_text" && action.Value != RequestedValue) return false;
         if (action.Operation == "scroll" && action.Direction != RequestedValue) return false;
-        if (action.Operation is not ("open_workspace_item" or "type_text" or "scroll" or "observe") && RequestedValue is not null) return false;
+        if (action.Operation is not ("open_workspace_item" or "read_workspace_item" or "type_text" or "scroll" or "observe") && RequestedValue is not null) return false;
         return true;
     }
 
@@ -94,20 +94,38 @@ public static class ComputerUseTaskAuthorization
         @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:mở|open)\s+(?:tệp|file|thư\s+mục|folder)\s+(?<path>[^\r\n""'`<>]{1,512}?)\s*[.!?]*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    private static readonly Regex ReadWorkspaceItemRequest = new(
+        @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:đọc|read|xem\s+nội\s+dung|summarize|tóm\s+tắt)\s+(?:tài\s+liệu|document|tệp|file)\s+(?<path>[^\r\n""'`<>]{1,512}?)\s*[.!?]*\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private static readonly Regex TypeIntoFieldRequest = new(
         @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?(?:nhập|gõ|type)\s+(?<value>[^\r\n""'`<>]{1,512}?)\s+(?:vào|into)\s+(?:ô|field)\s+(?<label>[^\r\n""'`<>]{1,96}?)\s*[.!?]*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     public static bool ShouldExposeTool(ComputerUseTaskScope? scope, bool interactionConsent,
-        bool observationConsent) => scope is not null && interactionConsent && observationConsent;
+        bool observationConsent, bool workspaceFileConsent = false) => scope is not null &&
+        (scope.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal)
+            ? workspaceFileConsent
+            : interactionConsent && observationConsent);
 
     public static bool ShouldDispatchToolCall(ComputerUseTaskScope? scope, string? toolName) =>
         scope is not null && toolName == "detot_computer_use";
+
+    public static bool RequiresToolInvocation(ComputerUseTaskScope? scope) =>
+        scope?.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal) == true;
 
     public static ComputerUseTaskScope? FromCurrentMessage(string? message)
     {
         if (string.IsNullOrWhiteSpace(message) || message.Length > 640 || message.Contains('\n') || message.Contains('\r') ||
             message.Contains('`') || message.Contains('"') || message.Contains('\'')) return null;
+        var readItemMatch = ReadWorkspaceItemRequest.Match(message);
+        if (readItemMatch.Success)
+        {
+            var path = readItemMatch.Groups["path"].Value.Trim();
+            if (path.Length > 0 && path.Length <= 512 && DesktopOperator.IsSafeWorkspaceDocumentPath(path))
+                return new("read-workspace-item", ["read_workspace_item"], RequestedValue: path);
+            return null;
+        }
         var itemMatch = WorkspaceItemRequest.Match(message);
         if (itemMatch.Success)
         {
@@ -246,6 +264,7 @@ public static class ComputerUseObservationFilter
 public sealed class ComputerUseTurnState
 {
     private readonly Dictionary<string, HashSet<string>> observedTargets = new(StringComparer.Ordinal);
+    private bool workspaceItemRead;
     public bool RequiresObservation { get; private set; } = true;
     public bool Stopped { get; private set; }
     public bool CanAcceptModelCompletion => !Stopped;
@@ -273,21 +292,23 @@ public sealed class ComputerUseTurnState
     public bool CanAct(ComputerUseAgentAction action, ComputerUseTaskScope scope)
     {
         if (Stopped) return false;
-        if (action.Operation == "observe") return true;
+        if (action.Operation == "observe") return scope.AllowedOperations.Contains("observe", StringComparer.Ordinal);
         if (!scope.Allows(action)) return false;
+        if (action.Operation == "read_workspace_item") return !workspaceItemRead;
         if (RequiresObservation) return false;
         if (action.TargetId is null) return true;
         return observedTargets.TryGetValue(action.TargetId, out var actions) &&
             actions.Contains(RequiredObservedAction(action.Operation));
     }
 
-    public bool RecordAction(string? status, bool succeeded, string? verification)
+    public bool RecordAction(string? status, bool succeeded, string? verification, string? operation = null)
     {
         if (Stopped || !ComputerUseTaskAuthorization.IsActionVerified(status, succeeded, verification))
         {
             Stop();
             return false;
         }
+        if (operation == "read_workspace_item") workspaceItemRead = true;
         RequiresObservation = true;
         observedTargets.Clear();
         return true;
@@ -375,6 +396,8 @@ public sealed record ComputerUseAgentAction(string Operation, string? TargetId =
             "open_application" => targetId is null && application is not null && Applications.Contains(application) && value is null && direction is null,
             "open_workspace_item" => targetId is null && application is null && value is { Length: > 0 and <= 512 } &&
                 DesktopOperator.IsSafeWorkspaceRelativePath(value) && direction is null,
+            "read_workspace_item" => targetId is null && application is null && value is { Length: > 0 and <= 512 } &&
+                DesktopOperator.IsSafeWorkspaceDocumentPath(value) && direction is null,
             "activate_window" or "click" or "select_tab" or "select" or "expand" or "collapse" => ValidTarget(targetId) && application is null && value is null && direction is null,
             "type_text" => ValidTarget(targetId) && application is null && value is { Length: > 0 and <= 512 } &&
                 !value.Contains('\r') && !value.Contains('\n') && !value.Contains('\0') && direction is null,

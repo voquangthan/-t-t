@@ -1,13 +1,12 @@
 # Đệ Tốt Pro — checkpoint
 
-## Universal Windows Computer Use — P2 Windows Settings observer (paused, 19/11/2026)
+## Universal Windows Computer Use — scoped workspace document read (19/11/2026)
 
-- Uncommitted, scoped P2 work adds a bounded `observe-settings` Companion action plus Chat/API routing. It reports only whether Windows Settings is visible in the same interactive session and a count of visible Settings windows; it never returns setting values, controls, titles, credentials, or changes system settings.
-- The existing disconnect monitor relied on `IsConnected`, which did not reliably detect the peer closing a Windows named pipe. It now monitors pipe EOF/read failure while the action runs, cancels the action token on disconnect, and stops monitoring when the action completes.
-- Policy/intent/protocol regression covers the `windows-settings` observation target. Backend and Desktop Companion builds are **0 warnings / 0 errors**; Desktop Operator **151/151 PASS** and its adapter **157/157 PASS**, including client A disconnect followed by client B success. `git diff --check` passes.
-- Still unverified: interactive Windows Settings observation through the running Companion and Chat UI. No system settings, personal data, or production runtime were changed. The `Windows Settings` observer only returns same-session visible-window count/status.
-- **Next:** run the focused GitHub Reader regression and CI on this feature branch; then perform one live read-only Settings smoke if the interactive Companion is available. Do not claim full Computer Use E2E from these contract/build tests.
-
+- Base PR #4 HEAD `5c597c8e4bc7631cb65b14ec9c37460960411d78` is open; Windows regression CI showed success. The latest visible Work PASS is for `6896de8`, so it is stale for the current HEAD. Current PR HEAD has no matching Work verdict; comments appear under the repository owner account and do not prove an independent reviewer identity.
+- Uncommitted changes extend the existing Computer Use tool with one exact workspace-relative file read through Universal File Reader. The path is bound to the current user request, blocked credential/runtime/state/database/log/backup paths are denied, known credential patterns are redacted, and a distinct `workspace_files / direct_request / DeepSeek` grant is required. This read no longer requires UI-control grants or a running Companion. Documentation now describes the scope and limits.
+- Local Backend build: 0 warnings / 0 errors. Desktop Operator: 155/155 PASS; with browser adapter: 161/161 PASS using `--skip-local-pipe`. The local named-pipe integration fails in this sandbox with `companion_unauthorized` under `PipeOptions.CurrentUserOnly`; security was not weakened. `git diff --check` passes.
+- No live Chat/DeepSeek read has been run, and no document contents were sent externally. The tool has not been verified through the running UI. Do not claim E2E.
+- **Next:** inspect the final scoped diff, commit/push the feature branch, then check CI and obtain a HEAD-matching Work result. Preserve the hard block on autonomous code execution; do not merge.
 ## Universal Windows Computer Use — P1 protocol and CI review passed (19/11/2026)
 
 - The named-target interaction chain is now complete on `codex/universal-windows-ui`: Backend scope → authenticated named pipe → Companion live revalidation. Click/select/expand/collapse/text/scroll actions carry both the exact accessible label and control type; missing, duplicate, partial, truncated, unreadable, changed, disabled, offscreen, expired, or cross-session targets stop before interaction.

@@ -1,5 +1,14 @@
 public static class ComputerUsePolicy
 {
+    private static readonly System.Text.RegularExpressions.Regex CredentialAssignment = new(
+        @"(?i)(\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|private[_-]?key|password|authorization|credential)\b[\""']?\s*[:=]\s*[\""']?)(?:(?:Bearer|Basic)\s+)?[^\s,;\""'}]+",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static readonly System.Text.RegularExpressions.Regex CredentialXmlElement = new(
+        @"(?is)<(?<tag>[A-Za-z0-9_.:-]*(?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|private[_-]?key|password|authorization|credential)[A-Za-z0-9_.:-]*)\b[^>]*>.*?</\k<tag>\s*>",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static readonly System.Text.RegularExpressions.Regex RecognizableToken = new(
+        @"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})\b",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
     private static readonly HashSet<string> ObservationTargets = new(StringComparer.Ordinal)
     {
         "approved-applications",
@@ -216,6 +225,16 @@ public static class ComputerUsePolicy
     // GCM's current chooser is not bound to a trusted pending Git operation, repository, or host.
     // Keep account selection denied until such transaction context can be verified end to end.
     public static bool CanSelectGitHubAccount(string? action) => false;
+
+    public static string RedactWorkspaceExcerpt(string text)
+    {
+        if (text.Contains("-----BEGIN", StringComparison.OrdinalIgnoreCase) &&
+            text.Contains("PRIVATE KEY-----", StringComparison.OrdinalIgnoreCase))
+            return "[redacted: private key material detected]";
+        var redacted = CredentialXmlElement.Replace(text, "<sensitive-field>[REDACTED]</sensitive-field>");
+        redacted = CredentialAssignment.Replace(redacted, "$1[REDACTED]");
+        return RecognizableToken.Replace(redacted, "[REDACTED]");
+    }
 
     // Editing files, running project commands, and writing to Git remain deliberately unavailable.
     public static bool CanWrite(string? action) => false;
