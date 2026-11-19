@@ -65,6 +65,28 @@ public static class ComputerUsePolicy
     public static string VerificationStatus(bool postconditionObserved) =>
         postconditionObserved ? "verified" : "reobserve_required";
 
+    public static bool TryInvokeApprovedButton(bool isButton, bool supportsInvoke, Action invoke, out string status)
+    {
+        if (!isButton)
+        {
+            status = "target_stale";
+            return false;
+        }
+        if (!supportsInvoke)
+        {
+            status = "invoke_pattern_unavailable";
+            return false;
+        }
+        try { invoke(); }
+        catch
+        {
+            status = "action_failed";
+            return false;
+        }
+        status = "click_sent_unverified";
+        return true;
+    }
+
     public static string TrySetProtectedTextValue(bool isEdit, Func<bool> supportsValue,
         Func<(bool Supported, bool Value)> readPassword, Func<(bool Supported, bool Value)> readOnly,
         Action<string> setValue, string value)

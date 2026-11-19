@@ -376,12 +376,18 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 target.Element.Click();
                 break;
             case "confirm-click-element":
-                if (SafeControlType(target.Element) != "Button")
-                    return new { succeeded = false, status = "target_stale", verification = "not_run" };
-                target.Element.Click();
+            {
+                var invokeStatus = "target_stale";
+                var invoked = ComputerUsePolicy.TryInvokeApprovedButton(
+                    SafeControlType(target.Element) == "Button",
+                    target.Element.Patterns.Invoke.IsSupported,
+                    () => target.Element.Patterns.Invoke.Pattern.Invoke(), out invokeStatus);
+                if (!invoked)
+                    return new { succeeded = false, status = invokeStatus, verification = "not_run" };
                 if (request.TargetId is not null) uiTargets.Remove(request.TargetId);
                 return new { succeeded = true, status = "click_sent_unverified", verification = "reobserve_required",
                     targetInvalidated = true };
+            }
             case "double-click-element":
                 return new { succeeded = false, status = "approval_required", verification = "not_run" };
             case "type-text":

@@ -32,6 +32,26 @@ var nonWindowActionResponse = DesktopOperator.ToChatActionResponse(
     new DesktopOperator.ActionResult(true, "Read complete."), "read-workspace");
 Check(nonWindowActionResponse.WindowVerified is null,
     "chat response preserves unavailable window-verification status for other actions");
+var obscuredButtonInvokeCount = 0;
+var blockedButtonInvoked = ComputerUsePolicy.TryInvokeApprovedButton(isButton: true, supportsInvoke: false,
+    () => throw new InvalidOperationException("Invocation must not run without InvokePattern."), out var blockedButtonStatus);
+Check(!blockedButtonInvoked && blockedButtonStatus == "invoke_pattern_unavailable" &&
+      obscuredButtonInvokeCount == 0,
+    "approved click refuses any input when InvokePattern is unavailable, even if another window covers the target");
+var invokedButton = ComputerUsePolicy.TryInvokeApprovedButton(isButton: true, supportsInvoke: true,
+    () => obscuredButtonInvokeCount++, out var invokedButtonStatus);
+Check(invokedButton && invokedButtonStatus == "click_sent_unverified" && obscuredButtonInvokeCount == 1 &&
+      !invokedButtonStatus.Equals("verified", StringComparison.Ordinal),
+    "approved click invokes only the validated UIA button and does not claim postcondition verification");
+var nonButtonInvokeCount = 0;
+Check(!ComputerUsePolicy.TryInvokeApprovedButton(isButton: false, supportsInvoke: true,
+          () => nonButtonInvokeCount++, out var nonButtonStatus) && nonButtonStatus == "target_stale" &&
+      nonButtonInvokeCount == 0,
+    "approved button invocation rejects a target whose live control type changed");
+Check(!ComputerUsePolicy.TryInvokeApprovedButton(isButton: true, supportsInvoke: true,
+          () => throw new InvalidOperationException("synthetic invocation failure"), out var invokeErrorStatus) &&
+      invokeErrorStatus == "action_failed",
+    "approved button invocation reports provider failure without falling back to a coordinate click");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
