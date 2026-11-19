@@ -287,3 +287,9 @@
 - Added regression cases for UI policy classification, password/disabled/offscreen denial, strict target protocol, duplicate fields, key/text bounds, response-size cap and chat observation intent.
 - Verification so far: `node --test detot-lab/tests/desktop-operator/github-checks.test.mjs` **11/11 PASS**; `git diff --check` PASS. Local Companion build and C# tests are unavailable because `dotnet`/`csc`/`msbuild` are not installed or on PATH in this runner. CI on a feature PR is required before considering these edits verified. No interactive UI smoke has been run for this code; do not report E2E PASS.
 - Next: complete static API review and the scoped local/CI regressions; stack a new feature branch on the reviewed PR #3 head rather than changing its accepted head, then create a PR targeting `codex/computer-use-vscode-fix`. Fix CI/review findings before moving to P2/P3.
+
+## PR #4 — current review follow-up (19/11/2026)
+
+- HEAD `89e8e2aed67201c6e64e7e25f87af994b380759c` has a matching `REVISE` comment on PR #4. It confirms process binding for control targets, but finds that `CollectObservedTargets` drops `Process` for `Window` targets before turn-state validation. GitHub shows the matching CI check succeeded (1/1); this does not clear the review finding.
+- Moved observation-to-target conversion into `ComputerUseObservationFilter.CollectObservedTargets` so the executable and regression tests share the same code path. Window targets now retain the bounded title and process. Added end-to-end state tests for correct, mismatched, and missing process values.
+- Local `git diff --check` passes. C# tests could not run because this environment has no `dotnet` executable. Next: commit/push this fix, then read CI and review for the exact new HEAD. The comment author is `voquangthan`, so it is feedback but not proof of an independent reviewer identity. Do not merge.

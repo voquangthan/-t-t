@@ -910,6 +910,34 @@ using (var namedWindowObservation = JsonDocument.Parse("""
           selection.WindowIds.SequenceEqual(["0123456789abcdef0123456789abcdef"]),
         "named window activation resolves exactly one observed top-level window instead of an arbitrary UI element");
 }
+var compoundWindowScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Word rồi chuyển sang cửa sổ Báo cáo");
+const string observedWordWindowId = "0123456789abcdef0123456789abcdef";
+static bool AcceptsCompoundWindowObservation(string json, ComputerUseTaskScope scope)
+{
+    using var observation = JsonDocument.Parse(json);
+    var targets = ComputerUseObservationFilter.CollectObservedTargets(observation.RootElement, scope);
+    var state = new ComputerUseTurnState();
+    return state.RecordObservation("available", targets, scope) &&
+        state.CanAct(new("open_application", Application: "word"), scope) &&
+        state.RecordAction("verified", true, "verified", "open_application") &&
+        state.RecordObservation("available", targets, scope) &&
+        state.CanAct(new("activate_window", TargetId: observedWordWindowId), scope) &&
+        state.TryGetObservedTarget(observedWordWindowId, out var target) &&
+        target is { WindowTitle: "Báo cáo", Process: "WINWORD" };
+}
+var validWordWindowObservation = """
+    {"observationStatus":"available","truncated":false,
+     "windows":[{"windowId":"0123456789abcdef0123456789abcdef","title":"Báo cáo","process":"WINWORD","allowedActions":["activate-window"]}],"elements":[]}
+    """;
+var wrongProcessWindowObservation = validWordWindowObservation.Replace("WINWORD", "msedge", StringComparison.Ordinal);
+var missingProcessWindowObservation = validWordWindowObservation.Replace(",\"process\":\"WINWORD\"", "", StringComparison.Ordinal);
+Check(compoundWindowScope is { RequiresApplicationLaunchBeforeTarget: true, TargetControlType: "Window" } windowScope &&
+      AcceptsCompoundWindowObservation(validWordWindowObservation, windowScope),
+    "JSON window process and title survive target collection and turn-state validation for a compound activate_window request");
+Check(compoundWindowScope is { } scopedWindow &&
+      !AcceptsCompoundWindowObservation(wrongProcessWindowObservation, scopedWindow) &&
+      !AcceptsCompoundWindowObservation(missingProcessWindowObservation, scopedWindow),
+    "compound window activation rejects JSON observations with a mismatched or missing process");
 using (var cappedUnscopedObservation = MakeObservationFixture([]))
 {
     var selection = ComputerUseObservationFilter.Select(cappedUnscopedObservation.RootElement,

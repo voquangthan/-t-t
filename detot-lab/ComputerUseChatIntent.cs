@@ -251,6 +251,45 @@ public static class ComputerUseObservationFilter
 {
     private const int CompanionElementLimit = 72;
 
+    public static Dictionary<string, ComputerUseObservedTarget> CollectObservedTargets(JsonElement observation,
+        ComputerUseTaskScope scope)
+    {
+        var targets = new Dictionary<string, ComputerUseObservedTarget>(StringComparer.Ordinal);
+        var windowsById = new Dictionary<string, (string? Title, string? Process)>(StringComparer.Ordinal);
+        if (observation.TryGetProperty("windows", out var windows) && windows.ValueKind == JsonValueKind.Array)
+            foreach (var window in windows.EnumerateArray())
+            {
+                var id = Read(window, "windowId");
+                if (!Guid.TryParseExact(id, "N", out _)) continue;
+                var title = SafeText(Read(window, "title"), 96);
+                var process = SafeText(Read(window, "process"), 48);
+                windowsById[id!] = (title, process);
+                targets[id!] = new("Window", title, new(StringComparer.Ordinal) { "activate-window" }, title, process);
+            }
+        if (observation.TryGetProperty("elements", out var elements) && elements.ValueKind == JsonValueKind.Array)
+            foreach (var element in elements.EnumerateArray())
+            {
+                var id = Read(element, "elementId");
+                if (!Guid.TryParseExact(id, "N", out _)) continue;
+                var allowed = element.TryGetProperty("allowedActions", out var actions) && actions.ValueKind == JsonValueKind.Array
+                    ? actions.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                        .Select(item => item.GetString()).Where(item => item is not null).Cast<string>().ToHashSet(StringComparer.Ordinal)
+                    : new HashSet<string>(StringComparer.Ordinal);
+                var approvalActions = element.TryGetProperty("approvalRequiredActions", out var required) && required.ValueKind == JsonValueKind.Array
+                    ? required.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                        .Select(item => item.GetString()).Where(item => item is not null).Cast<string>().ToHashSet(StringComparer.Ordinal)
+                    : new HashSet<string>(StringComparer.Ordinal);
+                if (scope.TargetControlType == "Button" && scope.AllowedOperations.Contains("click", StringComparer.Ordinal) &&
+                    scope.MatchesTarget(Read(element, "controlType"), Read(element, "name")) &&
+                    approvalActions.Contains("click-element")) allowed.Add("click-element");
+                var windowId = Read(element, "windowId");
+                windowsById.TryGetValue(windowId ?? "", out var context);
+                targets[id!] = new(SafeText(Read(element, "controlType"), 32), SafeText(Read(element, "name"), 96),
+                    allowed, context.Title, context.Process);
+            }
+        return targets;
+    }
+
     public static bool IsUsableForNamedAction(ComputerUseObservationSelection selection) =>
         selection.Status == "ok" && selection.Elements.Length == 1;
 
@@ -331,6 +370,9 @@ public static class ComputerUseObservationFilter
 
     private static string? Read(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static string SafeText(string? value, int maximumLength) =>
+        string.IsNullOrEmpty(value) ? "" : value.Length <= maximumLength ? value : value[..maximumLength];
 }
 
 public sealed class ComputerUseTurnState
