@@ -31,7 +31,10 @@ public static class ComputerUsePolicy
         "open-word",
         "open-excel",
         "open-powerpoint",
-        "open-pdf-reader"
+        "open-pdf-reader",
+        "open-notepad",
+        "open-calculator",
+        "open-paint"
     };
 
     private static readonly HashSet<string> UiActions = new(StringComparer.Ordinal)
@@ -264,7 +267,7 @@ public static class ComputerUsePolicy
     public static object Describe() => new
     {
         observe = new[] { "approved-applications", "desktop-ui", "workspace-explorer", "windows-settings", "github-account", "github-pull-requests" },
-        navigate = new[] { "open-workspace", "open-workspace-item (existing items under workspace only)", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader" },
+        navigate = new[] { "open-workspace", "open-workspace-item (existing items under workspace only)", "open-github", "open-edge", "open-vscode", "open-settings", "open-task-manager", "open-word", "open-excel", "open-powerpoint", "open-pdf-reader", "open-notepad", "open-calculator", "open-paint" },
         interact = new[] { "activate-window", "select-element (TabItem/ListItem/TreeItem only)", "type-text (revalidated non-password Edit only)", "scroll-element", "press-key (ArrowLeft/ArrowRight/Home/End on Edit only)", "click-element (Hyperlink only)", "expand/collapse-element (MenuItem/ComboBox/TreeItem navigation only)" },
         readOnlyApplications = new[] { "Windows Settings", "Task Manager" },
         approvalRequired = new[] { "click-element on Button/MenuItem/CheckBox/RadioButton", "select on CheckBox/RadioButton/ComboBox or unknown control types", "double-click ListItem/TreeItem", "keys on RadioButton/ComboBox/selection controls", "keyboard-submit" },

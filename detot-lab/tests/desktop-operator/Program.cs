@@ -99,8 +99,10 @@ Check(successfulEmptyMessage.Status == "empty" && successfulEmptyMessage.Reply i
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
 Check(ComputerUsePolicy.CanNavigate("open-settings") && ComputerUsePolicy.CanNavigate("open-task-manager") &&
       ComputerUsePolicy.CanNavigate("open-word") && ComputerUsePolicy.CanNavigate("open-excel") &&
-      ComputerUsePolicy.CanNavigate("open-powerpoint") && ComputerUsePolicy.CanNavigate("open-pdf-reader"),
-    "only fixed Windows and document app launch actions are allowlisted");
+      ComputerUsePolicy.CanNavigate("open-powerpoint") && ComputerUsePolicy.CanNavigate("open-pdf-reader") &&
+      ComputerUsePolicy.CanNavigate("open-notepad") && ComputerUsePolicy.CanNavigate("open-calculator") &&
+      ComputerUsePolicy.CanNavigate("open-paint"),
+    "only fixed Windows, document and built-in utility app launch actions are allowlisted");
 Check(ComputerUsePolicy.IsReadOnlyDesktopApplication("SystemSettings") &&
       ComputerUsePolicy.IsReadOnlyDesktopApplication("Taskmgr") &&
       !ComputerUsePolicy.CanInteractWithApplication("SystemSettings", "type-text") &&
@@ -246,7 +248,10 @@ Check(DesktopCompanionProtocol.IsAllowedAction("read-workspace") &&
       DesktopCompanionProtocol.IsAllowedAction("observe-workspace") &&
       DesktopCompanionProtocol.IsAllowedAction("observe-settings") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-pull-requests") &&
-      DesktopCompanionProtocol.IsAllowedAction("read-github-account"),
+      DesktopCompanionProtocol.IsAllowedAction("read-github-account") &&
+      DesktopCompanionProtocol.IsAllowedAction("open-notepad") &&
+      DesktopCompanionProtocol.IsAllowedAction("open-calculator") &&
+      DesktopCompanionProtocol.IsAllowedAction("open-paint"),
     "Desktop Companion exposes only explicit read action IDs");
 Check(!DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
       !DesktopCompanionProtocol.IsAllowedAction("open-url:https://attacker.example") &&
@@ -603,8 +608,12 @@ Check(ComputerUseChatIntent.DetectDirectRequest("Mở Windows Settings") == "ope
       ComputerUseChatIntent.DetectDirectRequest("Mở Word") == "open-word" &&
       ComputerUseChatIntent.DetectDirectRequest("Mở Excel") == "open-excel" &&
       ComputerUseChatIntent.DetectDirectRequest("Mở PowerPoint") == "open-powerpoint" &&
-      ComputerUseChatIntent.DetectDirectRequest("Mở PDF Reader") == "open-pdf-reader",
-    "fixed application launch intents are recognized without command text");
+      ComputerUseChatIntent.DetectDirectRequest("Mở PDF Reader") == "open-pdf-reader" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở máy tính") == "open-calculator" &&
+      ComputerUseChatIntent.DetectDirectRequest("Open Paint") == "open-paint" &&
+      ComputerUseChatIntent.DetectDirectRequest("Open Paint and delete the image") is null,
+    "fixed application launch intents are recognized without accepting trailing commands");
 Check(ComputerUseChatIntent.DetectDirectRequest("Kiểm tra tài khoản GitHub hiện tại") == "read-github-account",
     "a direct GitHub account inspection request is recognized");
 Check(ComputerUseChatIntent.DetectDirectRequest("Đọc PR và CI") == "read-github-pull-requests",
@@ -643,6 +652,10 @@ using (var validExpandAction = JsonDocument.Parse("{\"operation\":\"expand\",\"t
     Check(ComputerUseAgentAction.TryParse(validExpandAction.RootElement, out var parsedExpandAction) &&
           parsedExpandAction is { Operation: "expand", TargetId: "0123456789abcdef0123456789abcdef" },
         "agent Computer Use accepts a bounded observed-target menu expansion");
+using (var builtInAppAction = JsonDocument.Parse("{\"operation\":\"open_application\",\"application\":\"notepad\"}"))
+    Check(ComputerUseAgentAction.TryParse(builtInAppAction.RootElement, out var parsedBuiltInApp) &&
+          parsedBuiltInApp is { Operation: "open_application", Application: "notepad" },
+        "agent Computer Use parses only the fixed identifier for a built-in utility launch");
 using (var arbitraryAgentAction = JsonDocument.Parse("{\"operation\":\"run_shell\",\"value\":\"whoami\"}"))
     Check(!ComputerUseAgentAction.TryParse(arbitraryAgentAction.RootElement, out _),
         "agent Computer Use rejects arbitrary execution operations");
@@ -657,6 +670,9 @@ var openEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge �
 var openThenClickScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm link Pull requests");
 var unsafeCompoundScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi bấm nút Lưu rồi gửi");
 var inspectEdgeScope = ComputerUseTaskAuthorization.FromCurrentMessage("Kiểm tra trang hiện tại trong Edge");
+var inspectNotepadScope = ComputerUseTaskAuthorization.FromCurrentMessage("Đọc nội dung trong Notepad");
+var inspectCalculatorScope = ComputerUseTaskAuthorization.FromCurrentMessage("Kiểm tra máy tính");
+var inspectPaintScope = ComputerUseTaskAuthorization.FromCurrentMessage("Review Paint");
 var inspectGithubScope = ComputerUseTaskAuthorization.FromCurrentMessage("Review the current pull request in GitHub");
 var openThenInspectScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi kiểm tra trang hiện tại");
 var openFileScope = ComputerUseTaskAuthorization.FromCurrentMessage("Mở file docs/audit.txt");
@@ -693,6 +709,14 @@ Check(inspectEdgeScope is { Intent: "planned-app-inspection", Application: "edge
       !inspection.AllowedOperations.Contains("read_workspace_item", StringComparer.Ordinal) &&
       ComputerUseTaskAuthorization.RequiresToolInvocation(inspectEdgeScope) &&
       ComputerUseTaskAuthorization.RequiresToolInvocation(openThenInspectScope) &&
+      inspectNotepadScope is { Application: "notepad", BindApplicationProcess: true } notepadInspection &&
+      notepadInspection.Allows(new("open_application", Application: "notepad")) &&
+      notepadInspection.MatchesApplicationProcess("Notepad") &&
+      !notepadInspection.MatchesApplicationProcess("Code") &&
+      inspectCalculatorScope is { Application: "calculator" } calculatorInspection &&
+      calculatorInspection.MatchesApplicationProcess("CalculatorApp") &&
+      inspectPaintScope is { Application: "paint" } paintInspection &&
+      paintInspection.MatchesApplicationProcess("mspaint") &&
       ComputerUseTaskAuthorization.FromCurrentMessage("Review Edge and Visual Studio Code") is null &&
       ComputerUseTaskAuthorization.FromCurrentMessage("Mở Edge rồi kiểm tra trang trong VS Code") is null &&
       ComputerUseTaskAuthorization.FromCurrentMessage("Check Edge and send an email") is null &&

@@ -21,6 +21,9 @@ public static class ComputerUseChatIntent
         ("open-excel", new(Prefix + @"(?:mở|open|launch)\s+(?:microsoft\s+)?excel" + Suffix, Options)),
         ("open-powerpoint", new(Prefix + @"(?:mở|open|launch)\s+(?:microsoft\s+)?powerpoint" + Suffix, Options)),
         ("open-pdf-reader", new(Prefix + @"(?:mở|open|launch)\s+(?:pdf\s+reader|acrobat(?:\s+reader)?)" + Suffix, Options)),
+        ("open-notepad", new(Prefix + @"(?:mở|open|launch)\s+(?:windows\s+)?notepad" + Suffix, Options)),
+        ("open-calculator", new(Prefix + @"(?:mở|open|launch)\s+(?:windows\s+)?(?:calculator|máy\s+tính)" + Suffix, Options)),
+        ("open-paint", new(Prefix + @"(?:mở|open|launch)\s+(?:microsoft\s+)?paint" + Suffix, Options)),
         ("read-github-account", new(Prefix + @"(?:kiểm\s+tra|xem|đọc|check|read|inspect)\s+(?:tài\s+khoản\s+github(?:\s+(?:hiện\s+tại|đang\s+dùng))?|current\s+github\s+account|github\s+account)" + Suffix, Options)),
         ("read-github-pull-requests", new(Prefix + @"(?:kiểm\s+tra|xem|đọc|check|read|inspect)\s+(?:(?:danh\s+sách|list)\s+)?(?:pr(?:s)?|pull\s+requests?)(?:\s+(?:và|and|with)\s+(?:ci|checks?))?" + Suffix, Options)),
         ("read-approved-applications", new(Prefix + @"(?:kiểm\s+tra|xem|đọc|liệt\s+kê|check|read|list|inspect)\s+(?:các\s+)?(?:ứng\s+dụng|apps?|applications?)(?:\s+(?:đang\s+mở|đang\s+chạy|open|currently\s+open|running))" + Suffix, Options)),
@@ -67,7 +70,8 @@ public sealed record ComputerUseTaskScope(string Intent, string[] AllowedOperati
             ["edge"] = ["msedge"], ["vscode"] = ["Code"], ["workspace"] = ["explorer"],
             ["settings"] = ["SystemSettings"], ["task-manager"] = ["Taskmgr"],
             ["word"] = ["WINWORD"], ["excel"] = ["EXCEL"], ["powerpoint"] = ["POWERPNT"],
-            ["pdf-reader"] = ["Acrobat", "AcroRd32"], ["github"] = ["msedge"]
+            ["pdf-reader"] = ["Acrobat", "AcroRd32"], ["github"] = ["msedge"],
+            ["notepad"] = ["Notepad"], ["calculator"] = ["CalculatorApp"], ["paint"] = ["mspaint"]
         };
 
     public bool Allows(ComputerUseAgentAction action)
@@ -150,6 +154,9 @@ public static class ComputerUseTaskAuthorization
         ("excel", new(@"\b(?:microsoft\s+)?excel\b", Options)),
         ("powerpoint", new(@"\b(?:microsoft\s+)?powerpoint\b", Options)),
         ("pdf-reader", new(@"\b(?:pdf\s+reader|acrobat(?:\s+reader)?)\b", Options)),
+        ("notepad", new(@"\b(?:windows\s+)?notepad\b", Options)),
+        ("calculator", new(@"\b(?:windows\s+)?calculator\b|máy\s+tính", Options)),
+        ("paint", new(@"\b(?:microsoft\s+)?paint\b", Options))
     ];
 
     public static bool ShouldExposeTool(ComputerUseTaskScope? scope, bool interactionConsent,
@@ -269,7 +276,8 @@ public static class ComputerUseTaskAuthorization
             "open-edge" => "edge", "open-vscode" => "vscode", "open-workspace" => "workspace",
             "open-github" => "github", "open-settings" => "settings", "open-task-manager" => "task-manager",
             "open-word" => "word", "open-excel" => "excel", "open-powerpoint" => "powerpoint",
-            "open-pdf-reader" => "pdf-reader", _ => null
+            "open-pdf-reader" => "pdf-reader", "open-notepad" => "notepad",
+            "open-calculator" => "calculator", "open-paint" => "paint", _ => null
         };
         if (application is null) return null;
         string[] operations = intent == "open-workspace" ? ["observe", "open_workspace"] : ["observe", "open_application"];
@@ -570,7 +578,7 @@ public sealed record ComputerUseAgentAction(string Operation, string? TargetId =
     string? Application = null, string? Value = null, string? Direction = null)
 {
     private static readonly HashSet<string> Applications = new(StringComparer.Ordinal)
-        { "edge", "vscode", "workspace", "settings", "task-manager", "word", "excel", "powerpoint", "pdf-reader", "github" };
+        { "edge", "vscode", "workspace", "settings", "task-manager", "word", "excel", "powerpoint", "pdf-reader", "github", "notepad", "calculator", "paint" };
 
     public static bool TryParse(JsonElement arguments, out ComputerUseAgentAction? action)
     {

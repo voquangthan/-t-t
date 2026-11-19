@@ -286,6 +286,9 @@ app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionReq
         case "open-excel":
         case "open-powerpoint":
         case "open-pdf-reader":
+        case "open-notepad":
+        case "open-calculator":
+        case "open-paint":
             return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, cancellationToken));
         default:
             return BrowserActionResult(await desktopCompanion.ExecuteAsync(request.Action!, request.TargetId,
@@ -1114,7 +1117,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     properties = new
                     {
                         operation = new { type = "string", @enum = new[] { "observe", "open_application", "open_workspace", "open_workspace_item", "read_workspace_item", "activate_window", "click", "select_tab", "select", "expand", "collapse", "type_text", "scroll", "press_key" } },
-                        application = new { type = "string", @enum = new[] { "edge", "vscode", "workspace", "settings", "task-manager", "word", "excel", "powerpoint", "pdf-reader", "github" } },
+                        application = new { type = "string", @enum = new[] { "edge", "vscode", "workspace", "settings", "task-manager", "word", "excel", "powerpoint", "pdf-reader", "github", "notepad", "calculator", "paint" } },
                         targetId = new { type = "string", description = "Opaque ID returned by a fresh observation; expires quickly." },
                         value = new { type = "string", description = "Text/key or exact workspace-relative path authorized by the user, only for the matching operation." },
                         direction = new { type = "string", @enum = new[] { "up", "down" } }
@@ -1602,7 +1605,8 @@ static async Task<string> ExecuteComputerUseAgentAction(ComputerUseAgentAction a
         {
             "edge" => "open-edge", "vscode" => "open-vscode", "workspace" => "open-workspace",
             "settings" => "open-settings", "task-manager" => "open-task-manager", "github" => "open-github", "word" => "open-word",
-            "excel" => "open-excel", "powerpoint" => "open-powerpoint", "pdf-reader" => "open-pdf-reader", _ => ""
+            "excel" => "open-excel", "powerpoint" => "open-powerpoint", "pdf-reader" => "open-pdf-reader",
+            "notepad" => "open-notepad", "calculator" => "open-calculator", "paint" => "open-paint", _ => ""
         },
         "open_workspace_item" => "open-workspace-item",
         "activate_window" => "activate-window",
@@ -2035,7 +2039,7 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
         return Results.Ok(new { reply, toolUsed = true, computerUseAction = action, windowVerified = verified,
             urlVerified, url = response.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null });
     }
-    if (action is "open-settings" or "open-task-manager" or "open-word" or "open-excel" or "open-powerpoint" or "open-pdf-reader")
+    if (action is "open-settings" or "open-task-manager" or "open-word" or "open-excel" or "open-powerpoint" or "open-pdf-reader" or "open-notepad" or "open-calculator" or "open-paint")
     {
         var verified = response.TryGetProperty("windowVerified", out var verifiedValue) && verifiedValue.ValueKind == JsonValueKind.True;
         var status = response.TryGetProperty("status", out var statusValue) && statusValue.ValueKind == JsonValueKind.String
@@ -2047,7 +2051,10 @@ static async Task<IResult> ExecuteComputerUseChatAction(string action, string? r
             "open-word" => "Microsoft Word",
             "open-excel" => "Microsoft Excel",
             "open-powerpoint" => "Microsoft PowerPoint",
-            _ => "PDF Reader"
+            "open-pdf-reader" => "PDF Reader",
+            "open-notepad" => "Notepad",
+            "open-calculator" => "Calculator",
+            _ => "Paint"
         };
         var reply = verified ? $"Đã mở và xác minh cửa sổ {label}." : status switch
         {

@@ -156,7 +156,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             "open-edge" => OpenEdge("about:blank", "about:blank"),
             "open-github" => await OpenRepositoryPullsAsync(cancellationToken),
             "open-vscode" => OpenVsCode(),
-            "open-settings" or "open-task-manager" or "open-word" or "open-excel" or "open-powerpoint" or "open-pdf-reader"
+            "open-settings" or "open-task-manager" or "open-word" or "open-excel" or "open-powerpoint" or "open-pdf-reader" or "open-notepad" or "open-calculator" or "open-paint"
                 => OpenApprovedApplication(request.Action),
             "read-workspace" => await ReadWorkspaceAsync(cancellationToken),
             "read-github-account" => await ReadGithubAccountAsync(cancellationToken),
@@ -935,6 +935,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             "open-excel" => ("EXCEL", FindOfficeExecutable("EXCEL.EXE"), null),
             "open-powerpoint" => ("POWERPNT", FindOfficeExecutable("POWERPNT.EXE"), null),
             "open-pdf-reader" => FindPdfReaderLaunch(),
+            "open-notepad" => ("Notepad", Path.Combine(Environment.SystemDirectory, "notepad.exe"), null),
+            "open-calculator" => ("CalculatorApp", Path.Combine(Environment.SystemDirectory, "calc.exe"), null),
+            "open-paint" => ("mspaint", Path.Combine(Environment.SystemDirectory, "mspaint.exe"), null),
             _ => ("", null, null)
         };
         if (string.IsNullOrWhiteSpace(processName) || (fileName is null && uri is null))
