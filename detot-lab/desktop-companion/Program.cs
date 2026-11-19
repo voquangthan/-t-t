@@ -1209,6 +1209,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         {
             try
             {
+                var committedLocations = ReadExplorerCommittedLocations();
                 using var automation = new UIA3Automation();
                 foreach (var process in Process.GetProcessesByName("explorer"))
                 {
@@ -1219,17 +1220,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                         var windows = automation.GetDesktop().FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
                         foreach (var window in windows)
                         {
-                            var edits = window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
-                            var locations = edits.Select(edit =>
-                            {
-                                string? value;
-                                try { value = edit.Patterns.Value.Pattern.Value.Value; }
-                                catch { value = null; }
-                                return new DesktopCompanionVerification.ExplorerLocationEvidence(
-                                    DesktopCompanionVerification.IsTrustedExplorerLocationControl(
-                                        SafeAutomationId(edit), SafeName(edit), SafeHelpText(edit), IsInsideToolbar(edit)), value);
-                            }).ToArray();
-                            var verified = DesktopCompanionVerification.ExplorerWorkspaceMatches(workspace, locations);
+                            var handle = SafeNativeWindowHandle(window);
+                            var verified = handle > 0 && committedLocations.TryGetValue(handle, out var location) &&
+                                DesktopCompanionVerification.ExplorerWorkspaceMatches(workspace, location);
                             snapshot = new(true, verified, session);
                             if (verified) return snapshot;
                         }
@@ -1242,25 +1235,47 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         return snapshot;
     }
 
+    private static IReadOnlyDictionary<nint, string> ReadExplorerCommittedLocations()
+    {
+        var locations = new Dictionary<nint, string>();
+        object? shell = null;
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType is null) return locations;
+            shell = Activator.CreateInstance(shellType);
+            if (shell is null) return locations;
+            dynamic shellApplication = shell;
+            foreach (var item in shellApplication.Windows())
+            {
+                try
+                {
+                    dynamic window = item;
+                    var handle = (nint)Convert.ToInt64(window.HWND);
+                    var location = Convert.ToString(window.LocationURL);
+                    if (handle > 0 && !string.IsNullOrWhiteSpace(location)) locations[handle] = location;
+                }
+                catch { }
+                finally
+                {
+                    if (item is not null && Marshal.IsComObject(item)) Marshal.FinalReleaseComObject(item);
+                }
+            }
+        }
+        catch { }
+        finally
+        {
+            if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+        }
+        return locations;
+    }
+
     private static string SafeName(AutomationElement element)
     {
         try { return element.Properties.Name.Value ?? ""; }
         catch { return ""; }
     }
 
-    private static bool IsInsideToolbar(AutomationElement element)
-    {
-        try
-        {
-            for (AutomationElement? current = element.Parent; current is not null; current = current.Parent)
-            {
-                if (SafeControlType(current) == "ToolBar") return true;
-                if (SafeControlType(current) == "Window") return false;
-            }
-        }
-        catch { }
-        return false;
-    }
 
     private static bool TryReadElementName(AutomationElement element, out string name)
     {

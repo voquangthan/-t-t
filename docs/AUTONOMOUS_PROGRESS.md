@@ -26,6 +26,11 @@
 - Work review found that an unrelated Explorer Edit (for example Search) could contain the workspace path. The observer now carries the evidence source with each value and accepts only a recognized location/address control inside an Explorer toolbar. Unknown controls, untrusted sources, wrong locations, matching titles, and unreadable addresses all fail closed.
 - Local verification after this correction: Backend build **0 warnings / 0 errors**; Companion build **0 warnings / 0 errors**; Desktop Operator **149/149 PASS**. Regression covers trusted exact location, file URI, wrong path, same-basename elsewhere, untrusted search text containing the expected path, and missing address. CI/Work review for this commit and interactive Windows evidence remain pending.
 
+## P2 File Explorer committed-location correction (19/11/2026)
+
+- Address-bar edits are no longer evidence at all. The Explorer observer now maps UIA window HWND to the read-only `Shell.Application` committed `LocationURL` for that exact window. A draft typed into the address bar, a pending/cancelled navigation, search text, title, or any unavailable Shell location cannot set `workspaceVerified=true`.
+- Local verification: Companion build **0 warnings / 0 errors**; Desktop Operator **149/149 PASS**. Fixture coverage includes committed exact path/file URI, a different location, same basename elsewhere, and absent committed location. CI/Work review on the new SHA and interactive Explorer E2E remain pending.
+
 ## Memory Core V2 — M2 Semantic Memory
 
 - M2 commit local `7f2889d`. M3 đã bắt đầu với API review phát hiện bản ghi có thể trùng dựa trên nội dung chuẩn hóa, kèm nguồn và version theo owner. Chưa có hàng đợi Dreaming hay duyệt/từ chối đề xuất.

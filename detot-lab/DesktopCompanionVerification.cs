@@ -4,7 +4,6 @@ public static partial class DesktopCompanionVerification
 {
     public sealed record WorkspaceEvidence(string ExpectedWorkspace, string? ObservedWorkspace,
         bool Verified, string Reason, bool WindowTitleMatched, bool RootLabelMatched, bool AccessiblePathMatched);
-    public sealed record ExplorerLocationEvidence(bool IsCurrentLocationControl, string? Value);
 
     private static readonly Regex UserDataDir = new(
         "(?:^|\\s)(?:\\\"--user-data-dir=(?<wholeQuoted>[^\\\"]+)\\\"|--user-data-dir(?:=|\\s+)(?:\\\"(?<quoted>[^\\\"]+)\\\"|(?<plain>[^\\s]+)))",
@@ -56,42 +55,24 @@ public static partial class DesktopCompanionVerification
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
         => EvaluateWorkspace(expectedWorkspace, true, windowTitle, rootTreeLabels, accessiblePaths).Verified;
 
-    // Explorer titles are a presentation hint, not a location identity: two folders may share a
-    // name or one title may merely contain the workspace name. Only a readable exact address is
-    // sufficient to verify an Explorer window is displaying the configured workspace.
-    public static bool ExplorerWorkspaceMatches(string? expectedWorkspace, IEnumerable<ExplorerLocationEvidence> locations)
+    // This consumes Shell.LocationURL: a committed location bound to the native Explorer HWND,
+    // not an editable address/search control which may contain a draft the user has not opened.
+    public static bool ExplorerWorkspaceMatches(string? expectedWorkspace, string? committedLocation)
     {
-        if (string.IsNullOrWhiteSpace(expectedWorkspace)) return false;
+        if (string.IsNullOrWhiteSpace(expectedWorkspace) || string.IsNullOrWhiteSpace(committedLocation)) return false;
         string expected;
         try { expected = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
         catch (ArgumentException) { return false; }
-        foreach (var location in locations)
+        var path = committedLocation.Trim();
+        if (Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
+            path = Uri.UnescapeDataString(uri.LocalPath);
+        try
         {
-            if (!location.IsCurrentLocationControl) continue;
-            var candidate = location.Value;
-            if (string.IsNullOrWhiteSpace(candidate)) continue;
-            var path = candidate.Trim();
-            if (Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile)
-                path = Uri.UnescapeDataString(uri.LocalPath);
-            try
-            {
-                if (string.Equals(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                    expected, StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            catch (ArgumentException) { }
+            return string.Equals(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                expected, StringComparison.OrdinalIgnoreCase);
         }
-        return false;
+        catch (ArgumentException) { return false; }
     }
-
-    // An Edit control can also be Explorer search. Require both toolbar context and one exact,
-    // known location identity; unknown/localized controls fail closed rather than guessing.
-    public static bool IsTrustedExplorerLocationControl(string? automationId, string? name, string? helpText,
-        bool insideToolbar) => insideToolbar &&
-        (string.Equals(automationId, "41477", StringComparison.Ordinal) ||
-         new[] { name, helpText }.Any(label => label is not null &&
-             (label.Equals("Address bar", StringComparison.OrdinalIgnoreCase) ||
-              label.Equals("Thanh địa chỉ", StringComparison.OrdinalIgnoreCase) ||
-              label.Equals("Địa chỉ", StringComparison.OrdinalIgnoreCase))));
 
     public static WorkspaceEvidence EvaluateWorkspace(string expectedWorkspace, bool windowFound, string? windowTitle,
         IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
