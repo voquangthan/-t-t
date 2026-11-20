@@ -37,6 +37,23 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+Check(ComputerUsePlanner.MightBeActionRequest("Mở VS Code rồi xem các PR và CI") &&
+      !ComputerUsePlanner.MightBeActionRequest("Ví dụ: `open Edge` rồi chạy lệnh này") &&
+      !ComputerUsePlanner.MightBeActionRequest("chào buổi sáng"),
+    "multi-step planning is attempted only for short, direct action requests");
+Check(ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode","open-workspace","read-github-pull-requests"]}""",
+      out var acceptedPlan) && acceptedPlan is { Handled: true } &&
+      acceptedPlan.Actions.SequenceEqual(["open-vscode", "open-workspace", "read-github-pull-requests"]),
+    "LLM plans accept ordered sequences of existing allowlisted actions");
+Check(ComputerUsePlanner.TryParse("""{"handled":false,"actions":[]}""", out var notHandledPlan) &&
+      notHandledPlan is { Handled: false, Actions.Count: 0 },
+    "LLM can defer ordinary questions to normal chat");
+Check(!ComputerUsePlanner.TryParse("""{"handled":true,"actions":["run-shell"]}""", out _) &&
+      !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode","open-vscode"]}""", out _) &&
+      !ComputerUsePlanner.TryParse("""{"handled":true,"actions":[{"action":"open-vscode"}]}""", out _) &&
+      !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode"],"command":"anything"}""", out _) &&
+      !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode","open-edge","open-github","read-github-account","read-github-pull-requests","read-approved-applications"]}""", out _),
+    "LLM plans reject shell, duplicates, dynamic arguments, extra properties, and overlong plans");
 var emptyApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation([], available: true, partial: false);
 Check(emptyApplicationObservation.Status == "empty" && emptyApplicationObservation.Applications.Count == 0,
     "a successful empty desktop observation is distinct from an error");
