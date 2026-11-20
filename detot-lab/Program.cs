@@ -751,7 +751,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     desktopCompanion, cancellationToken);
                 var captured = await CaptureComputerUseResultAsync(actionResult);
                 if (captured.StatusCode >= StatusCodes.Status400BadRequest ||
-                    !IsComputerUseActionVerified(computerAction, captured.StatusCode, captured.Body))
+                    !ComputerUsePlanner.IsVerifiedActionResult(computerAction, captured.StatusCode, captured.Body))
                 {
                     var stepReply = captured.Body.TryGetProperty("reply", out var replyValue) &&
                         replyValue.ValueKind == JsonValueKind.String ? replyValue.GetString() : null;
@@ -1488,30 +1488,6 @@ static async Task<(int StatusCode, JsonElement Body)> CaptureComputerUseResultAs
     body.Position = 0;
     using var document = await JsonDocument.ParseAsync(body);
     return (context.Response.StatusCode, document.RootElement.Clone());
-}
-
-static bool IsComputerUseActionVerified(string action, int statusCode, JsonElement body)
-{
-    if (statusCode >= StatusCodes.Status400BadRequest || body.ValueKind != JsonValueKind.Object ||
-        body.TryGetProperty("error", out _)) return false;
-    static bool IsTrue(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
-    static string? ReadString(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-
-    return action switch
-    {
-        "open-workspace" => IsTrue(body, "workspaceVerified"),
-        "open-vscode" => IsTrue(body, "windowVerified") && IsTrue(body, "workspaceVerified"),
-        "open-edge" => IsTrue(body, "windowVerified"),
-        "open-github" => IsTrue(body, "windowVerified") && IsTrue(body, "urlVerified"),
-        "read-github-account" => ReadString(body, "status") is "verified" or "signed_out",
-        "read-approved-applications" => ReadString(body, "computerUseObservationStatus") is "available" or "empty",
-        "read-github-pull-requests" => ReadString(body, "reply") is { Length: > 0 } reply &&
-            !reply.Contains("GitHub đang giới hạn", StringComparison.OrdinalIgnoreCase) &&
-            !reply.Contains("hiện không đọc được trạng thái", StringComparison.OrdinalIgnoreCase),
-        _ => false
-    };
 }
 
 static async Task<string?> AnswerFromMemory(HttpClient client, string? key, string question,

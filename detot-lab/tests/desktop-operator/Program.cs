@@ -54,6 +54,23 @@ Check(!ComputerUsePlanner.TryParse("""{"handled":true,"actions":["run-shell"]}""
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode"],"command":"anything"}""", out _) &&
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode","open-edge","open-github","read-github-account","read-github-pull-requests","read-approved-applications"]}""", out _),
     "LLM plans reject shell, duplicates, dynamic arguments, extra properties, and overlong plans");
+using (var verifiedGithub = JsonDocument.Parse("""{"windowVerified":true,"urlVerified":true}"""))
+using (var missingGithubEvidence = JsonDocument.Parse("""{"windowVerified":true,"urlVerified":false}"""))
+using (var signedOutAccount = JsonDocument.Parse("""{"status":"signed_out"}"""))
+using (var uncertainAccount = JsonDocument.Parse("""{"status":"not_verified"}"""))
+using (var partialApps = JsonDocument.Parse("""{"computerUseObservationStatus":"partial"}"""))
+using (var failedResult = JsonDocument.Parse("""{"error":"unavailable"}"""))
+{
+    Check(ComputerUsePlanner.IsVerifiedActionResult("open-github", 200, verifiedGithub.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("open-github", 200, missingGithubEvidence.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("open-github", 502, verifiedGithub.RootElement),
+        "multi-step navigation requires successful HTTP status and exact window/URL evidence");
+    Check(ComputerUsePlanner.IsVerifiedActionResult("read-github-account", 200, signedOutAccount.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("read-github-account", 200, uncertainAccount.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("read-approved-applications", 200, partialApps.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("open-edge", 200, failedResult.RootElement),
+        "multi-step observations fail closed on uncertain, partial, or error results");
+}
 var emptyApplicationObservation = WindowsDesktopAutomation.CreateApplicationObservation([], available: true, partial: false);
 Check(emptyApplicationObservation.Status == "empty" && emptyApplicationObservation.Applications.Count == 0,
     "a successful empty desktop observation is distinct from an error");

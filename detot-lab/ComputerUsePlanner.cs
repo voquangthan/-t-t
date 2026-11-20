@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Http;
 
 public sealed record ComputerUsePlan(bool Handled, IReadOnlyList<string> Actions);
 
@@ -51,4 +52,28 @@ public static partial class ComputerUsePlanner
     private static bool IsAllowed(string? action) => action is not null &&
         (ComputerUsePolicy.CanNavigate(action) ||
          ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(action)));
+
+    public static bool IsVerifiedActionResult(string action, int statusCode, JsonElement body)
+    {
+        if (statusCode >= StatusCodes.Status400BadRequest || body.ValueKind != JsonValueKind.Object ||
+            body.TryGetProperty("error", out _)) return false;
+        static bool IsTrue(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+        static string? ReadString(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+        return action switch
+        {
+            "open-workspace" => IsTrue(body, "workspaceVerified"),
+            "open-vscode" => IsTrue(body, "windowVerified") && IsTrue(body, "workspaceVerified"),
+            "open-edge" => IsTrue(body, "windowVerified"),
+            "open-github" => IsTrue(body, "windowVerified") && IsTrue(body, "urlVerified"),
+            "read-github-account" => ReadString(body, "status") is "verified" or "signed_out",
+            "read-approved-applications" => ReadString(body, "computerUseObservationStatus") is "available" or "empty",
+            "read-github-pull-requests" => ReadString(body, "reply") is { Length: > 0 } reply &&
+                !reply.Contains("GitHub đang giới hạn", StringComparison.OrdinalIgnoreCase) &&
+                !reply.Contains("hiện không đọc được trạng thái", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
 }
