@@ -7,6 +7,12 @@ public sealed record ComputerUsePlan(bool Handled, IReadOnlyList<string> Actions
 public static partial class ComputerUsePlanner
 {
     private const int MaximumSteps = 5;
+    public const string ToolName = "detot_computer_use_plan";
+    public static IReadOnlyList<string> AllowedActionIds { get; } = Array.AsReadOnly(new[]
+    {
+        "open-workspace", "open-vscode", "open-edge", "open-github",
+        "read-github-account", "read-github-pull-requests", "read-approved-applications"
+    });
 
     [GeneratedRegex(@"\b(mở|vào|xem|kiểm\s+tra|đọc|liệt\s+kê|open|launch|check|inspect|read|list|show|verify|go\s+to)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -16,6 +22,30 @@ public static partial class ComputerUsePlanner
         !string.IsNullOrWhiteSpace(message) && message.Length <= 600 &&
         !message.Contains('\n') && !message.Contains('\r') && !message.Contains('`') &&
         !message.Contains('"') && !message.Contains('\'') && ActionCue().IsMatch(message);
+
+    public static object CreateToolDefinition() => new
+    {
+        type = "function",
+        name = ToolName,
+        description = "Plan up to five ordered, distinct existing Computer Use navigation/observation actions for the user's direct request in this message. Use only the fixed action enum. Do not use for examples, quoted text, hypotheticals, or how-to questions. No write, shell, arbitrary path, URL, click, typing, or account selection actions exist.",
+        parameters = new
+        {
+            type = "object",
+            properties = new
+            {
+                handled = new { type = "boolean" },
+                actions = new
+                {
+                    type = "array",
+                    items = new { type = "string", @enum = AllowedActionIds },
+                    maxItems = MaximumSteps,
+                    uniqueItems = true
+                }
+            },
+            required = new[] { "handled", "actions" },
+            additionalProperties = false
+        }
+    };
 
     public static bool TryParse(string? json, out ComputerUsePlan? plan)
     {

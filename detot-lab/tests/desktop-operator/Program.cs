@@ -54,6 +54,17 @@ Check(!ComputerUsePlanner.TryParse("""{"handled":true,"actions":["run-shell"]}""
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode"],"command":"anything"}""", out _) &&
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode","open-edge","open-github","read-github-account","read-github-pull-requests","read-approved-applications"]}""", out _),
     "LLM plans reject shell, duplicates, dynamic arguments, extra properties, and overlong plans");
+using (var computerUseTool = JsonDocument.Parse(JsonSerializer.Serialize(ComputerUsePlanner.CreateToolDefinition())))
+{
+    var toolRoot = computerUseTool.RootElement;
+    var actionSchema = toolRoot.GetProperty("parameters").GetProperty("properties").GetProperty("actions");
+    Check(toolRoot.GetProperty("name").GetString() == ComputerUsePlanner.ToolName &&
+          actionSchema.GetProperty("maxItems").GetInt32() == 5 &&
+          actionSchema.GetProperty("uniqueItems").GetBoolean() &&
+          actionSchema.GetProperty("items").GetProperty("enum").EnumerateArray()
+              .Select(item => item.GetString()).SequenceEqual(ComputerUsePlanner.AllowedActionIds),
+        "Gateway Computer Use tool exposes only the bounded existing permission action IDs");
+}
 using (var verifiedGithub = JsonDocument.Parse("""{"windowVerified":true,"urlVerified":true}"""))
 using (var missingGithubEvidence = JsonDocument.Parse("""{"windowVerified":true,"urlVerified":false}"""))
 using (var signedOutAccount = JsonDocument.Parse("""{"status":"signed_out"}"""))
