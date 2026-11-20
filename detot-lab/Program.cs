@@ -106,6 +106,8 @@ var memoryEmbeddings = new MemoryEmbeddings(app.Services.GetRequiredService<IHtt
     builder.Configuration["DETOT_MEMORY_EMBED_MODEL"], builder.Configuration["DETOT_MEMORY_EMBED_REVISION"], app.Logger);
 var practiceDirectory = builder.Configuration["DETOT_PRACTICE_DIRECTORY"] ??
     Path.Combine(builder.Environment.ContentRootPath, ".local", "practice");
+var desktopRepositoryRoot = DesktopOperator.FindRepositoryRoot(builder.Environment.ContentRootPath);
+var desktopCompanion = new DesktopCompanionClient();
 var practice = OperatingSystem.IsWindows()
     ? new Practice(app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("Detot.Practice.v1"),
         practiceDirectory)
@@ -199,6 +201,50 @@ app.UseStaticFiles();
 app.UseRateLimiter();
 app.MapGet("/health", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/workspace", () => Results.Redirect("/app/index.html"));
+app.MapGet("/api/desktop/status", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress)) return Results.NotFound();
+    return Results.Ok(await DesktopOperator.ReadWorkspaceStatusAsync(desktopRepositoryRoot, cancellationToken));
+});
+app.MapGet("/api/desktop/permissions", (HttpContext context) =>
+    !DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress) ? Results.NotFound() : Results.Ok(ComputerUsePolicy.Describe()));
+app.MapPost("/api/desktop/actions", async (HttpContext context, DesktopActionRequest request,
+    CancellationToken cancellationToken) =>
+{
+    if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
+    if (!ComputerUsePolicy.CanNavigate(request.Action) || ComputerUsePolicy.CanWrite(request.Action))
+        return Results.BadRequest(new { error = "Hành động không được hỗ trợ." });
+
+    switch (request.Action)
+    {
+        case "open-edge":
+            return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-edge", cancellationToken));
+        case "open-vscode":
+            return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-vscode", cancellationToken));
+        case "open-workspace":
+            return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-workspace", cancellationToken));
+        default:
+            return BrowserActionResult(await desktopCompanion.ExecuteAsync("open-github", cancellationToken));
+    }
+}).RequireRateLimiting("chat");
+app.MapPost("/api/desktop/observe", async (HttpContext context, DesktopObserveRequest request,
+    CancellationToken cancellationToken) =>
+{
+    if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+        context.Connection.RemoteIpAddress) || !IsLocalMutation(context)) return Results.NotFound();
+    if (!ComputerUsePolicy.CanObserve(request.Target))
+        return Results.BadRequest(new { error = "Nguồn quan sát không được hỗ trợ." });
+    if (request.Target == "approved-applications")
+    {
+        return BrowserActionResult(await desktopCompanion.ExecuteAsync("observe-applications", cancellationToken));
+    }
+    if (request.Target == "github-account")
+        return BrowserActionResult(await desktopCompanion.ExecuteAsync("read-github-account", cancellationToken));
+    return BrowserActionResult(await desktopCompanion.ExecuteAsync("read-github-pull-requests", cancellationToken));
+}).RequireRateLimiting("chat");
 var memory = app.MapGroup("/api/memory");
 app.MapGet("/api/consent", (HttpContext context) => consentPolicy is null
     ? Results.StatusCode(503) : Results.Ok(consentPolicy.Get(MemoryOwner(context))));
@@ -647,9 +693,6 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             return Results.BadRequest(new { error = "Hãy kết thúc bài luyện trước khi gửi tệp hoặc ảnh." });
         if (consentPolicy is null) return Results.StatusCode(503);
         var owner = MemoryOwner(context);
-        consentPolicy.RecordExplicitAction(owner,
-            new ConsentPolicy.ConsentRequirement("chat_message", "direct_request", "external_service"),
-            "chat_send", request.RequestId);
         var requiredConsents = (request.ConsentRequirements ?? []).ToList();
         if (requiredConsents.Count > 16 || requiredConsents.Any(item => item is null ||
             item.Source is not { Length: > 0 and <= 80 } || item.Purpose is not { Length: > 0 and <= 80 } ||
@@ -661,23 +704,112 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         if (!string.IsNullOrWhiteSpace(request.CalendarContext))
             requiredConsents.Add(new("calendar", "direct_request", "DeepSeek"));
         var historyRevisionHeader = context.Request.Headers["X-Detot-History-Revision"].ToString();
-        if (chatHistory is not null && Guid.TryParse(historyRevisionHeader, out _) &&
-            !consentPolicy.Check(owner, [new ConsentPolicy.ConsentRequirement("chat_history", "direct_request", "local_only")],
-                "chat_history_save", request.RequestId, out _))
-            return Results.Json(new { error = "Chưa được cấp quyền lưu lịch sử Chat cục bộ." }, statusCode: StatusCodes.Status403Forbidden);
-        if (requiredConsents.Count > 0 && !consentPolicy.Check(owner, requiredConsents, "chat_context",
-            request.RequestId, out var deniedConsents))
-            return Results.Json(new { error = "Chưa được cấp quyền cho một hoặc nhiều nguồn ngữ cảnh.", denied = deniedConsents },
-                statusCode: StatusCodes.Status403Forbidden);
         context.Items["conversationId"] = request.ConversationId;
+
+        var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
+        var practicing = ComputerUseChatDispatcher.IsPracticeMode(request.StartPractice, caseState is not null);
+        var miniPractice = ComputerUseChatDispatcher.IsMiniPracticeMode(request.MiniPractice, request.StartMiniPractice);
+
+        async Task<IResult> ExecuteDirectComputerUse(string computerAction)
+        {
+            var observationTarget = ComputerUseChatIntent.ObservationTargetForAction(computerAction);
+            if (!ComputerUsePolicy.CanNavigate(computerAction) && !ComputerUsePolicy.CanObserve(observationTarget))
+                return Results.BadRequest(new { error = "Hành động Computer Use không được cấp phép." });
+            if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+                context.Connection.RemoteIpAddress))
+                return Results.Problem("Computer Use chỉ hoạt động khi Đệ Tốt chạy local trên Windows.", statusCode: 503);
+            var destination = computerAction is "open-github" or "read-github-account" or "read-github-pull-requests"
+                ? "GitHub" : "local_only";
+            consentPolicy.RecordExplicitAction(owner,
+                new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", destination),
+                "chat_computer_use", request.RequestId);
+            return await ExecuteComputerUseChatAction(computerAction, desktopRepositoryRoot, desktopCompanion,
+                cancellationToken);
+        }
+
+        async Task<IResult> ExecutePlannedComputerUse(ComputerUsePlan plan)
+        {
+            if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+                context.Connection.RemoteIpAddress))
+                return Results.Problem("Computer Use chỉ hoạt động khi Đệ Tốt chạy local trên Windows.", statusCode: 503);
+
+            var completedActions = new List<string>();
+            var replies = new List<string>();
+            foreach (var computerAction in plan.Actions)
+            {
+                var observationTarget = ComputerUseChatIntent.ObservationTargetForAction(computerAction);
+                if (!ComputerUsePolicy.CanNavigate(computerAction) && !ComputerUsePolicy.CanObserve(observationTarget))
+                    return Results.BadRequest(new { error = "Kế hoạch có hành động Computer Use chưa được cấp quyền." });
+
+                var destination = computerAction is "open-github" or "read-github-account" or "read-github-pull-requests"
+                    ? "GitHub" : "local_only";
+                consentPolicy.RecordExplicitAction(owner,
+                    new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", destination),
+                    "chat_computer_use_plan", request.RequestId);
+
+                var actionResult = await ExecuteComputerUseChatAction(computerAction, desktopRepositoryRoot,
+                    desktopCompanion, cancellationToken);
+                var captured = await CaptureComputerUseResultAsync(actionResult);
+                if (captured.StatusCode >= StatusCodes.Status400BadRequest ||
+                    !ComputerUsePlanner.IsVerifiedActionResult(computerAction, captured.StatusCode, captured.Body))
+                {
+                    var stepReply = captured.Body.TryGetProperty("reply", out var replyValue) &&
+                        replyValue.ValueKind == JsonValueKind.String ? replyValue.GetString() : null;
+                    if (!string.IsNullOrWhiteSpace(stepReply)) replies.Add(stepReply!);
+                    return Results.Json(new
+                    {
+                        reply = string.Join("\n", replies.Append($"Đã dừng tại bước {computerAction}; kết quả chưa được xác minh đầy đủ.")),
+                        toolUsed = true,
+                        computerUseAction = "multi-step",
+                        completedActions,
+                        stoppedAction = computerAction,
+                        allStepsVerified = false
+                    }, statusCode: captured.StatusCode >= StatusCodes.Status400BadRequest
+                        ? captured.StatusCode : StatusCodes.Status502BadGateway);
+                }
+
+                completedActions.Add(computerAction);
+                if (captured.Body.TryGetProperty("reply", out var stepReplyValue) &&
+                    stepReplyValue.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(stepReplyValue.GetString()))
+                    replies.Add(stepReplyValue.GetString()!);
+            }
+
+            return Results.Ok(new
+            {
+                reply = string.Join("\n", replies),
+                toolUsed = true,
+                computerUseAction = "multi-step",
+                completedActions,
+                allStepsVerified = true
+            });
+        }
+
+        async Task<IResult?> AuthorizeNormalChat()
+        {
+            if (chatHistory is not null && Guid.TryParse(historyRevisionHeader, out _) &&
+                !consentPolicy.Check(owner, [new ConsentPolicy.ConsentRequirement("chat_history", "direct_request", "local_only")],
+                    "chat_history_save", request.RequestId, out _))
+                return Results.Json(new { error = "Chưa được cấp quyền lưu lịch sử Chat cục bộ." }, statusCode: StatusCodes.Status403Forbidden);
+            if (requiredConsents.Count > 0 && !consentPolicy.Check(owner, requiredConsents, "chat_context",
+                request.RequestId, out var deniedConsents))
+                return Results.Json(new { error = "Chưa được cấp quyền cho một hoặc nhiều nguồn ngữ cảnh.", denied = deniedConsents },
+                    statusCode: StatusCodes.Status403Forbidden);
+            return null;
+        }
+
+        var chatRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync<IResult>(message,
+            practicing, miniPractice, ExecuteDirectComputerUse, AuthorizeNormalChat);
+        if (!chatRoute.ContinueToChat) return chatRoute.Result ??
+            Results.Problem("Computer Use hoặc kiểm tra quyền không trả kết quả.", statusCode: 502);
+
+        consentPolicy.RecordExplicitAction(owner,
+            new ConsentPolicy.ConsentRequirement("chat_message", "direct_request", "external_service"),
+            "chat_send", request.RequestId);
 
         using var gateway = factory.CreateClient("gateway");
         if (request.ConversationId is Guid conversationId)
             gateway.DefaultRequestHeaders.Add("x-openclaw-session-key", ConversationKey(conversationId));
         var tools = new List<object>();
-        var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
-        var practicing = request.StartPractice || caseState is not null;
-        var miniPractice = request.MiniPractice || request.StartMiniPractice;
         Practice.AgenticTask? reminderTask = null;
         string? memoryFallbackNotice = null;
         if (practice is not null && !practicing && !miniPractice && request.CalendarContext is null &&
@@ -970,6 +1102,16 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     additionalProperties = false
                 }
             });
+        var computerUseToolAvailable = !practicing && !miniPractice && request.DocumentContext is null &&
+            visionImages.Length == 0 && string.IsNullOrWhiteSpace(request.CalendarContext) && !calendarRequest &&
+            tools.Count == 0 &&
+            DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+                context.Connection.RemoteIpAddress) && ComputerUsePlanner.MightBeActionRequest(message);
+        if (computerUseToolAvailable)
+        {
+            tools.Add(ComputerUsePlanner.CreateToolDefinition());
+            effectiveInstructions += "\n\nNếu tin nhắn hiện tại trực tiếp yêu cầu mở hoặc quan sát các ứng dụng/GitHub trong quyền Computer Use, hãy gọi tool detot_computer_use_plan với chuỗi hành động cần thiết. Chỉ gọi dựa trên yêu cầu trực tiếp hiện tại; bỏ qua ví dụ/trích dẫn và không tự thêm bước. Backend sẽ xác minh kết quả từng bước. Không tuyên bố đã thao tác nếu tool không trả xác minh thành công.";
+        }
         using var first = await CallGateway(gateway, new
         {
             model = "openclaw/default",
@@ -984,6 +1126,16 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
 
         var calls = first.RootElement.GetProperty("output").EnumerateArray()
             .Where(item => item.GetProperty("type").GetString() == "function_call").ToArray();
+        var computerUseCalls = calls.Where(call => call.GetProperty("name").GetString() == ComputerUsePlanner.ToolName).ToArray();
+        if (computerUseCalls.Length > 0)
+        {
+            if (!computerUseToolAvailable || calls.Length != 1 ||
+                !ComputerUsePlanner.TryParse(computerUseCalls[0].GetProperty("arguments").GetString(), out var computerPlan) ||
+                computerPlan is not { Handled: true, Actions.Count: > 0 })
+                return Results.Problem("Kế hoạch Computer Use không hợp lệ hoặc không được phép. Chưa thực hiện thao tác.", statusCode: 502);
+            app.Logger.LogInformation("Gateway planned {StepCount} allowlisted Computer Use steps.", computerPlan.Actions.Count);
+            return await ExecutePlannedComputerUse(computerPlan);
+        }
         if (reminderTask is { } selectedTask && calls.Length == 1 &&
             calls[0].GetProperty("name").GetString() == "detot_memory_calendar_reminder")
         {
@@ -1290,6 +1442,17 @@ static async Task<string> MemoryCompletion(HttpClient client, string key, string
         ? choice.GetProperty("message").GetProperty("content").GetString() ?? "" : "";
 }
 
+static async Task<(int StatusCode, JsonElement Body)> CaptureComputerUseResultAsync(IResult result)
+{
+    var context = new DefaultHttpContext();
+    await using var body = new MemoryStream();
+    context.Response.Body = body;
+    await result.ExecuteAsync(context);
+    body.Position = 0;
+    using var document = await JsonDocument.ParseAsync(body);
+    return (context.Response.StatusCode, document.RootElement.Clone());
+}
+
 static async Task<string?> AnswerFromMemory(HttpClient client, string? key, string question,
     Practice.MemoryHit hit, ILogger logger, CancellationToken cancellationToken)
 {
@@ -1366,6 +1529,156 @@ static bool IsGoogleCalendarCommand(string message) =>
         @"^\s*(?:(?:hãy|giúp mình|giúp tôi)\s+)?(?:đặt|tạo|thêm|lên)\s+(?:lịch|sự kiện)\b[^\r\n]*\bGoogle Calendar\b",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
+static IResult BrowserActionResult(JsonElement result)
+{
+    if (result.TryGetProperty("error", out var error))
+    {
+        var reason = error.GetString() ?? "browser_operation_failed";
+        var status = reason switch
+        {
+            "playwright_unavailable" => 503,
+            "browser_timeout" => 504,
+            "companion_unavailable" or "companion_unauthorized" or "desktop_observation_unavailable" or
+                "account_observation_unavailable" or "companion_protocol_error" or "edge_unavailable" or
+                "vscode_unavailable" or "workspace_open_failed" or "github_repository_unavailable" => 503,
+            "companion_timeout" => 504,
+            _ when reason.StartsWith("github_http_", StringComparison.Ordinal) &&
+                   int.TryParse(reason.AsSpan("github_http_".Length), out var httpStatus) &&
+                   httpStatus is >= 400 and <= 599 => httpStatus,
+            _ => 502
+        };
+        return Results.Json(new { error = reason }, statusCode: status);
+    }
+    return Results.Ok(result);
+}
+
+static async Task<IResult> ExecuteComputerUseChatAction(string action, string? repositoryRoot,
+    DesktopCompanionClient companion, CancellationToken cancellationToken)
+{
+    if (action == "read-approved-applications")
+    {
+        var result = await companion.ExecuteAsync("observe-applications", cancellationToken);
+        if (result.TryGetProperty("error", out _)) return BrowserActionResult(result);
+        var status = result.TryGetProperty("observationStatus", out var statusValue) ? statusValue.GetString() : "unavailable";
+        var names = result.TryGetProperty("applications", out var appList) && appList.ValueKind == JsonValueKind.Array
+            ? appList.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()).ToArray()
+            : [];
+        var reply = status switch
+        {
+            "empty" => "Quan sát hoàn tất; không thấy ứng dụng nào trong danh sách được phép.",
+            "partial" => "Chỉ quan sát được một phần ứng dụng desktop: " + string.Join(", ", names) + ".",
+            "available" => "Các ứng dụng đang mở: " + string.Join(", ", names) + ".",
+            _ => "Companion chưa cung cấp được trạng thái desktop."
+        };
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action, computerUseObservationStatus = status });
+    }
+
+    var companionAction = action switch
+    {
+        "open-workspace" => "open-workspace",
+        "open-vscode" => "open-vscode",
+        "open-edge" => "open-edge",
+        "open-github" => "open-github",
+        "read-github-account" => "read-github-account",
+        "read-github-pull-requests" => "read-github-pull-requests",
+        _ => ""
+    };
+    if (companionAction.Length == 0) return Results.BadRequest(new { error = "Hành động Computer Use không được hỗ trợ." });
+    var response = await companion.ExecuteAsync(companionAction, cancellationToken);
+    if (action == "read-github-account")
+    {
+        var actionSucceeded = !response.TryGetProperty("error", out _);
+        var username = response.TryGetProperty("username", out var usernameValue) && usernameValue.ValueKind == JsonValueKind.String
+            ? usernameValue.GetString() : null;
+        var status = response.TryGetProperty("status", out var accountStatus) ? accountStatus.GetString() : null;
+        var observation = DesktopCompanionVerification.NormalizeGithubAccountResult(actionSucceeded, status, username);
+        var reply = observation.Status switch
+        {
+            "verified" => $"GitHub đang hiển thị tài khoản @{observation.Username}.",
+            "signed_out" => "Edge profile riêng đang đăng xuất khỏi GitHub.",
+            "failed" => "Không thể mở hoặc kiểm tra GitHub trong Edge profile riêng.",
+            _ => "Không thể xác minh trạng thái tài khoản GitHub qua giao diện; không đọc credential."
+        };
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action,
+            status = observation.Status, username = observation.Username });
+    }
+    if (response.TryGetProperty("error", out _)) return BrowserActionResult(response);
+    if (action is "open-workspace" or "open-vscode")
+    {
+        var verified = response.TryGetProperty("windowVerified", out var verifiedValue) && verifiedValue.ValueKind == JsonValueKind.True;
+        var workspaceVerified = response.TryGetProperty("workspaceVerified", out var workspaceValue) && workspaceValue.ValueKind == JsonValueKind.True;
+        var expectedWorkspace = response.TryGetProperty("expectedWorkspace", out var expectedWorkspaceValue) && expectedWorkspaceValue.ValueKind == JsonValueKind.String
+            ? expectedWorkspaceValue.GetString() : null;
+        var observedWorkspace = response.TryGetProperty("observedWorkspace", out var observedWorkspaceValue) && observedWorkspaceValue.ValueKind == JsonValueKind.String
+            ? observedWorkspaceValue.GetString() : null;
+        var workspaceReason = response.TryGetProperty("workspaceVerificationReason", out var reasonValue) && reasonValue.ValueKind == JsonValueKind.String
+            ? reasonValue.GetString() : null;
+        object? evidence = response.TryGetProperty("evidence", out var evidenceValue) && evidenceValue.ValueKind != JsonValueKind.Undefined
+            ? evidenceValue.Clone() : null;
+        var reply = action == "open-workspace"
+            ? workspaceVerified ? "Đã mở Explorer và xác minh thư mục workspace." : "Đã gửi yêu cầu mở Explorer; chưa xác minh được cửa sổ workspace."
+            : verified && workspaceVerified ? "Đã mở và xác minh VS Code cùng workspace." :
+                $"Đã mở cửa sổ VS Code riêng nhưng chưa xác minh workspace. Mong đợi: {expectedWorkspace ?? "không có"}; " +
+                $"quan sát: {observedWorkspace ?? "chưa có tín hiệu UIA"}; lý do: {workspaceReason ?? "không rõ"}.";
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action,
+            windowVerified = verified, workspaceVerified, expectedWorkspace, observedWorkspace,
+            workspaceVerificationReason = workspaceReason, evidence });
+    }
+    if (action is "open-edge" or "open-github")
+    {
+        var verified = response.TryGetProperty("windowVerified", out var verifiedValue) && verifiedValue.ValueKind == JsonValueKind.True;
+        var urlVerified = response.TryGetProperty("urlVerified", out var urlVerifiedValue) && urlVerifiedValue.ValueKind == JsonValueKind.True;
+        var reply = !verified ? "Đã gửi yêu cầu mở Edge nhưng chưa xác nhận được cửa sổ." :
+            action == "open-github" && !urlVerified ? "Edge đã mở; chưa thể xác minh URL qua UI Automation." :
+            action == "open-github" ? "Đã mở và xác minh GitHub trong profile riêng của Đệ Tốt." : "Đã mở Edge trong profile riêng của Đệ Tốt.";
+        return Results.Ok(new { reply, toolUsed = true, computerUseAction = action, windowVerified = verified,
+            urlVerified, url = response.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null });
+    }
+    return ToChatActionResponse(response, action);
+}
+
+static IResult ToChatActionResponse(JsonElement result, string action)
+{
+    if (action == "read-github-pull-requests" && result.TryGetProperty("pullRequests", out var pulls) && pulls.ValueKind == JsonValueKind.Array)
+    {
+        if (pulls.GetArrayLength() == 0)
+            return Results.Ok(new { reply = "Không có Pull Request công khai gần đây trong repository hiện tại.", toolUsed = true, computerUseAction = action });
+
+        var lines = new List<string> { "Pull Request và CI công khai trong repository hiện tại:" };
+        foreach (var pull in pulls.EnumerateArray().Take(3))
+        {
+            var number = pull.TryGetProperty("number", out var numberValue) ? numberValue.ToString() : "?";
+            var title = pull.TryGetProperty("title", out var titleValue) ? titleValue.GetString() ?? "(không có tiêu đề)" : "(không có tiêu đề)";
+            title = title.Replace('\r', ' ').Replace('\n', ' ').Replace('`', 'ˋ');
+            var state = pull.TryGetProperty("state", out var stateValue) ? stateValue.GetString() ?? "không rõ" : "không rõ";
+            var sha = pull.TryGetProperty("headSha", out var shaValue) ? shaValue.GetString() ?? "" : "";
+            lines.Add($"- #{number} `{title}` · {state}{(sha.Length >= 8 ? $" · commit {sha[..8]}" : "")}");
+            if (pull.TryGetProperty("checksStatus", out var checkStatus) && checkStatus.GetString() == "unavailable")
+            {
+                var reason = pull.TryGetProperty("checksError", out var checkError) ? checkError.GetString() : null;
+                lines.Add(reason == "rate_limited" ? "  CI: GitHub đang giới hạn yêu cầu." : "  CI: hiện không đọc được trạng thái.");
+            }
+            else if (pull.TryGetProperty("checksStatus", out checkStatus) && checkStatus.GetString() == "empty")
+                lines.Add("  CI: API xác nhận chưa có check run.");
+            else if (pull.TryGetProperty("checks", out var checks) && checks.ValueKind == JsonValueKind.Array)
+            {
+                var names = checks.EnumerateArray().Take(8).Select(check =>
+                {
+                    var name = check.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "check" : "check";
+                    var outcome = check.TryGetProperty("conclusion", out var conclusion) && conclusion.ValueKind == JsonValueKind.String
+                        ? conclusion.GetString()
+                        : check.TryGetProperty("status", out var checkState) ? checkState.GetString() : "unknown";
+                    return $"{name.Replace('\r', ' ').Replace('\n', ' ').Replace('`', 'ˋ')}: {outcome}";
+                });
+                lines.Add("  CI: " + string.Join("; ", names));
+            }
+        }
+        return Results.Ok(new { reply = string.Join("\n", lines), toolUsed = true, computerUseAction = action });
+    }
+
+    return Results.Problem("Computer Use trả về dữ liệu không hợp lệ.", statusCode: 502);
+}
+
 record ChatTurn(string Role, string Text);
 record ChatRequest(string? Message, Guid? RequestId, string? CalendarContext, ChatTurn[]? History, Guid? ConversationId,
     bool StartPractice = false, string? DocumentContext = null, string[]? VisionImages = null,
@@ -1382,3 +1695,5 @@ record WeatherLocationEdit(string? City);
 record WeatherFeedbackEdit(string? Decision);
 record MemoryCalendarReminder(int Version, Guid RequestId, DateTimeOffset Start, DateTimeOffset End,
     int[]? ReminderMinutes);
+record DesktopActionRequest(string? Action);
+record DesktopObserveRequest(string? Target);

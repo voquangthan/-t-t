@@ -1,0 +1,69 @@
+name: Computer Use CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: computer-use-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  windows-regression:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out pull request source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install pinned pnpm
+        run: npm install --global pnpm@10.12.1
+
+      - name: Build Backend
+        run: dotnet build detot-lab/Detot.Lab.csproj --verbosity minimal -p:NuGetAudit=false
+
+      - name: Build Desktop Companion with WinApp UI Automation
+        run: dotnet build detot-lab/desktop-companion/DesktopCompanion.csproj --configuration Release --verbosity minimal -p:NuGetAudit=false
+
+      - name: Run Desktop Operator regression
+        run: dotnet run --project detot-lab/tests/desktop-operator/DesktopOperator.Tests.csproj -p:NuGetAudit=false
+
+      - name: Run Cloud Storage regression
+        working-directory: detot-lab
+        run: dotnet run --project tests/cloud-storage/CloudStorageChecks.csproj -p:NuGetAudit=false
+
+      - name: Run GitHub reader tests
+        run: node --test detot-lab/tests/desktop-operator/github-checks.test.mjs
+
+      - name: Check Edge reader JavaScript syntax
+        run: node --check detot-lab/tools/computer-use/edge-reader.mjs
+
+      - name: Check GitHub checks JavaScript syntax
+        run: node --check detot-lab/tools/computer-use/github-checks.mjs
+
+      - name: Install frontend dependencies
+        working-directory: detot-lab/frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Test frontend
+        working-directory: detot-lab/frontend
+        run: pnpm test
+
+      - name: Build frontend
+        working-directory: detot-lab/frontend
+        run: pnpm build

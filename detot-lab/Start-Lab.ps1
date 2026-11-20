@@ -305,6 +305,9 @@ try {
         DETOT_GATEWAY_TOKEN = $token
         DETOT_LAB_NODE = $node
         DETOT_LAB_RUNTIME = $gateway
+        DETOT_NODE_EXECUTABLE = $node
+        DETOT_PLAYWRIGHT_CORE = Join-Path (Split-Path (Split-Path $gateway -Parent) -Parent) 'playwright-core'
+        DETOT_DESKTOP_EDGE_PROFILE = Join-Path $runtimeDir 'computer-use/edge-profile'
         OPENCLAW_STATE_DIR = $state
         OPENCLAW_CONFIG_PATH = $configPath
         DETOT_WEB_PORT = [string]$WebPort

@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/history.test.mjs",
+    "test": "node --test tests/history.test.mjs tests/chat-consent.test.mjs",
     "build": "tsc && vite build --base=/app/ --outDir=../wwwroot/app --emptyOutDir"
   },
   "keywords": [],

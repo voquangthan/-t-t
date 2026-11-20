@@ -9,6 +9,7 @@ import { AgenticTasks } from "./AgenticTasks";
 import { PersonalNotes } from "./PersonalNotes";
 import { ConsentSettings } from "./ConsentSettings";
 import { WeatherIntelligence } from "./WeatherIntelligence";
+import { DesktopActions } from "./DesktopActions";
 import { Icon, Overview } from "./Overview";
 import { createRoot } from "react-dom/client";
 import Markdown from "react-markdown";
@@ -20,6 +21,7 @@ import python from "highlight.js/lib/languages/python";
 import json from "highlight.js/lib/languages/json";
 import csharp from "highlight.js/lib/languages/csharp";
 import { type Conversation, type Message, forkMessages, visibleConversations } from "./history";
+import { preflightConsentRequirements } from "./chatConsent";
 import "./style.css";
 
 const storageKey = "detot.conversations.v1";
@@ -113,7 +115,7 @@ function AttachmentChip({ file, onRemove }: { file: File; onRemove: () => void }
 }
 
 function App() {
-  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "weather" | "privacy" | "cloud" | "learning" | "dreaming" | "practice" | "skills";
+  type AppView = "overview" | "chat" | "tasks" | "calendar" | "notes" | "weather" | "privacy" | "cloud" | "learning" | "dreaming" | "practice" | "skills" | "computer";
   const [view, setView] = useState<AppView>(() => {
     const params = new URLSearchParams(location.search);
     return params.has("calendar") ? "calendar" : params.has("drive") ? "cloud" : "overview";
@@ -277,9 +279,13 @@ function App() {
       if (pendingCalendarContext) requestConsents.push(
         { source: "calendar", purpose: "direct_request", destination: "DeepSeek" },
       );
-      if (requestConsents.length) {
+      // Chat history is only sent to an external model for normal chat. The
+      // backend handles allowlisted local Computer Use intents before checking
+      // these external-context consents, and remains the authority for normal chat.
+      const preflightConsents = preflightConsentRequirements(requestConsents);
+      if (preflightConsents.length) {
         const permission = await fetch("/api/consent/check", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ requirements: requestConsents, requestId }) });
+          body: JSON.stringify({ requirements: preflightConsents, requestId }) });
         if (permission.status === 403) throw new Error("Yêu cầu cần quyền cho nguồn dữ liệu tương ứng trong mục Quyền riêng tư.");
         if (!permission.ok) throw new Error("Không kiểm tra được quyền riêng tư trước khi truy xuất dữ liệu.");
       }
@@ -438,12 +444,12 @@ function App() {
   }
 
   const last = conversation?.messages.at(-1);
-  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", weather:"Thời tiết", privacy:"Quyền riêng tư", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập" };
+  const titles: Record<AppView, string> = { overview:"Tổng quan", chat:conversation?.title ?? "Trò chuyện", tasks:"Công việc", calendar:"Lịch", notes:"Ghi chú", weather:"Thời tiết", privacy:"Quyền riêng tư", cloud:"Cloud Storage", learning:"Nguồn học", dreaming:"Dreaming", practice:"Ca trực giả lập", skills:"Bản đồ học tập", computer:"Trợ lý máy tính" };
   const navItems: Array<{id:AppView;label:string;icon:string}> = [
     {id:"overview",label:"Tổng quan",icon:"overview"},{id:"chat",label:"Trò chuyện",icon:"chat"},{id:"tasks",label:"Công việc",icon:"tasks"},{id:"calendar",label:"Lịch",icon:"calendar"},{id:"notes",label:"Ghi chú",icon:"notes"},{id:"weather",label:"Thời tiết",icon:"weather"},{id:"privacy",label:"Quyền riêng tư",icon:"privacy"}
   ];
   const toolItems: Array<{id:AppView;label:string;icon:string}> = [
-    {id:"cloud",label:"Cloud Storage",icon:"cloud"},{id:"learning",label:"Nguồn học",icon:"book"},{id:"dreaming",label:"Dreaming",icon:"dream"},{id:"practice",label:"Ca trực giả lập",icon:"practice"},{id:"skills",label:"Bản đồ học tập",icon:"skills"}
+    {id:"cloud",label:"Cloud Storage",icon:"cloud"},{id:"learning",label:"Nguồn học",icon:"book"},{id:"dreaming",label:"Dreaming",icon:"dream"},{id:"practice",label:"Ca trực giả lập",icon:"practice"},{id:"skills",label:"Bản đồ học tập",icon:"skills"},{id:"computer",label:"Trợ lý máy tính",icon:"computer"}
   ];
   const startChat = (text:string) => {setView("chat");void send(text,blank(),[],uid());};
   async function openSkills(){
@@ -499,6 +505,7 @@ function App() {
         {view==="overview"&&<Overview onNavigate={navigate} onChat={startChat}/>}
         {view==="tasks"&&<AgenticTasks/>}{view==="calendar"&&<Calendar/>}{view==="notes"&&<PersonalNotes/>}
         {view==="weather"&&<WeatherIntelligence onNavigate={navigate}/>}
+        {view==="computer"&&<DesktopActions/>}
         {view==="privacy"&&<ConsentSettings/>}
         {view==="cloud"&&<CloudStorage/>}{view==="learning"&&<TrustedLearning initialRequest={learningIntent}/>}
         {view==="dreaming"&&<MemoryReview/>}
