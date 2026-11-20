@@ -1104,6 +1104,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             });
         var computerUseToolAvailable = !practicing && !miniPractice && request.DocumentContext is null &&
             visionImages.Length == 0 && string.IsNullOrWhiteSpace(request.CalendarContext) && !calendarRequest &&
+            tools.Count == 0 &&
             DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
                 context.Connection.RemoteIpAddress) && ComputerUsePlanner.MightBeActionRequest(message);
         if (computerUseToolAvailable)
