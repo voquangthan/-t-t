@@ -374,6 +374,40 @@ Check(ComputerUseIntentScope.TryCreate("Mở Calculator rồi bấm nút Equals"
       !genericAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
       !ComputerUseIntentScope.TryCreate("Mở PowerShell rồi bấm nút Enter", out _),
     "an unadapted installed app uses the desktop adapter only for its named window and requested control");
+Check(ComputerUseIntentScope.TryCreate("Mở Calculator, bấm nút Equals; mở Notepad, bấm nút Save", out var genericMultiAppScope) &&
+      genericMultiAppScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Calculator", null, null)) &&
+      genericMultiAppScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
+      genericMultiAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null)) &&
+      genericMultiAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
+      !genericMultiAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Edge", null, null)),
+    "multiple unadapted apps are individually scoped without exposing an unrequested app");
+Check(genericMultiAppScope!.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000020", "e1", null, null, null, null),
+          observedElementName: "Equals", observedTarget: "calculator|new") &&
+      genericMultiAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000021", "e2", null, null, null, null),
+          observedElementName: "Save", observedTarget: "notepad|new") &&
+      !genericMultiAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000020", "e2", null, null, null, null),
+          observedElementName: "Save", observedTarget: "calculator|new") &&
+      !genericMultiAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000021", "e1", null, null, null, null),
+          observedElementName: "Equals", observedTarget: "notepad|new"),
+    "generic desktop actions bind observed controls to their individual application windows");
+Check(ComputerUseIntentScope.TryCreate("Mở Calculator, bấm nút Equals; mở Paint, bấm nút Save", out var genericOnlyMultiAppScope) &&
+      genericOnlyMultiAppScope!.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null)) &&
+      genericOnlyMultiAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Paint", null, null)) &&
+      genericOnlyMultiAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000023", "e1", null, null, null, null),
+          observedElementName: "Equals", observedTarget: "calculator|new") &&
+      genericOnlyMultiAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000024", "e2", null, null, null, null),
+          observedElementName: "Save", observedTarget: "paint|new") &&
+      !genericOnlyMultiAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000023", "e2", null, null, null, null),
+          observedElementName: "Save", observedTarget: "calculator|new") &&
+      !genericOnlyMultiAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Edge", null, null)),
+    "multiple generic installed apps retain independent scopes even though both use the desktop adapter");
+using (var genericMultiObservation = JsonDocument.Parse("""{"status":"observed","observationId":"00000000000000000000000000000022","elements":[{"id":"e1","name":"Equals"},{"id":"e2","name":"Save"}]}"""))
+using (var genericMultiFiltered = JsonDocument.Parse(genericMultiAppScope!.FilterObservationForModel(
+           genericMultiObservation.RootElement,
+           new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null))))
+    Check(genericMultiFiltered.RootElement.GetProperty("elements").EnumerateArray()
+          .Select(element => element.GetProperty("name").GetString()).SequenceEqual(new[] { "Equals" }),
+        "generic multi-app observations expose only controls for the named app task");
 var genericWindowTargets = new Dictionary<string, string>(StringComparer.Ordinal);
 var genericObservationTargets = new Dictionary<string, string>(StringComparer.Ordinal);
 using (var genericLaunchEvidence = JsonDocument.Parse("""{"status":"verified","windowId":"00000000000000000000000000000003"}"""))

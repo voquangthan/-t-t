@@ -1276,7 +1276,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                             toolUsed = true, verifiedSteps, allActionsVerified = false }, statusCode: 502);
 
                     var uiResult = await desktopCompanion.ExecuteUiAsync(uiAction, cancellationToken);
-                    var modelUiResultJson = desktopRequestScope!.FilterObservationForModel(uiResult, uiAction);
+                    var modelUiResultJson = desktopRequestScope!.FilterObservationForModel(uiResult, uiAction, requestedTarget);
                     using var modelUiResultDocument = JsonDocument.Parse(modelUiResultJson);
                     var modelUiResult = modelUiResultDocument.RootElement;
                     ComputerUseIntentScope.RecordObservedElements(modelUiResult, observedUiElements);
