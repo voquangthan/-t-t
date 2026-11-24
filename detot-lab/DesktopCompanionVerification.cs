@@ -1,11 +1,14 @@
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Security.Cryptography;
+using System.Text;
 
 public static partial class DesktopCompanionVerification
 {
     public sealed record WorkspaceEvidence(string ExpectedWorkspace, string? ObservedWorkspace,
-        bool Verified, string Reason, bool WindowTitleMatched, bool RootLabelMatched, bool AccessiblePathMatched);
+        bool Verified, string Reason, bool WindowTitleMatched, bool RootLabelMatched, bool AccessiblePathMatched,
+        bool ProcessCommandLineMatched);
 
     private static readonly Regex UserDataDir = new(
         "(?:^|\\s)(?:\\\"--user-data-dir=(?<wholeQuoted>[^\\\"]+)\\\"|--user-data-dir(?:=|\\s+)(?:\\\"(?<quoted>[^\\\"]+)\\\"|(?<plain>[^\\s]+)))",
@@ -21,6 +24,11 @@ public static partial class DesktopCompanionVerification
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     public static bool IsDedicatedEdgeCommandLine(string? commandLine, string expectedProfile)
+    {
+        return HasExactUserDataDirectory(commandLine, expectedProfile);
+    }
+
+    private static bool HasExactUserDataDirectory(string? commandLine, string expectedProfile)
     {
         if (string.IsNullOrWhiteSpace(commandLine) || string.IsNullOrWhiteSpace(expectedProfile)) return false;
         var match = UserDataDir.Match(commandLine);
@@ -58,10 +66,10 @@ public static partial class DesktopCompanionVerification
         => EvaluateWorkspace(expectedWorkspace, true, windowTitle, rootTreeLabels, accessiblePaths).Verified;
 
     public static WorkspaceEvidence EvaluateWorkspace(string expectedWorkspace, bool windowFound, string? windowTitle,
-        IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths)
+        IEnumerable<string?> rootTreeLabels, IEnumerable<string?> accessiblePaths, bool processCommandLineMatched = false)
     {
         if (string.IsNullOrWhiteSpace(expectedWorkspace))
-            return new("unknown", null, false, "expected_workspace_unavailable", false, false, false);
+            return new("unknown", null, false, "expected_workspace_unavailable", false, false, false, false);
         string fullPath;
         string folder;
         try
@@ -69,7 +77,7 @@ public static partial class DesktopCompanionVerification
             fullPath = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             folder = Path.GetFileName(fullPath);
         }
-        catch (ArgumentException) { return new("unknown", null, false, "expected_workspace_invalid", false, false, false); }
+        catch (ArgumentException) { return new("unknown", null, false, "expected_workspace_invalid", false, false, false, false); }
 
         var labels = rootTreeLabels.Where(label => !string.IsNullOrWhiteSpace(label)).Select(label => label!.Trim()).ToArray();
         var paths = accessiblePaths.Where(path => !string.IsNullOrWhiteSpace(path)).Select(path => path!.Trim()).ToArray();
@@ -81,14 +89,15 @@ public static partial class DesktopCompanionVerification
             return Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsFile &&
                 string.Equals(Uri.UnescapeDataString(uri.LocalPath).TrimEnd('\\', '/'), fullPath, StringComparison.OrdinalIgnoreCase);
         });
-        var verified = pathMatches || rootMatches && titleMatches;
-        var observed = pathMatches || rootMatches ? folder : labels.Length > 0 || paths.Length > 0
+        var verified = processCommandLineMatched || pathMatches || rootMatches && titleMatches;
+        var observed = processCommandLineMatched || pathMatches || rootMatches ? folder : labels.Length > 0 || paths.Length > 0
             ? "different workspace (name redacted)" : null;
-        var reason = !windowFound ? "window_not_found" : pathMatches ? "verified_by_accessible_path" :
+        var reason = !windowFound ? "window_not_found" : processCommandLineMatched ? "verified_by_scoped_process_command_line" :
+            pathMatches ? "verified_by_accessible_path" :
             rootMatches && titleMatches ? "verified_by_workspace_root_and_title" :
             rootMatches ? "workspace_root_not_confirmed_by_title" : labels.Length > 0 || paths.Length > 0
                 ? "workspace_mismatch" : titleMatches ? "workspace_root_not_visible" : "workspace_accessibility_unavailable";
-        return new(fullPath, observed, verified, reason, titleMatches, rootMatches, pathMatches);
+        return new(fullPath, observed, verified, reason, titleMatches, rootMatches, pathMatches, processCommandLineMatched);
     }
 
     private static bool WindowTitleMatches(string folder, string? windowTitle)
@@ -154,10 +163,70 @@ public static partial class DesktopCompanionVerification
     }
 
     public static bool IsRelevantExistingVsCodeWindow(bool windowExistedBeforeLaunch, WorkspaceEvidence evidence) =>
-        windowExistedBeforeLaunch && evidence.WindowTitleMatched;
+        windowExistedBeforeLaunch && (evidence.WindowTitleMatched || evidence.ProcessCommandLineMatched);
+
+    public static string BuildVsCodeWorkspaceProfileDirectory(string profileRoot, string expectedWorkspace)
+    {
+        var root = Path.GetFullPath(profileRoot);
+        var workspace = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relativeRoot = Path.GetRelativePath(workspace, root);
+        var firstSegment = relativeRoot.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (relativeRoot == "." || (!Path.IsPathFullyQualified(relativeRoot) && firstSegment != ".."))
+            throw new ArgumentException("The VS Code profile root must be outside the workspace.", nameof(profileRoot));
+        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspace.ToUpperInvariant())))[..20].ToLowerInvariant();
+        return Path.Combine(root, $"workspace-{key}");
+    }
+
+    public static bool IsDedicatedVsCodeCommandLine(string? commandLine, string expectedWorkspace, string expectedProfile)
+    {
+        if (!HasExactUserDataDirectory(commandLine, expectedProfile)) return false;
+        try
+        {
+            var expected = Path.GetFullPath(expectedWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return ParseWindowsCommandLine(commandLine!).Any(argument =>
+                Path.IsPathFullyQualified(argument) && Path.GetFullPath(argument)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Equals(expected, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (ArgumentException) { return false; }
+    }
 
     public static bool IsNewWindow(nint nativeHandle, IReadOnlySet<nint> existingWindowHandles) =>
         nativeHandle > 0 && !existingWindowHandles.Contains(nativeHandle);
+
+    private static IReadOnlyList<string> ParseWindowsCommandLine(string commandLine)
+    {
+        var arguments = new List<string>();
+        var index = 0;
+        while (index < commandLine.Length)
+        {
+            while (index < commandLine.Length && char.IsWhiteSpace(commandLine[index])) index++;
+            if (index == commandLine.Length) break;
+            var argument = new StringBuilder();
+            var quoted = false;
+            while (index < commandLine.Length)
+            {
+                var slashes = 0;
+                while (index < commandLine.Length && commandLine[index] == '\\') { slashes++; index++; }
+                if (index < commandLine.Length && commandLine[index] == '"')
+                {
+                    argument.Append('\\', slashes / 2);
+                    if (slashes % 2 != 0) { argument.Append('"'); index++; }
+                    else if (quoted && index + 1 < commandLine.Length && commandLine[index + 1] == '"')
+                    { argument.Append('"'); index += 2; }
+                    else { quoted = !quoted; index++; }
+                    continue;
+                }
+                argument.Append('\\', slashes);
+                if (index == commandLine.Length || (!quoted && char.IsWhiteSpace(commandLine[index]))) break;
+                argument.Append(commandLine[index++]);
+            }
+            arguments.Add(argument.ToString());
+            while (index < commandLine.Length && char.IsWhiteSpace(commandLine[index])) index++;
+        }
+        return arguments;
+    }
 
     public static bool IsSmokeTestPassed(bool authenticatedIpc, bool sameSession, bool edgeVerified,
         bool workspaceVerified, bool pullRequestsAvailable, string? accountStatus) =>

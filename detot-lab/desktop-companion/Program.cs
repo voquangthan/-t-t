@@ -161,7 +161,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     private sealed record WorkspaceSnapshot(bool WindowFound, bool WorkspaceVerified, int? SessionId);
     private sealed record VsCodeWorkspaceSnapshot(bool WindowFound, bool WorkspaceVerified, int? SessionId,
         string ExpectedWorkspace, string? ObservedWorkspace, string Reason, bool WindowTitleMatched,
-        bool RootLabelMatched, bool AccessiblePathMatched, bool ExistingWindowObserved);
+        bool RootLabelMatched, bool AccessiblePathMatched, bool ProcessCommandLineMatched, bool ExistingWindowObserved);
     private sealed record VsCodeWindowInventory(bool Available, IReadOnlySet<nint> Handles);
     private sealed record AddressBarSnapshot(bool Available, string? Value);
     private sealed record GithubAccountSnapshot(string Status, string? Username);
@@ -686,7 +686,16 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
                 expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
                 workspaceVerificationReason = "local_profile_unavailable" };
-        var userDataDirectory = Path.GetFullPath(Path.Combine(localAppData, "DetotLab", "ComputerUse", "VSCodeProfileAccessible"));
+        var profileRoot = Path.Combine(localAppData, "DetotLab", "ComputerUse", "VSCodeProfiles");
+        string userDataDirectory;
+        try { userDataDirectory = DesktopCompanionVerification.BuildVsCodeWorkspaceProfileDirectory(profileRoot, workspace); }
+        catch (ArgumentException)
+        {
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "dedicated_profile_unavailable" };
+        }
         try { Directory.CreateDirectory(userDataDirectory); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -709,7 +718,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
                 workspaceVerificationReason = "launch_failed" };
         VsCodeWorkspaceSnapshot snapshot;
-        try { snapshot = WaitForWorkspaceWindow(TimeSpan.FromSeconds(12), before.Handles); }
+        try { snapshot = WaitForWorkspaceWindow(TimeSpan.FromSeconds(12), before.Handles, userDataDirectory); }
         catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
             var expected = Path.GetFullPath(workspace);
@@ -734,6 +743,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             workspaceVerificationReason = snapshot.Reason,
             evidence = new { windowTitleMatched = snapshot.WindowTitleMatched,
                 rootLabelMatched = snapshot.RootLabelMatched, accessiblePathMatched = snapshot.AccessiblePathMatched,
+                processCommandLineMatched = snapshot.ProcessCommandLineMatched,
                 existingWindowObserved = snapshot.ExistingWindowObserved }
         };
     }
@@ -881,12 +891,13 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         catch { return new(false, new HashSet<nint>()); }
     }
 
-    private VsCodeWorkspaceSnapshot WaitForWorkspaceWindow(TimeSpan duration, IReadOnlySet<nint> existingWindowHandles)
+    private VsCodeWorkspaceSnapshot WaitForWorkspaceWindow(TimeSpan duration, IReadOnlySet<nint> existingWindowHandles,
+        string expectedProfile)
     {
         var until = DateTime.UtcNow + duration;
         var emptyEvidence = DesktopCompanionVerification.EvaluateWorkspace(workspace, false, null, [], []);
         VsCodeWorkspaceSnapshot snapshot = new(false, false, null, emptyEvidence.ExpectedWorkspace,
-            null, "timeout_window_not_found", false, false, false, false);
+            null, "timeout_window_not_found", false, false, false, false, false);
         var accessibilityFailed = false;
         var existingWindowObserved = false;
         var windowHandleUnavailable = false;
@@ -902,6 +913,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                     {
                         var processSession = SafeSessionId(process);
                         if (processSession != Process.GetCurrentProcess().SessionId) continue;
+                        var processWorkspaceMatched = DesktopCompanionVerification.IsDedicatedVsCodeCommandLine(
+                            ReadProcessCommandLine(process), workspace, expectedProfile);
                         var windows = desktop.FindAllChildren(cf => cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id)));
                         foreach (var window in windows)
                         {
@@ -920,13 +933,15 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                                 tree.FindAllChildren(cf => cf.ByControlType(ControlType.TreeItem))).ToArray();
                             var rootNames = roots.Select(SafeName).ToArray();
                             var paths = roots.Select(SafeHelpText).ToArray();
-                            var evidence = DesktopCompanionVerification.EvaluateWorkspace(workspace, true, title, rootNames, paths);
+                            var evidence = DesktopCompanionVerification.EvaluateWorkspace(workspace, true, title, rootNames, paths,
+                                processWorkspaceMatched);
                             var relevantExistingWindow = DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(
                                 windowExistedBeforeLaunch, evidence);
                             existingWindowObserved |= relevantExistingWindow;
                             snapshot = new(true, evidence.Verified, processSession, evidence.ExpectedWorkspace,
                                 evidence.ObservedWorkspace, evidence.Reason, evidence.WindowTitleMatched,
-                                evidence.RootLabelMatched, evidence.AccessiblePathMatched, relevantExistingWindow);
+                                evidence.RootLabelMatched, evidence.AccessiblePathMatched, evidence.ProcessCommandLineMatched,
+                                relevantExistingWindow);
                             if (evidence.Verified) return snapshot;
                         }
                     }

@@ -752,6 +752,28 @@ using var accessibilitySettings = JsonDocument.Parse(DesktopCompanionVerificatio
 Check(accessibilitySettings.RootElement.GetProperty("files.autoSave").GetString() == "off" &&
       accessibilitySettings.RootElement.GetProperty("editor.accessibilitySupport").GetString() == "on",
     "dedicated VS Code profile enables accessibility while preserving unrelated settings");
+var vscodeProfileRoot = "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfiles";
+var vscodeWorkspaceWithSpaces = "D:\\work\\computer use";
+var scopedVsCodeProfile = DesktopCompanionVerification.BuildVsCodeWorkspaceProfileDirectory(vscodeProfileRoot,
+    vscodeWorkspaceWithSpaces);
+Check(scopedVsCodeProfile == DesktopCompanionVerification.BuildVsCodeWorkspaceProfileDirectory(vscodeProfileRoot,
+          vscodeWorkspaceWithSpaces) &&
+      scopedVsCodeProfile != DesktopCompanionVerification.BuildVsCodeWorkspaceProfileDirectory(vscodeProfileRoot,
+          "D:\\work\\other project") && !scopedVsCodeProfile.StartsWith(vscodeWorkspaceWithSpaces, StringComparison.OrdinalIgnoreCase),
+    "VS Code data profiles are stable per workspace and kept outside the workspace");
+var vscodeCommandLine = $"\"C:\\Program Files\\Microsoft VS Code\\Code.exe\" --user-data-dir \"{scopedVsCodeProfile}\" --disable-extensions --new-window \"{vscodeWorkspaceWithSpaces}\"";
+Check(DesktopCompanionVerification.IsDedicatedVsCodeCommandLine(vscodeCommandLine, vscodeWorkspaceWithSpaces,
+          scopedVsCodeProfile) &&
+      !DesktopCompanionVerification.IsDedicatedVsCodeCommandLine(vscodeCommandLine, "D:\\work\\other project",
+          scopedVsCodeProfile) &&
+      !DesktopCompanionVerification.IsDedicatedVsCodeCommandLine(vscodeCommandLine, vscodeWorkspaceWithSpaces,
+          vscodeProfileRoot),
+    "VS Code process evidence requires both the exact workspace argument and its dedicated profile");
+var processVerifiedWorkspace = DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\computer use", true,
+    "Visual Studio Code", [], [], processCommandLineMatched: true);
+Check(processVerifiedWorkspace.Verified && processVerifiedWorkspace.ProcessCommandLineMatched &&
+      processVerifiedWorkspace.Reason == "verified_by_scoped_process_command_line",
+    "exact workspace-scoped launch evidence can verify a window when VS Code UIA omits the root tree");
 Check(DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(true, reusedWindowWorkspace) &&
       !DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(true,
           DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,
