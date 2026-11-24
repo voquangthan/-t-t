@@ -1781,6 +1781,23 @@ static IResult BrowserActionResult(JsonElement result)
 static async Task<IResult> ExecuteComputerUseChatAction(string action, string? repositoryRoot,
     DesktopCompanionClient companion, CancellationToken cancellationToken)
 {
+    if (action == "open-notepad")
+    {
+        var uiAction = new ComputerUseUiAction("launch-installed", "desktop", null, null, null,
+            "Notepad", null, null);
+        var result = await companion.ExecuteUiAsync(uiAction, cancellationToken);
+        var verified = result.TryGetProperty("status", out var status) && status.GetString() == "verified" &&
+            result.TryGetProperty("newWindowVerified", out var newWindow) && newWindow.ValueKind == JsonValueKind.True &&
+            result.TryGetProperty("actionVerified", out var actionVerified) && actionVerified.ValueKind == JsonValueKind.True;
+        return verified
+            ? Results.Ok(new { reply = "Đã mở và xác minh cửa sổ Notepad mới.", toolUsed = true,
+                computerUseAction = action, windowVerified = true })
+            : Results.Json(new { reply = "Chưa xác minh được cửa sổ Notepad; không báo đã mở thành công.",
+                toolUsed = true, computerUseAction = action, windowVerified = false,
+                status = result.TryGetProperty("status", out var failedStatus) ? failedStatus.GetString() : "failed" },
+                statusCode: StatusCodes.Status502BadGateway);
+    }
+
     if (action == "read-approved-applications")
     {
         var result = await companion.ExecuteAsync("observe-applications", cancellationToken);

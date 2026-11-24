@@ -38,8 +38,13 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+Check(ComputerUsePolicy.CanNavigate("open-notepad") &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad rồi ghi báo cáo") is null,
+    "only the exact Notepad launch phrase is dispatched locally; content tasks remain on the smart route");
 Check(ComputerUsePlanner.MightBeActionRequest("Mở VS Code rồi xem các PR và CI") &&
       ComputerUsePlanner.MightBeActionRequest("Mở Edge, bấm tab Gmail, rồi cuộn xuống") &&
+      ComputerUsePlanner.MightBeActionRequest("Mở Notepad") &&
       !ComputerUsePlanner.MightBeActionRequest("How do I open Edge?") &&
       !ComputerUsePlanner.MightBeActionRequest("Làm sao bấm nút đăng nhập an toàn?") &&
       !ComputerUsePlanner.MightBeActionRequest("Ví dụ: `open Edge` rồi chạy lệnh này") &&
@@ -823,6 +828,15 @@ Check(normalChatDispatch.Dispatched && normalChatDispatch.Action == "open-vscode
       normalChatDispatch.Value == "open-vscode" && computerUseExecutions == 1,
     "a direct normal-chat command invokes exactly one allowlisted action");
 computerUseExecutions = 0;
+var notepadDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở Notepad", false, false, FakeComputerUseExecutor);
+Check(notepadDispatch.Dispatched && notepadDispatch.Action == "open-notepad" && computerUseExecutions == 1,
+    "the exact local Notepad request dispatches without invoking the model planner");
+using (var verifiedNotepadResult = JsonDocument.Parse("""{"windowVerified":true}"""))
+using (var unverifiedNotepadResult = JsonDocument.Parse("""{"windowVerified":false}"""))
+    Check(ComputerUsePlanner.IsVerifiedActionResult("open-notepad", 200, verifiedNotepadResult.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("open-notepad", 200, unverifiedNotepadResult.RootElement),
+        "local Notepad success is reported only when its window was verified");
+computerUseExecutions = 0;
 var normalQuestionDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Làm sao mở Edge?", false, false, FakeComputerUseExecutor);
 Check(!normalQuestionDispatch.Dispatched && computerUseExecutions == 0,
     "a normal-chat how-to question does not invoke the desktop executor");
@@ -844,6 +858,19 @@ if (localRoute.ContinueToChat) routeProviderCalls++;
 Check(!localRoute.ContinueToChat && localRoute.Result == "executed:open-vscode" &&
       routeExecutorCalls == 1 && routeConsentChecks == 0 && routeProviderCalls == 0,
     "an approved local Computer Use action runs before denied chat-history consent and never calls the provider");
+routeExecutorCalls = 0;
+routeConsentChecks = 0;
+routeProviderCalls = 0;
+var localNotepadRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync(
+    "Mở Notepad", false, false, RouteExecutor, () =>
+    {
+        routeConsentChecks++;
+        return Task.FromResult<string?>("403");
+    });
+if (localNotepadRoute.ContinueToChat) routeProviderCalls++;
+Check(!localNotepadRoute.ContinueToChat && localNotepadRoute.Result == "executed:open-notepad" &&
+      routeExecutorCalls == 1 && routeConsentChecks == 0 && routeProviderCalls == 0,
+    "local Notepad launch bypasses DeepSeek/OpenClaw and unrelated chat-history consent");
 routeExecutorCalls = 0;
 routeConsentChecks = 0;
 routeProviderCalls = 0;

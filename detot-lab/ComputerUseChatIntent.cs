@@ -8,6 +8,7 @@ public static class ComputerUseChatIntent
 
     private static readonly (string Action, Regex Pattern)[] Patterns =
     [
+        ("open-notepad", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:ứng\s+dụng\s+)?notepad" + Suffix, Options)),
         ("open-vscode", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:vs\s*code|visual\s+studio\s+code)" + Suffix, Options)),
         ("open-edge", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:microsoft\s+)?edge" + Suffix, Options)),
         ("open-workspace", new(Prefix + @"(?:mở|open)\s+(?:project\s+)?workspace" + Suffix, Options)),

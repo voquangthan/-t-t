@@ -9,7 +9,7 @@ public static class ComputerUsePolicy
 
     private static readonly HashSet<string> NavigationActions = new(StringComparer.Ordinal)
     {
-        "open-workspace",
+        "open-workspace", "open-notepad",
         "open-github",
         "open-edge",
         "open-vscode"
@@ -47,7 +47,7 @@ public static class ComputerUsePolicy
     public static object Describe() => new
     {
         observe = new[] { "approved-applications", "github-account", "github-pull-requests" },
-        navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode" },
+        navigate = new[] { "open-workspace", "open-notepad", "open-github", "open-edge", "open-vscode" },
         accountSelection = Array.Empty<string>(),
         ui = new
         {

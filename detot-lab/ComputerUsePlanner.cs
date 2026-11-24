@@ -10,7 +10,7 @@ public static partial class ComputerUsePlanner
     public const string ToolName = "detot_computer_use_plan";
     public static IReadOnlyList<string> AllowedActionIds { get; } = Array.AsReadOnly(new[]
     {
-        "open-workspace", "open-vscode", "open-edge", "open-github",
+        "open-workspace", "open-notepad", "open-vscode", "open-edge", "open-github",
         "read-github-account", "read-github-pull-requests", "read-approved-applications"
     });
 
@@ -98,6 +98,7 @@ public static partial class ComputerUsePlanner
 
         return action switch
         {
+            "open-notepad" => IsTrue(body, "windowVerified"),
             "open-workspace" => IsTrue(body, "workspaceVerified"),
             "open-vscode" => IsTrue(body, "windowVerified") && IsTrue(body, "workspaceVerified"),
             "open-edge" => IsTrue(body, "windowVerified"),
