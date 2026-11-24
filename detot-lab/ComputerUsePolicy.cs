@@ -24,8 +24,9 @@ public static class ComputerUsePolicy
         operation is not null && ComputerUseUiPlanner.AllowedOperations.Contains(operation, StringComparer.Ordinal);
 
     public static bool ShouldExposeInteractiveUiTool(bool normalChat, bool hasOtherTools, bool desktopAvailable,
-        bool uiDataConsent, bool hasVerifiedRequestScope) =>
-        normalChat && !hasOtherTools && desktopAvailable && uiDataConsent && hasVerifiedRequestScope;
+        bool uiDataConsent, ComputerUseIntentScope? requestScope) =>
+        normalChat && !hasOtherTools && desktopAvailable && uiDataConsent &&
+        requestScope is { HasInteractiveUiScope: true };
 
     public static bool TryAuthorizeInteractiveUiAction(ComputerUseIntentScope? scope,
         ComputerUseUiAction action, string? observedElementName = null, string? observedTarget = null,

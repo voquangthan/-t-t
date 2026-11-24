@@ -1146,7 +1146,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             hasOtherTools: tools.Count > 0,
             desktopAvailable: localDesktopAvailable,
             uiDataConsent: desktopUiConsent,
-            hasVerifiedRequestScope: hasDesktopRequestScope && desktopRequestScope?.HasInteractiveUiScope == true);
+            requestScope: hasDesktopRequestScope ? desktopRequestScope : null);
         var computerUseToolAvailable = desktopActionsAvailable && hasDesktopRequestScope &&
             ComputerUsePlanner.MightBeActionRequest(message);
         if (computerUseToolAvailable)

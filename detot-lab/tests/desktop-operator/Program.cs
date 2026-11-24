@@ -224,18 +224,20 @@ Check(ComputerUsePolicy.CanUseUiOperation("edge", "observe") &&
       !ComputerUsePolicy.CanUseUiOperation("WindowsTerminal", "observe") &&
       !ComputerUsePolicy.CanUseUiOperation("edge", "run-shell"),
     "universal UI policy accepts only approved apps and bounded UI operations");
-Check(ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
-          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+ComputerUseIntentScope.TryCreate("Mở Edge", out var verifiedRequestScope);
+Check(verifiedRequestScope is { HasInteractiveUiScope: true } &&
+      ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: true, requestScope: verifiedRequestScope) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
-          uiDataConsent: true, hasVerifiedRequestScope: false) &&
+          uiDataConsent: true, requestScope: null) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: false, hasOtherTools: false, desktopAvailable: true,
-          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+          uiDataConsent: true, requestScope: verifiedRequestScope) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: true, desktopAvailable: true,
-          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+          uiDataConsent: true, requestScope: verifiedRequestScope) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: false,
-          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+          uiDataConsent: true, requestScope: verifiedRequestScope) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
-          uiDataConsent: false, hasVerifiedRequestScope: true),
+          uiDataConsent: false, requestScope: verifiedRequestScope),
     "UI tool requires an independently derived request scope as well as mode, runtime and data-consent gates");
 Check(!ComputerUseIntentScope.TryCreate("Giải thích cách mở Edge", out _) &&
       !ComputerUseIntentScope.TryCreate("Đọc mô tả về Edge", out _) &&
@@ -251,7 +253,7 @@ Check(!ComputerUseIntentScope.TryCreate("Giải thích cách mở Edge", out _) 
 Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge"}""", out var injectedUiCall) &&
       injectedUiCall is not null && !ComputerUseIntentScope.TryCreate("Giải thích Edge giúp tao", out var noUiScope) &&
       noUiScope is null && !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false,
-          desktopAvailable: true, uiDataConsent: true, hasVerifiedRequestScope: false),
+          desktopAvailable: true, uiDataConsent: true, requestScope: noUiScope),
     "a valid model-authored UI tool payload still cannot create scope or expose/dispatch the Companion tool");
 var fakeCompanionCalls = 0;
 var fakeObservationUploads = 0;
@@ -262,7 +264,7 @@ foreach (var unrelatedTurn in new[] { "Giải thích cách mở Edge", "Đọc m
     ComputerUseIntentScope.TryCreate(unrelatedTurn, out var injectedScope);
     var uiToolExposed = ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false,
         desktopAvailable: true, uiDataConsent: true,
-        hasVerifiedRequestScope: injectedScope is { HasInteractiveUiScope: true });
+        requestScope: injectedScope);
     if (uiToolExposed) leakedUiToolExposures++;
     var authorized = ComputerUsePolicy.TryAuthorizeInteractiveUiAction(injectedScope, injectedUiCall!,
         onAuthorized: () => fakeAuditWrites++);
@@ -288,7 +290,7 @@ Check(ComputerUseIntentScope.TryCreate("Xem cửa sổ Edge đang mở", out var
       !apiOnlyGithubScope!.HasInteractiveUiScope &&
       !apiOnlyGithubScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
-          uiDataConsent: true, hasVerifiedRequestScope: apiOnlyGithubScope.HasInteractiveUiScope),
+          uiDataConsent: true, requestScope: apiOnlyGithubScope),
     "UI observation requires a concrete open UI target; app-information and API-only requests do not expose the interactive tool");
 Check(ComputerUseIntentScope.TryCreate("Bấm tab Gmail", out var directClickScope) &&
       directClickScope!.HasInteractiveUiScope &&
@@ -372,7 +374,7 @@ Check(ComputerUseIntentScope.TryCreate("Nhập hello vào Edge", out var appAsIn
       !appAsInputScope!.HasInteractiveUiScope &&
       !appAsInputScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
-          uiDataConsent: true, hasVerifiedRequestScope: appAsInputScope.HasInteractiveUiScope),
+          uiDataConsent: true, requestScope: appAsInputScope),
     "typing into an app name without a specific field does not expose broad UI observation");
 var windowScopeObservation = JsonDocument.Parse("""{"status":"window_selection_required","windows":[{"windowId":"00000000000000000000000000000002","title":"Untitled"}]}""");
 var scopedWindows = new Dictionary<string, string>(StringComparer.Ordinal);
