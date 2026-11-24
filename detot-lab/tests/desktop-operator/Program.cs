@@ -143,15 +143,18 @@ if (OperatingSystem.IsWindows())
     using var cmdResult = JsonDocument.Parse(JsonSerializer.Serialize(await safeTerminal.ExecuteAsync("cmd-version", CancellationToken.None)));
     using var psResult = JsonDocument.Parse(JsonSerializer.Serialize(await safeTerminal.ExecuteAsync("powershell-date", CancellationToken.None)));
     var cmdStatus = cmdResult.RootElement.GetProperty("status").GetString();
-    var cmdExitCode = cmdResult.RootElement.GetProperty("exitCode").GetInt32();
+    int? cmdExitCode = cmdResult.RootElement.TryGetProperty("exitCode", out var cmdExitCodeElement) && cmdExitCodeElement.ValueKind == JsonValueKind.Number
+        ? cmdExitCodeElement.GetInt32() : null;
+    var cmdOutput = cmdResult.RootElement.TryGetProperty("stdout", out var cmdStdout) ? cmdStdout.GetString() ?? "" : "";
     Check(cmdStatus == "completed" && cmdExitCode == 0 &&
-          cmdResult.RootElement.GetProperty("stdout").GetString()!.Contains("Windows", StringComparison.OrdinalIgnoreCase),
-        $"real bounded CMD command returns stdout and exit code (status={cmdStatus}, exitCode={cmdExitCode})");
+          cmdOutput.Contains("Windows", StringComparison.OrdinalIgnoreCase),
+        $"real bounded CMD command returns stdout and exit code (status={cmdStatus}, exitCode={cmdExitCode?.ToString() ?? "null"})");
     var psStatus = psResult.RootElement.GetProperty("status").GetString();
-    var psExitCode = psResult.RootElement.GetProperty("exitCode").GetInt32();
-    var psOutput = psResult.RootElement.GetProperty("stdout").GetString() ?? "";
+    int? psExitCode = psResult.RootElement.TryGetProperty("exitCode", out var psExitCodeElement) && psExitCodeElement.ValueKind == JsonValueKind.Number
+        ? psExitCodeElement.GetInt32() : null;
+    var psOutput = psResult.RootElement.TryGetProperty("stdout", out var psStdout) ? psStdout.GetString() ?? "" : "";
     Check(psStatus == "completed" && psExitCode == 0 && DateTimeOffset.TryParse(psOutput, out _),
-        $"real bounded PowerShell command returns a parseable timestamp (status={psStatus}, exitCode={psExitCode})");
+        $"real bounded PowerShell command returns a parseable timestamp (status={psStatus}, exitCode={psExitCode?.ToString() ?? "null"})");
 }
 var syntheticTokenText = string.Concat("ghp_", new string('a', 26), new string('0', 10));
 var syntheticTokenRequest = JsonSerializer.Serialize(new
