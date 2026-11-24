@@ -142,13 +142,16 @@ if (OperatingSystem.IsWindows())
     var safeTerminal = new SafeTerminalExecutor(Path.GetTempPath());
     using var cmdResult = JsonDocument.Parse(JsonSerializer.Serialize(await safeTerminal.ExecuteAsync("cmd-version", CancellationToken.None)));
     using var psResult = JsonDocument.Parse(JsonSerializer.Serialize(await safeTerminal.ExecuteAsync("powershell-date", CancellationToken.None)));
-    Check(cmdResult.RootElement.GetProperty("status").GetString() == "completed" &&
-          cmdResult.RootElement.GetProperty("exitCode").GetInt32() == 0 &&
-          cmdResult.RootElement.GetProperty("stdout").GetString()!.Contains("Windows", StringComparison.OrdinalIgnoreCase) &&
-          psResult.RootElement.GetProperty("status").GetString() == "completed" &&
-          psResult.RootElement.GetProperty("exitCode").GetInt32() == 0 &&
-          DateTimeOffset.TryParse(psResult.RootElement.GetProperty("stdout").GetString(), out _),
-        "real bounded CMD and PowerShell read-only commands return stdout and exit code");
+    var cmdStatus = cmdResult.RootElement.GetProperty("status").GetString();
+    var cmdExitCode = cmdResult.RootElement.GetProperty("exitCode").GetInt32();
+    Check(cmdStatus == "completed" && cmdExitCode == 0 &&
+          cmdResult.RootElement.GetProperty("stdout").GetString()!.Contains("Windows", StringComparison.OrdinalIgnoreCase),
+        $"real bounded CMD command returns stdout and exit code (status={cmdStatus}, exitCode={cmdExitCode})");
+    var psStatus = psResult.RootElement.GetProperty("status").GetString();
+    var psExitCode = psResult.RootElement.GetProperty("exitCode").GetInt32();
+    var psOutput = psResult.RootElement.GetProperty("stdout").GetString() ?? "";
+    Check(psStatus == "completed" && psExitCode == 0 && DateTimeOffset.TryParse(psOutput, out _),
+        $"real bounded PowerShell command returns a parseable timestamp (status={psStatus}, exitCode={psExitCode})");
 }
 var syntheticTokenText = string.Concat("ghp_", new string('a', 26), new string('0', 10));
 var syntheticTokenRequest = JsonSerializer.Serialize(new
