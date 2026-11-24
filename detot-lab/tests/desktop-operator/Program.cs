@@ -405,11 +405,11 @@ try
     var consent = new ConsentPolicy(consentTestRoot, new EphemeralDataProtectionProvider());
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
         "sending filtered UI observations through the configured Gateway model defaults to deny");
-    consent.Set("owner", "computer_use", "direct_request", "DeepSeek", true, "owner", Guid.NewGuid());
-    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
-        "a legacy DeepSeek-only grant does not authorize data sent through the Gateway default model");
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
+        "the old DeepSeek-specific consent key is distinct from the Gateway data path");
     consent.Set("owner", "computer_use", "direct_request", "OpenClaw Gateway", true, "owner", Guid.NewGuid());
-    Check(consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
+    Check(consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway") &&
+          !consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
         "explicit consent for the actual Gateway data path enables scoped UI planning");
     consent.Set("owner", "computer_use", "direct_request", "OpenClaw Gateway", false, "owner", Guid.NewGuid());
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
