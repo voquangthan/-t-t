@@ -272,8 +272,18 @@ public sealed class ComputerUseIntentScope
                 ? text : null;
             var scrollDirection = element["scrollDirection"] is JsonValue scrollValue &&
                 scrollValue.TryGetValue<string>(out var direction) ? direction : null;
-            return hasClick && MatchesClickTarget(name) || hasType && MatchesTypeTarget(name) ||
-                allowScroll && !string.IsNullOrWhiteSpace(scrollDirection);
+            var matchesClickTarget = allowInvoke && MatchesClickTarget(name);
+            var matchesInputTarget = allowType && MatchesTypeTarget(name);
+            var matchesScrollableControl = allowScroll && !string.IsNullOrWhiteSpace(scrollDirection);
+            return sourceAction.Operation switch
+            {
+                "observe" => matchesClickTarget || matchesInputTarget || matchesScrollableControl,
+                "invoke" => matchesClickTarget,
+                "focus" => matchesClickTarget || matchesInputTarget,
+                "type" => matchesInputTarget,
+                "scroll" => matchesScrollableControl,
+                _ => false
+            };
         }
     }
 
