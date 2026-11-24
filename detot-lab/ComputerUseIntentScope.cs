@@ -53,6 +53,9 @@ public sealed class ComputerUseIntentScope
     private readonly HashSet<string> openTargets;
     private readonly HashSet<string> clickTargets;
     private readonly HashSet<string> typeTargets;
+    private readonly Dictionary<string, HashSet<string>> appClickTargets;
+    private readonly Dictionary<string, HashSet<string>> appTypeTargets;
+    private readonly HashSet<string> appScrollTargets;
     private readonly bool wholeDesktop;
     private readonly bool allowInvoke;
     private readonly bool allowFocus;
@@ -67,13 +70,18 @@ public sealed class ComputerUseIntentScope
     private ComputerUseIntentScope(string request, HashSet<string> apps, HashSet<string> openTargets,
         HashSet<string> clickTargets, HashSet<string> typeTargets, bool wholeDesktop, bool allowInvoke, bool allowFocus,
         bool allowScroll, bool allowType, bool allowNavigate, bool requiresNewWindow,
-        bool allowCurrentUiObservation, bool allowTargetOnlyObservation, bool hasInteractiveUiScope)
+        bool allowCurrentUiObservation, bool allowTargetOnlyObservation, bool hasInteractiveUiScope,
+        Dictionary<string, HashSet<string>> appClickTargets, Dictionary<string, HashSet<string>> appTypeTargets,
+        HashSet<string> appScrollTargets)
     {
         originalRequest = request;
         this.apps = apps;
         this.openTargets = openTargets;
         this.clickTargets = clickTargets;
         this.typeTargets = typeTargets;
+        this.appClickTargets = appClickTargets;
+        this.appTypeTargets = appTypeTargets;
+        this.appScrollTargets = appScrollTargets;
         this.wholeDesktop = wholeDesktop;
         this.allowInvoke = allowInvoke;
         this.allowFocus = allowFocus;
@@ -127,23 +135,37 @@ public sealed class ComputerUseIntentScope
             apps.Add("desktop");
 
         var clickTargets = new HashSet<string>(StringComparer.Ordinal);
-        foreach (Match match in ClickTarget.Matches(request))
+        var appClickTargets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var clickMatches = ClickTarget.Matches(request);
+        foreach (Match match in clickMatches)
         {
             var target = TargetTail.Replace(match.Groups["target"].Value.Trim(), "").Trim();
             target = Regex.Replace(target, @"^(?:the\s+)?(?:nút|tab|menu|liên\s+kết|link|button|menu\s+item|ô|trường)\s+",
                 "", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
             target = Regex.Replace(target, @"\s+(?:rồi|and\s+then|then)\b.*$", "",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
-            if (target.Length is > 1 and <= 80) clickTargets.Add(Normalize(target));
+            if (target.Length is > 1 and <= 80)
+            {
+                var normalizedTarget = Normalize(target);
+                clickTargets.Add(normalizedTarget);
+                BindTargetToNearestApp(request, match.Index, normalizedTarget, apps, appClickTargets);
+            }
         }
 
         var typeTargets = new HashSet<string>(StringComparer.Ordinal);
-        foreach (Match match in TypeTarget.Matches(request))
+        var appTypeTargets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var typeMatches = TypeTarget.Matches(request);
+        foreach (Match match in typeMatches)
         {
             var target = TargetTail.Replace(match.Groups["target"].Value.Trim(), "").Trim();
             target = Regex.Replace(target, @"\s+(?:ô|trường|hộp|thanh|field|input|box|bar)$", "",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
-            if (target.Length is > 1 and <= 80) typeTargets.Add(Normalize(target));
+            if (target.Length is > 1 and <= 80)
+            {
+                var normalizedTarget = Normalize(target);
+                typeTargets.Add(normalizedTarget);
+                BindTargetToNearestApp(request, match.Index, normalizedTarget, apps, appTypeTargets);
+            }
         }
 
         var hasOpen = OpenCue.IsMatch(request);
@@ -152,6 +174,7 @@ public sealed class ComputerUseIntentScope
         var hasScroll = ScrollCue.IsMatch(request);
         var hasNavigate = NavigateCue.IsMatch(request) && Regex.IsMatch(request, @"https://[^\s]+",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var appScrollTargets = BindCueToApps(request, ScrollCue, apps);
         if (apps.Count == 0 && openTargets.Count == 0) return false;
         if (apps.Count == 0 && !(hasOpen && openTargets.Count > 0)) return false;
         var requiresNewWindow = Regex.IsMatch(request, @"(?:cửa\s+sổ\s+mới|new\s+window)",
@@ -162,11 +185,13 @@ public sealed class ComputerUseIntentScope
             typeTargets.Any(target => !apps.Any(app => IsAppTarget(app, target)));
         var allowTargetOnlyObservation = apps.Count == 1 &&
             (hasBoundClickTarget || hasBoundInputTarget || hasScroll);
+        var hasAppScopedInteraction = appClickTargets.Count > 0 || appTypeTargets.Count > 0 || appScrollTargets.Count > 0;
         var hasInteractiveUiScope = wholeDesktop || openTargets.Count > 0 || allowCurrentUiObservation ||
-            allowTargetOnlyObservation || hasNavigate;
+            allowTargetOnlyObservation || hasNavigate || hasAppScopedInteraction;
         scope = new ComputerUseIntentScope(request, apps, openTargets, clickTargets, typeTargets, wholeDesktop,
             hasClick, FocusCue.IsMatch(request) || hasType, hasScroll, hasType, hasNavigate, requiresNewWindow,
-            allowCurrentUiObservation, allowTargetOnlyObservation, hasInteractiveUiScope);
+            allowCurrentUiObservation, allowTargetOnlyObservation, hasInteractiveUiScope,
+            appClickTargets, appTypeTargets, appScrollTargets);
         return true;
     }
 
@@ -188,10 +213,10 @@ public sealed class ComputerUseIntentScope
             if (!wholeDesktop && !IsScopedTarget(observedTarget, requireNewWindow: requiresNewWindow)) return false;
             return action.Operation switch
             {
-                "invoke" => allowInvoke && MatchesClickTarget(observedElementName),
-                "focus" => allowFocus && (MatchesClickTarget(observedElementName) || MatchesTypeTarget(observedElementName)),
-                "scroll" => allowScroll,
-                "type" => allowType && MatchesTypeTarget(observedElementName) && action.Text is not null &&
+                "invoke" => allowInvoke && MatchesClickTarget(action.App, observedElementName),
+                "focus" => allowFocus && (MatchesClickTarget(action.App, observedElementName) || MatchesTypeTarget(action.App, observedElementName)),
+                "scroll" => allowScroll && AllowsScroll(action.App),
+                "type" => allowType && MatchesTypeTarget(action.App, observedElementName) && action.Text is not null &&
                     ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest),
                 _ => false
             };
@@ -206,10 +231,10 @@ public sealed class ComputerUseIntentScope
                 ComputerUseUiPlanner.IsExactUserText(action.Text!, originalRequest),
             "navigate" => allowNavigate && action.App == "edge" && action.Url is not null &&
                 ComputerUseUiPlanner.IsExactUserText(action.Url, originalRequest),
-            "invoke" => allowInvoke && MatchesClickTarget(observedElementName),
-            "focus" => allowFocus && (MatchesClickTarget(observedElementName) || MatchesTypeTarget(observedElementName)),
-            "scroll" => allowScroll,
-            "type" => allowType && MatchesTypeTarget(observedElementName) && action.Text is not null &&
+            "invoke" => allowInvoke && MatchesClickTarget(action.App, observedElementName),
+            "focus" => allowFocus && (MatchesClickTarget(action.App, observedElementName) || MatchesTypeTarget(action.App, observedElementName)),
+            "scroll" => allowScroll && AllowsScroll(action.App),
+            "type" => allowType && MatchesTypeTarget(action.App, observedElementName) && action.Text is not null &&
                 ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest),
             _ => false
         };
@@ -280,9 +305,9 @@ public sealed class ComputerUseIntentScope
                 ? text : null;
             var scrollDirection = element["scrollDirection"] is JsonValue scrollValue &&
                 scrollValue.TryGetValue<string>(out var direction) ? direction : null;
-            var matchesClickTarget = allowInvoke && MatchesClickTarget(name);
-            var matchesInputTarget = allowType && MatchesTypeTarget(name);
-            var matchesScrollableControl = allowScroll && !string.IsNullOrWhiteSpace(scrollDirection);
+            var matchesClickTarget = allowInvoke && MatchesClickTarget(sourceAction.App, name);
+            var matchesInputTarget = allowType && MatchesTypeTarget(sourceAction.App, name);
+            var matchesScrollableControl = allowScroll && AllowsScroll(sourceAction.App) && !string.IsNullOrWhiteSpace(scrollDirection);
             return sourceAction.Operation switch
             {
                 "observe" => matchesClickTarget || matchesInputTarget || matchesScrollableControl,
@@ -298,11 +323,13 @@ public sealed class ComputerUseIntentScope
     private bool AllowsObservationTarget(string appName) => wholeDesktop ||
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        HasAppScopedInteraction(appName) && (requiresNewWindow || openTargets.Any(target => IsAppTarget(appName, target)) || apps.Any(app => IsAppTarget(app, appName))) ||
         (requiresNewWindow || allowTargetOnlyObservation) && openTargets.Any(target => IsAppTarget(appName, target));
 
     private bool AllowsWindowActivationTarget(string appName) => wholeDesktop ||
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        HasAppScopedInteraction(appName) && (requiresNewWindow || openTargets.Any(target => IsAppTarget(appName, target))) ||
         requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
 
     public bool AllowsFixedAction(string action) => action switch
@@ -390,6 +417,14 @@ public sealed class ComputerUseIntentScope
         return clickTargets.Any(target => normalizedElement.Contains(target, StringComparison.Ordinal));
     }
 
+    private bool MatchesClickTarget(string appName, string? elementName)
+    {
+        if (apps.Count == 1) return MatchesClickTarget(elementName);
+        return !string.IsNullOrWhiteSpace(elementName) &&
+            appClickTargets.TryGetValue(Normalize(appName), out var targets) &&
+            targets.Any(target => Normalize(elementName).Contains(target, StringComparison.Ordinal));
+    }
+
     private bool MatchesTypeTarget(string? elementName)
     {
         if (string.IsNullOrWhiteSpace(elementName)) return false;
@@ -399,6 +434,70 @@ public sealed class ComputerUseIntentScope
                 Regex.IsMatch(originalRequest, @"\b(?:tìm\s+kiếm|search)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
             normalized.Contains("address", StringComparison.Ordinal) &&
                 Regex.IsMatch(originalRequest, @"\b(?:địa\s+chỉ|address)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    private bool MatchesTypeTarget(string appName, string? elementName)
+    {
+        if (apps.Count == 1) return MatchesTypeTarget(elementName);
+        return !string.IsNullOrWhiteSpace(elementName) &&
+            appTypeTargets.TryGetValue(Normalize(appName), out var targets) &&
+            targets.Any(target => Normalize(elementName).Contains(target, StringComparison.Ordinal));
+    }
+
+    private bool AllowsScroll(string appName) => apps.Count == 1 || appScrollTargets.Contains(Normalize(appName));
+
+    private bool HasAppScopedInteraction(string appName)
+    {
+        var key = Normalize(appName);
+        return appClickTargets.ContainsKey(key) || appTypeTargets.ContainsKey(key) || appScrollTargets.Contains(key);
+    }
+
+    private static void BindTargetToNearestApp(string request, int beforeIndex, string target,
+        HashSet<string> apps, Dictionary<string, HashSet<string>> bindings)
+    {
+        var app = FindNearestNamedApp(request, beforeIndex, apps);
+        if (app is null && apps.Count == 1) app = apps.First();
+        if (app is null) return;
+        var key = Normalize(app);
+        if (!bindings.TryGetValue(key, out var targets)) bindings[key] = targets = new HashSet<string>(StringComparer.Ordinal);
+        targets.Add(target);
+    }
+
+    private static HashSet<string> BindCueToApps(string request, Regex cue, HashSet<string> apps)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match match in cue.Matches(request))
+        {
+            var app = FindNearestNamedApp(request, match.Index, apps);
+            if (app is null && apps.Count == 1) app = apps.First();
+            if (app is not null) result.Add(Normalize(app));
+        }
+        return result;
+    }
+
+    private static string? FindNearestNamedApp(string request, int beforeIndex, HashSet<string> apps)
+    {
+        string? selected = null;
+        var selectedIndex = -1;
+        foreach (var app in apps)
+        {
+            var pattern = app switch
+            {
+                "edge" => @"\b(?:microsoft\s+)?edge\b|\bbrowser\b|trình\s+duyệt|github|gmail|google\s+calendar",
+                "vscode" => @"\b(?:vs\s*code|visual\s+studio\s+code|vscode)\b",
+                "visual-studio" => @"\bvisual\s+studio\b(?!\s+code)",
+                "explorer" => @"\b(?:file\s+explorer|explorer|file\s+manager)\b|quản\s+lý\s+tệp",
+                "notepad" => @"\bnotepad\b|sổ\s+ghi\s+chú",
+                _ => Regex.Escape(app)
+            };
+            foreach (Match match in Regex.Matches(request, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                if (match.Index < beforeIndex && match.Index > selectedIndex)
+                {
+                    selected = app;
+                    selectedIndex = match.Index;
+                }
+        }
+        return selected;
     }
 
     private bool IsScopedTarget(string? target, bool requireNewWindow)

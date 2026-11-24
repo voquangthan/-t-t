@@ -325,6 +325,28 @@ Check(ComputerUseIntentScope.TryCreate("Mở Edge, cửa sổ mới; mở VS Cod
       !multiAppScope.Allows(new ComputerUseUiAction("observe", "explorer", null, null, null, null, null, null)) &&
       !multiAppScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)),
     "a multi-app request can verify its explicitly requested new windows while excluding an unrequested application");
+Check(ComputerUseIntentScope.TryCreate("Mở Edge, bấm tab Gmail; mở VS Code, bấm Explorer", out var multiAppActionScope) &&
+      multiAppActionScope!.HasInteractiveUiScope &&
+      multiAppActionScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      multiAppActionScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)) &&
+      multiAppActionScope.Allows(new ComputerUseUiAction("activate-window", "edge", null, null, "00000000000000000000000000000000", null, null, null)) &&
+      multiAppActionScope.Allows(new ComputerUseUiAction("activate-window", "vscode", null, null, "00000000000000000000000000000001", null, null, null)) &&
+      multiAppActionScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
+      multiAppActionScope.Allows(new ComputerUseUiAction("invoke", "vscode", "00000000000000000000000000000000", "e2", null, null, null, null), "Explorer") &&
+      !multiAppActionScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e2", null, null, null, null), "Explorer") &&
+      !multiAppActionScope.Allows(new ComputerUseUiAction("invoke", "vscode", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
+      !multiAppActionScope.Allows(new ComputerUseUiAction("observe", "notepad", null, null, null, null, null, null)),
+    "multi-app actions observe only requested apps and bind each requested control to its named app");
+Check(ComputerUseIntentScope.TryCreate("Mở Edge và VS Code", out var multiOpenOnlyScope) &&
+      !multiOpenOnlyScope!.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      !multiOpenOnlyScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)),
+    "opening multiple apps without an observation or interaction request does not authorize reading their UI");
+Check(ComputerUseIntentScope.TryCreate("Mở Edge, nhập hello vào ô Search; mở VS Code, nhập code vào ô Search", out var multiAppTypeScope) &&
+      multiAppTypeScope!.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "hello", null, null), "Search") &&
+      multiAppTypeScope.Allows(new ComputerUseUiAction("type", "vscode", "00000000000000000000000000000001", "e2", null, "code", null, null), "Search") &&
+      !multiAppTypeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e2", null, "code", null, null), "Search") &&
+      !multiAppTypeScope.Allows(new ComputerUseUiAction("type", "vscode", "00000000000000000000000000000001", "e1", null, "hello", null, null), "Search"),
+    "multi-app typing binds each input target and exact text to its named app");
 Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mới lên trước", out var notepadScope) &&
       notepadScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
       !notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
