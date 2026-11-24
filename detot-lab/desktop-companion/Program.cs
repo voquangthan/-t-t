@@ -686,7 +686,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
                 expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
                 workspaceVerificationReason = "local_profile_unavailable" };
-        var userDataDirectory = Path.GetFullPath(Path.Combine(localAppData, "DetotLab", "ComputerUse", "VSCodeProfile"));
+        var userDataDirectory = Path.GetFullPath(Path.Combine(localAppData, "DetotLab", "ComputerUse", "VSCodeProfileAccessible"));
         try { Directory.CreateDirectory(userDataDirectory); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -695,6 +695,11 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
                 workspaceVerificationReason = "dedicated_profile_unavailable" };
         }
+        if (!EnsureVsCodeAccessibilityMode(userDataDirectory))
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "accessibility_profile_configuration_failed" };
         foreach (var argument in DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(workspace, userDataDirectory))
             start.ArgumentList.Add(argument);
         using var launched = Process.Start(start);
@@ -731,6 +736,33 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 rootLabelMatched = snapshot.RootLabelMatched, accessiblePathMatched = snapshot.AccessiblePathMatched,
                 existingWindowObserved = snapshot.ExistingWindowObserved }
         };
+    }
+
+    private static bool EnsureVsCodeAccessibilityMode(string userDataDirectory)
+    {
+        string? temporaryPath = null;
+        try
+        {
+            var userDirectory = Path.Combine(userDataDirectory, "User");
+            Directory.CreateDirectory(userDirectory);
+            var settingsPath = Path.Combine(userDirectory, "settings.json");
+            temporaryPath = Path.Combine(userDirectory, $"settings.detot-{Guid.NewGuid():N}.tmp");
+            var existingSettings = File.Exists(settingsPath) ? File.ReadAllText(settingsPath) : null;
+            File.WriteAllText(temporaryPath,
+                DesktopCompanionVerification.BuildVsCodeAccessibilitySettings(existingSettings));
+            File.Move(temporaryPath, settingsPath, overwrite: true);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException)
+        {
+            if (temporaryPath is not null)
+            {
+                try { File.Delete(temporaryPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            return false;
+        }
     }
 
     private async Task<object> OpenRepositoryPullsAsync(CancellationToken cancellationToken)
@@ -879,11 +911,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                                 windowHandleUnavailable = true;
                                 continue;
                             }
-                            if (!DesktopCompanionVerification.IsNewWindow(handle, existingWindowHandles))
-                            {
-                                existingWindowObserved = true;
-                                continue;
-                            }
+                            var windowExistedBeforeLaunch = !DesktopCompanionVerification.IsNewWindow(handle, existingWindowHandles);
                             var title = SafeName(window);
                             // VS Code exposes Explorer section headers (for example, "Open Editors") as TreeItems too.
                             // Only inspect direct TreeItem children of UIA Tree controls; descendants can be project file names.
@@ -893,9 +921,12 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                             var rootNames = roots.Select(SafeName).ToArray();
                             var paths = roots.Select(SafeHelpText).ToArray();
                             var evidence = DesktopCompanionVerification.EvaluateWorkspace(workspace, true, title, rootNames, paths);
+                            var relevantExistingWindow = DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(
+                                windowExistedBeforeLaunch, evidence);
+                            existingWindowObserved |= relevantExistingWindow;
                             snapshot = new(true, evidence.Verified, processSession, evidence.ExpectedWorkspace,
                                 evidence.ObservedWorkspace, evidence.Reason, evidence.WindowTitleMatched,
-                                evidence.RootLabelMatched, evidence.AccessiblePathMatched, existingWindowObserved);
+                                evidence.RootLabelMatched, evidence.AccessiblePathMatched, relevantExistingWindow);
                             if (evidence.Verified) return snapshot;
                         }
                     }

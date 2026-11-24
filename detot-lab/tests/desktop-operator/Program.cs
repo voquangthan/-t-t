@@ -742,11 +742,26 @@ Check(reusedWindowWorkspace.Verified && reusedWindowWorkspace.Reason == "verifie
       !timedOutWorkspace.Verified && timedOutWorkspace.Reason == "window_not_found",
     "VS Code workspace evidence distinguishes reused matching, wrong workspace, and window timeout without leaking outside names");
 var vscodeArguments = DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(
-    "D:\\work\\codex-computer-use", "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfile");
-Check(vscodeArguments.SequenceEqual(["--user-data-dir", "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfile",
+    "D:\\work\\codex-computer-use", "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfileAccessible");
+Check(vscodeArguments.SequenceEqual(["--user-data-dir", "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfileAccessible",
           "--disable-extensions", "--new-window", "D:\\work\\codex-computer-use"], StringComparer.OrdinalIgnoreCase) &&
       !vscodeArguments.Contains("--reuse-window", StringComparer.Ordinal),
     "VS Code opens the allowlisted workspace in an isolated profile with extensions disabled, preserving user windows");
+using var accessibilitySettings = JsonDocument.Parse(DesktopCompanionVerification.BuildVsCodeAccessibilitySettings(
+    "{\"files.autoSave\":\"off\",\"editor.accessibilitySupport\":\"off\"}"));
+Check(accessibilitySettings.RootElement.GetProperty("files.autoSave").GetString() == "off" &&
+      accessibilitySettings.RootElement.GetProperty("editor.accessibilitySupport").GetString() == "on",
+    "dedicated VS Code profile enables accessibility while preserving unrelated settings");
+Check(DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(true, reusedWindowWorkspace) &&
+      !DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(true,
+          DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,
+              "another-workspace - Visual Studio Code", ["another-workspace"], [])) &&
+      !DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(false, reusedWindowWorkspace),
+    "existing VS Code candidate reporting is limited to windows whose title matches the requested workspace");
+var invalidAccessibilitySettingsRejected = false;
+try { _ = DesktopCompanionVerification.BuildVsCodeAccessibilitySettings("not-json"); }
+catch (JsonException) { invalidAccessibilitySettingsRejected = true; }
+Check(invalidAccessibilitySettingsRejected, "invalid dedicated VS Code settings fail closed without overwrite");
 var unsafeVsCodeProfileRejected = false;
 try { _ = DesktopCompanionVerification.BuildVsCodeWorkspaceArguments("D:\\work\\codex-computer-use", "D:\\work\\codex-computer-use\\.vscode-profile"); }
 catch (ArgumentException) { unsafeVsCodeProfileRejected = true; }

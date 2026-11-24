@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 public static partial class DesktopCompanionVerification
 {
@@ -141,6 +142,19 @@ public static partial class DesktopCompanionVerification
 
         return ["--user-data-dir", profile, "--disable-extensions", "--new-window", workspace];
     }
+
+    public static string BuildVsCodeAccessibilitySettings(string? existingSettingsJson)
+    {
+        var settings = string.IsNullOrWhiteSpace(existingSettingsJson)
+            ? new JsonObject()
+            : JsonNode.Parse(existingSettingsJson) as JsonObject
+                ?? throw new JsonException("VS Code settings must be a JSON object.");
+        settings["editor.accessibilitySupport"] = "on";
+        return settings.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    public static bool IsRelevantExistingVsCodeWindow(bool windowExistedBeforeLaunch, WorkspaceEvidence evidence) =>
+        windowExistedBeforeLaunch && evidence.WindowTitleMatched;
 
     public static bool IsNewWindow(nint nativeHandle, IReadOnlySet<nint> existingWindowHandles) =>
         nativeHandle > 0 && !existingWindowHandles.Contains(nativeHandle);
