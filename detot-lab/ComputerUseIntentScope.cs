@@ -167,6 +167,8 @@ public sealed class ComputerUseIntentScope
             {
                 var normalizedTarget = Normalize(target);
                 typeTargets.Add(normalizedTarget);
+                if (apps.Any(app => IsAppTarget(app, normalizedTarget)) && !ExplicitInputSurface.IsMatch(match.Value))
+                    continue;
                 var boundApp = BindTargetToNearestApp(request, match.Index, normalizedTarget, apps, appTypeTargets);
                 var typedText = ExtractTypedText(request, match.Index);
                 if (boundApp is not null && typedText.Length is > 0 and <= 2000)
