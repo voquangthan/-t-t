@@ -43,7 +43,7 @@ export function ConsentSettings() {
     grant.purpose === option.purpose && grant.destination === option.destination);
 
   return <section className="transcript consent-settings" aria-label="Quyền riêng tư và đồng ý xử lý dữ liệu">
-    <div className="cloud-heading"><div><h1>Quyền riêng tư</h1><p>Mọi quyền dưới đây mặc định tắt. Quyền OAuth chỉ kết nối dịch vụ; nó không cấp quyền gửi dữ liệu cho DeepSeek hay cho phép xử lý nền.</p></div>
+    <div className="cloud-heading"><div><h1>Quyền riêng tư</h1><p>Mọi quyền dưới đây mặc định tắt. Computer Use vẫn có thể mở ứng dụng được duyệt cục bộ; bật riêng “Chế độ thông minh” mới cho phép gửi cấu trúc UI và nhãn đã lọc qua Gateway. Các quyền OAuth chỉ kết nối dịch vụ, không tự cấp quyền gửi nội dung cho model hoặc xử lý nền.</p></div>
       <button disabled={!!busy} onClick={() => void reload().catch(cause => setError(cause instanceof Error ? cause.message : "Không tải được quyền."))}>Làm mới</button></div>
     {error && <p className="cloud-error" role="alert">{error}</p>}{notice && <p className="cloud-notice" role="status">{notice}</p>}
     <div className="consent-list">{snapshot.options.map(option => {

@@ -592,9 +592,12 @@ try
 {
     var consent = new ConsentPolicy(consentTestRoot, new EphemeralDataProtectionProvider());
     var computerUseOption = consent.Get("owner").Options.Single(option => option.Source == "computer_use");
-    Check(computerUseOption.DestinationLabel.Contains("openclaw/default", StringComparison.Ordinal) &&
-          computerUseOption.Description.Contains("nhà cung cấp theo cấu hình Gateway đang hoạt động", StringComparison.Ordinal),
-        "computer-use consent names the model route and discloses that Gateway selects the upstream provider");
+    Check(computerUseOption.PurposeLabel.Contains("Chế độ thông minh", StringComparison.Ordinal) &&
+          computerUseOption.DestinationLabel.Contains("openclaw/default", StringComparison.Ordinal) &&
+          computerUseOption.Description.Contains("vẫn chạy cục bộ", StringComparison.Ordinal) &&
+          computerUseOption.Description.Contains("giá trị trường, ảnh, tiêu đề và URL vẫn bị giữ lại", StringComparison.Ordinal) &&
+          computerUseOption.Description.Contains("không xác nhận riêng DeepSeek", StringComparison.Ordinal),
+        "Computer Use privacy setting explains local-only and Gateway-assisted modes, filtered egress, and dynamic provider selection");
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
         "sending filtered UI observations through the configured Gateway model defaults to deny");
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
