@@ -4,8 +4,14 @@ public static class ComputerUsePolicy
     public const string ModelConsentDestination = "DeepSeek via OpenClaw Gateway";
     public const string DefaultChatModelRoute = "openclaw/default";
 
-    public static string SelectModelRoute(bool computerUseRequest) =>
-        computerUseRequest ? ModelRoute : DefaultChatModelRoute;
+    public static string SelectModelRoute(bool computerUseRequest, bool modelConsentAllowed) =>
+        computerUseRequest && modelConsentAllowed ? ModelRoute : DefaultChatModelRoute;
+
+    public static bool ShouldExposeComputerUsePlannerTool(bool normalChat, bool hasOtherTools,
+        bool desktopAvailable, bool modelConsentAllowed, ComputerUseIntentScope? requestScope,
+        bool isActionRequest) =>
+        normalChat && !hasOtherTools && desktopAvailable && modelConsentAllowed && isActionRequest &&
+        requestScope is { HasInteractiveUiScope: true };
 
     private static readonly HashSet<string> ObservationTargets = new(StringComparer.Ordinal)
     {

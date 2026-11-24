@@ -1143,15 +1143,19 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var desktopUiConsent = consentPolicy.IsAllowed(owner, "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination);
         var localDesktopAvailable = DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
             context.Connection.RemoteIpAddress);
-        var desktopActionsAvailable = normalDesktopContext && tools.Count == 0 && localDesktopAvailable;
         var desktopUiToolAvailable = ComputerUsePolicy.ShouldExposeInteractiveUiTool(
             normalChat: normalDesktopContext,
             hasOtherTools: tools.Count > 0,
             desktopAvailable: localDesktopAvailable,
             uiDataConsent: desktopUiConsent,
             requestScope: hasDesktopRequestScope ? desktopRequestScope : null);
-        var computerUseToolAvailable = desktopActionsAvailable && hasDesktopRequestScope &&
-            ComputerUsePlanner.MightBeActionRequest(message);
+        var computerUseToolAvailable = ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(
+            normalChat: normalDesktopContext,
+            hasOtherTools: tools.Count > 0,
+            desktopAvailable: localDesktopAvailable,
+            modelConsentAllowed: desktopUiConsent,
+            requestScope: hasDesktopRequestScope ? desktopRequestScope : null,
+            isActionRequest: ComputerUsePlanner.MightBeActionRequest(message));
         if (computerUseToolAvailable)
             tools.Add(ComputerUsePlanner.CreateToolDefinition());
         if (desktopUiToolAvailable)
@@ -1165,7 +1169,8 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         }
         using var first = await CallGateway(gateway, new
         {
-            model = ComputerUsePolicy.SelectModelRoute(computerUseToolAvailable || desktopUiToolAvailable),
+            model = ComputerUsePolicy.SelectModelRoute(computerUseToolAvailable || desktopUiToolAvailable,
+                desktopUiConsent),
             input = gatewayInput,
             instructions = miniPractice && request.StartMiniPractice
                 ? effectiveInstructions + "\n\nMở một thử thách duy nhất ngay bây giờ. Hãy nêu kỹ năng, mục tiêu, đoạn code hoặc tình huống cần phân tích, rồi hỏi người dùng trả lời. Không hỏi chọn chủ đề nếu hồ sơ chưa đủ; hãy đưa một bài khởi động chung."

@@ -33,9 +33,10 @@ Check(nonWindowActionResponse.WindowVerified is null,
     "chat response preserves unavailable window-verification status for other actions");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
-Check(ComputerUsePolicy.SelectModelRoute(computerUseRequest: true) == "deepseek/deepseek-flash" &&
-      ComputerUsePolicy.SelectModelRoute(computerUseRequest: false) == "openclaw/default",
-    "Computer Use pins DeepSeek Flash while unrelated Chat keeps the OpenClaw default route");
+Check(ComputerUsePolicy.SelectModelRoute(computerUseRequest: true, modelConsentAllowed: true) == "deepseek/deepseek-flash" &&
+      ComputerUsePolicy.SelectModelRoute(computerUseRequest: true, modelConsentAllowed: false) == "openclaw/default" &&
+      ComputerUsePolicy.SelectModelRoute(computerUseRequest: false, modelConsentAllowed: true) == "openclaw/default",
+    "DeepSeek Flash is selected only for consented Computer Use; otherwise keep the normal chat route");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
@@ -255,6 +256,15 @@ Check(ComputerUsePolicy.CanUseUiOperation("edge", "observe") &&
       !ComputerUsePolicy.CanUseUiOperation("edge", "run-shell"),
     "universal UI policy accepts only approved apps and bounded UI operations");
 ComputerUseIntentScope.TryCreate("Mở Edge", out var verifiedRequestScope);
+Check(ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true, hasOtherTools: false,
+          desktopAvailable: true, modelConsentAllowed: true, requestScope: verifiedRequestScope, isActionRequest: true) &&
+      !ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true, hasOtherTools: false,
+          desktopAvailable: true, modelConsentAllowed: false, requestScope: verifiedRequestScope, isActionRequest: true) &&
+      !ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true, hasOtherTools: false,
+          desktopAvailable: true, modelConsentAllowed: true, requestScope: null, isActionRequest: true) &&
+      !ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true, hasOtherTools: false,
+          desktopAvailable: true, modelConsentAllowed: true, requestScope: verifiedRequestScope, isActionRequest: false),
+    "Computer Use planner tool requires direct action scope and current DeepSeek UI-data consent");
 Check(verifiedRequestScope is { HasInteractiveUiScope: true } &&
       ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
           uiDataConsent: true, requestScope: verifiedRequestScope) &&
