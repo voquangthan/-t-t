@@ -741,10 +741,20 @@ Check(reusedWindowWorkspace.Verified && reusedWindowWorkspace.Reason == "verifie
       wrongWindowWorkspace.ObservedWorkspace == "different workspace (name redacted)" &&
       !timedOutWorkspace.Verified && timedOutWorkspace.Reason == "window_not_found",
     "VS Code workspace evidence distinguishes reused matching, wrong workspace, and window timeout without leaking outside names");
-var vscodeArguments = DesktopCompanionVerification.BuildVsCodeWorkspaceArguments("D:\\work\\codex-computer-use");
-Check(vscodeArguments.SequenceEqual(["--new-window", "D:\\work\\codex-computer-use"], StringComparer.OrdinalIgnoreCase) &&
+var vscodeArguments = DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(
+    "D:\\work\\codex-computer-use", "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfile");
+Check(vscodeArguments.SequenceEqual(["--user-data-dir", "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfile",
+          "--disable-extensions", "--new-window", "D:\\work\\codex-computer-use"], StringComparer.OrdinalIgnoreCase) &&
       !vscodeArguments.Contains("--reuse-window", StringComparer.Ordinal),
-    "opening the target VS Code workspace requests a separate window and preserves existing user windows");
+    "VS Code opens the allowlisted workspace in an isolated profile with extensions disabled, preserving user windows");
+var unsafeVsCodeProfileRejected = false;
+try { _ = DesktopCompanionVerification.BuildVsCodeWorkspaceArguments("D:\\work\\codex-computer-use", "D:\\work\\codex-computer-use\\.vscode-profile"); }
+catch (ArgumentException) { unsafeVsCodeProfileRejected = true; }
+Check(unsafeVsCodeProfileRejected, "VS Code profile is rejected when nested inside the project workspace");
+var workspaceVsCodeProfileRejected = false;
+try { _ = DesktopCompanionVerification.BuildVsCodeWorkspaceArguments("D:\\work\\codex-computer-use", "D:\\work\\codex-computer-use"); }
+catch (ArgumentException) { workspaceVsCodeProfileRejected = true; }
+Check(workspaceVsCodeProfileRejected, "VS Code profile is rejected when it equals the project workspace");
 Check(!DesktopCompanionVerification.IsNewWindow(101, new HashSet<nint> { 101, 202 }) &&
       DesktopCompanionVerification.IsNewWindow(303, new HashSet<nint> { 101, 202 }) &&
       !DesktopCompanionVerification.IsNewWindow(0, new HashSet<nint>()),

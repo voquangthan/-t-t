@@ -680,7 +680,22 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 evidence = new { windowTitleMatched = false, rootLabelMatched = false, accessiblePathMatched = false,
                     existingWindowObserved = false } };
         var start = new ProcessStartInfo(executable) { UseShellExecute = false };
-        foreach (var argument in DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(workspace))
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData))
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "local_profile_unavailable" };
+        var userDataDirectory = Path.GetFullPath(Path.Combine(localAppData, "DetotLab", "ComputerUse", "VSCodeProfile"));
+        try { Directory.CreateDirectory(userDataDirectory); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return new { succeeded = false, status = "launch_failed", processStarted = false,
+                windowVerified = false, workspaceVerified = false, sessionId = (int?)null,
+                expectedWorkspace = Path.GetFullPath(workspace), observedWorkspace = (string?)null,
+                workspaceVerificationReason = "dedicated_profile_unavailable" };
+        }
+        foreach (var argument in DesktopCompanionVerification.BuildVsCodeWorkspaceArguments(workspace, userDataDirectory))
             start.ArgumentList.Add(argument);
         using var launched = Process.Start(start);
         if (launched is null)

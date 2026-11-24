@@ -127,8 +127,20 @@ public static partial class DesktopCompanionVerification
         return ("not_verified", null);
     }
 
-    public static string[] BuildVsCodeWorkspaceArguments(string expectedWorkspace) =>
-        ["--new-window", Path.GetFullPath(expectedWorkspace)];
+    public static string[] BuildVsCodeWorkspaceArguments(string expectedWorkspace, string userDataDirectory)
+    {
+        var workspace = Path.GetFullPath(expectedWorkspace);
+        var profile = Path.GetFullPath(userDataDirectory);
+        var relativeProfile = Path.GetRelativePath(workspace, profile);
+        var firstRelativeSegment = relativeProfile.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        var isWorkspaceOrChild = relativeProfile == "." ||
+            (!Path.IsPathFullyQualified(relativeProfile) && firstRelativeSegment != "..");
+        if (isWorkspaceOrChild)
+            throw new ArgumentException("The dedicated VS Code profile must be outside the workspace.", nameof(userDataDirectory));
+
+        return ["--user-data-dir", profile, "--disable-extensions", "--new-window", workspace];
+    }
 
     public static bool IsNewWindow(nint nativeHandle, IReadOnlySet<nint> existingWindowHandles) =>
         nativeHandle > 0 && !existingWindowHandles.Contains(nativeHandle);
