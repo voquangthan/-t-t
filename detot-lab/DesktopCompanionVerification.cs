@@ -156,14 +156,18 @@ public static partial class DesktopCompanionVerification
     {
         var settings = string.IsNullOrWhiteSpace(existingSettingsJson)
             ? new JsonObject()
-            : JsonNode.Parse(existingSettingsJson) as JsonObject
+            : JsonNode.Parse(existingSettingsJson, documentOptions: new JsonDocumentOptions
+                { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }) as JsonObject
                 ?? throw new JsonException("VS Code settings must be a JSON object.");
         settings["editor.accessibilitySupport"] = "on";
         return settings.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
 
     public static bool IsRelevantExistingVsCodeWindow(bool windowExistedBeforeLaunch, WorkspaceEvidence evidence) =>
-        windowExistedBeforeLaunch && (evidence.WindowTitleMatched || evidence.ProcessCommandLineMatched);
+        windowExistedBeforeLaunch && evidence.WindowTitleMatched;
+
+    public static bool IsWindowBoundProcessWorkspaceEvidence(bool processCommandLineMatched,
+        int windowsOwnedByProcess, bool windowIsNew) => processCommandLineMatched && windowsOwnedByProcess == 1 && windowIsNew;
 
     public static string BuildVsCodeWorkspaceProfileDirectory(string profileRoot, string expectedWorkspace)
     {

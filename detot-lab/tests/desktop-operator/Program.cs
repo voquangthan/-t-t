@@ -125,8 +125,11 @@ Check(ComputerUseCommandPlanner.TryParse("""{"commandId":"git-status"}""", out v
       !commandScope.Allows(new ComputerUseCommandAction("git-branch")) &&
       !ComputerUseCommandScope.TryCreate("Chạy Remove-Item *", out _) &&
       !ComputerUseCommandScope.TryCreate("Chạy git status; Remove-Item *", out _) &&
+      !ComputerUseCommandScope.TryCreate("Chạy git status, nhưng đừng chạy lệnh", out _) &&
+      !ComputerUseCommandScope.TryCreate("Chạy git status, không chạy nhé", out _) &&
+      !ComputerUseCommandScope.TryCreate("Run git status, but do not run it", out _) &&
       !ComputerUseCommandScope.TryCreate("Giải thích lệnh git status", out _),
-    "terminal scope accepts only one explicitly requested fixed read-only command and rejects injection/destructive text");
+    "terminal scope accepts only an unambiguously affirmative fixed command and rejects negated/injected text");
 var fixedGitCommand = SafeTerminalExecutor.CreateStartInfo("git-status", Path.GetTempPath());
 var fixedPowerShellCommand = SafeTerminalExecutor.CreateStartInfo("powershell-date", Path.GetTempPath());
 Check(fixedGitCommand is { ArgumentList.Count: 7 } &&
@@ -842,6 +845,11 @@ using var accessibilitySettings = JsonDocument.Parse(DesktopCompanionVerificatio
 Check(accessibilitySettings.RootElement.GetProperty("files.autoSave").GetString() == "off" &&
       accessibilitySettings.RootElement.GetProperty("editor.accessibilitySupport").GetString() == "on",
     "dedicated VS Code profile enables accessibility while preserving unrelated settings");
+using var jsoncAccessibilitySettings = JsonDocument.Parse(DesktopCompanionVerification.BuildVsCodeAccessibilitySettings(
+    "{\n  // dedicated profile note\n  \"files.autoSave\": \"off\",\n  \"editor.accessibilitySupport\": \"off\",\n}"));
+Check(jsoncAccessibilitySettings.RootElement.GetProperty("files.autoSave").GetString() == "off" &&
+      jsoncAccessibilitySettings.RootElement.GetProperty("editor.accessibilitySupport").GetString() == "on",
+    "VS Code JSONC comments and trailing commas are accepted while unrelated settings are retained");
 var vscodeProfileRoot = "C:\\Users\\tester\\AppData\\Local\\DetotLab\\ComputerUse\\VSCodeProfiles";
 var vscodeWorkspaceWithSpaces = "D:\\work\\computer use";
 var scopedVsCodeProfile = DesktopCompanionVerification.BuildVsCodeWorkspaceProfileDirectory(vscodeProfileRoot,
@@ -859,11 +867,15 @@ Check(DesktopCompanionVerification.IsDedicatedVsCodeCommandLine(vscodeCommandLin
       !DesktopCompanionVerification.IsDedicatedVsCodeCommandLine(vscodeCommandLine, vscodeWorkspaceWithSpaces,
           vscodeProfileRoot),
     "VS Code process evidence requires both the exact workspace argument and its dedicated profile");
+var singleNewWindowProcessEvidence = DesktopCompanionVerification.IsWindowBoundProcessWorkspaceEvidence(true, 1, true);
+var multiWindowProcessEvidence = DesktopCompanionVerification.IsWindowBoundProcessWorkspaceEvidence(true, 2, true);
+var existingWindowProcessEvidence = DesktopCompanionVerification.IsWindowBoundProcessWorkspaceEvidence(true, 1, false);
 var processVerifiedWorkspace = DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\computer use", true,
-    "Visual Studio Code", [], [], processCommandLineMatched: true);
+    "Visual Studio Code", [], [], processCommandLineMatched: singleNewWindowProcessEvidence);
 Check(processVerifiedWorkspace.Verified && processVerifiedWorkspace.ProcessCommandLineMatched &&
-      processVerifiedWorkspace.Reason == "verified_by_scoped_process_command_line",
-    "exact workspace-scoped launch evidence can verify a window when VS Code UIA omits the root tree");
+      processVerifiedWorkspace.Reason == "verified_by_scoped_process_command_line" &&
+      !multiWindowProcessEvidence && !existingWindowProcessEvidence,
+    "process command line verifies only its single new owned window and cannot verify any of several windows");
 Check(DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(true, reusedWindowWorkspace) &&
       !DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(true,
           DesktopCompanionVerification.EvaluateWorkspace("D:\\work\\codex-computer-use", true,

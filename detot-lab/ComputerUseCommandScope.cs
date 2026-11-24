@@ -24,6 +24,8 @@ public sealed class ComputerUseCommandScope
         if (string.IsNullOrWhiteSpace(request) || request.Length > 1200 || request.Contains('\n') || request.Contains('\r') ||
             !Regex.IsMatch(request, @"^\s*(?:please\s+|hãy\s+|vui\s+lòng\s+)?(?:chạy|run|execute|mở|open)\b",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
+            Regex.IsMatch(request, @"\b(?:không|chẳng|đừng|chớ|chưa|not|never|don't|dont|do\s+not|shouldn't|shouldnt|without)\b",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
             Regex.IsMatch(request, @"[;&|<>`$]", RegexOptions.CultureInvariant) ||
             Regex.IsMatch(request, @"(?:sudo|runas|administrator|elevat|executionpolicy|bypass|invoke-expression|\biex\b|downloadstring|remove-item|\bdel\b|\berase\b|\bformat\b|shutdown|restart-computer|set-content|out-file|\|\s*(?:iex|invoke-expression))",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)) return false;

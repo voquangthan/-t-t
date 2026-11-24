@@ -940,7 +940,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                             var rootNames = roots.Select(SafeName).ToArray();
                             var paths = roots.Select(SafeHelpText).ToArray();
                             var evidence = DesktopCompanionVerification.EvaluateWorkspace(workspace, true, title, rootNames, paths,
-                                processWorkspaceMatched);
+                                DesktopCompanionVerification.IsWindowBoundProcessWorkspaceEvidence(processWorkspaceMatched,
+                                    windows.Length, !windowExistedBeforeLaunch));
                             var relevantExistingWindow = DesktopCompanionVerification.IsRelevantExistingVsCodeWindow(
                                 windowExistedBeforeLaunch, evidence);
                             existingWindowObserved |= relevantExistingWindow;
