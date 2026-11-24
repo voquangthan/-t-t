@@ -50,6 +50,12 @@ public static class ComputerUsePolicy
         return true;
     }
 
+    public static bool TryAuthorizeModelAssistedUiAction(bool gatewayDataConsentAllowed,
+        ComputerUseIntentScope? scope, ComputerUseUiAction action, string? observedElementName = null,
+        string? observedTarget = null, Action? onAuthorized = null) =>
+        gatewayDataConsentAllowed && TryAuthorizeInteractiveUiAction(scope, action,
+            observedElementName, observedTarget, onAuthorized);
+
     // GCM's current chooser is not bound to a trusted pending Git operation, repository, or host.
     // Keep account selection denied until such transaction context can be verified end to end.
     public static bool CanSelectGitHubAccount(string? action) => false;

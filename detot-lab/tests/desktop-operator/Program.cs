@@ -308,6 +308,10 @@ Check(ComputerUseIntentScope.TryCreate("Mở Edge, bấm tab Gmail, rồi cuộn
       !edgeScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
       !edgeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e4", null, "attacker text", null, null)),
     "a direct request is bound to its named app, requested target and operation set");
+var scopedObserve = new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null);
+Check(!ComputerUsePolicy.TryAuthorizeModelAssistedUiAction(false, edgeScope, scopedObserve) &&
+      ComputerUsePolicy.TryAuthorizeModelAssistedUiAction(true, edgeScope, scopedObserve),
+    "model-assisted UI operations stop on revoked Gateway data consent and continue while consent is granted");
 Check(ComputerUseIntentScope.TryCreate("Xem cửa sổ Edge đang mở", out var existingEdgeScope) &&
       existingEdgeScope!.HasInteractiveUiScope &&
       existingEdgeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&

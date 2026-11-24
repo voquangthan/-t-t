@@ -742,7 +742,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var practicing = ComputerUseChatDispatcher.IsPracticeMode(request.StartPractice, caseState is not null);
         var miniPractice = ComputerUseChatDispatcher.IsMiniPracticeMode(request.MiniPractice, request.StartMiniPractice);
         var normalDesktopContext = !practicing && !miniPractice && request.DocumentContext is null &&
-            visionImages.Length == 0 && string.IsNullOrWhiteSpace(request.CalendarContext) && !calendarRequest;
+            visionImages.Length == 0 && string.IsNullOrWhiteSpace(request.CalendarContext) && !IsCalendarRequestCandidate(message);
         ComputerUseIntentScope? desktopRequestScope = null;
         var hasDesktopRequestScope = normalDesktopContext && ComputerUseIntentScope.TryCreate(message, out desktopRequestScope);
 
@@ -1180,26 +1180,32 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var computerUseCalls = calls.Where(call => call.GetProperty("name").GetString() == ComputerUsePlanner.ToolName).ToArray();
         if (computerUseCalls.Length > 0)
         {
-            if (!computerUseToolAvailable || calls.Length != 1 ||
-                !ComputerUsePlanner.TryParse(computerUseCalls[0].GetProperty("arguments").GetString(), out var computerPlan) ||
-                computerPlan is not { Handled: true, Actions.Count: > 0 } || desktopRequestScope is null ||
-                computerPlan.Actions.Any(action => !desktopRequestScope.AllowsFixedAction(action)))
+            var currentRequestScope = desktopRequestScope;
+            if (!computerUseToolAvailable || calls.Length != 1 || currentRequestScope is null)
                 return Results.Problem("Kế hoạch Computer Use không hợp lệ hoặc không được phép. Chưa thực hiện thao tác.", statusCode: 502);
+            if (!ComputerUsePlanner.TryParse(computerUseCalls[0].GetProperty("arguments").GetString(), out var computerPlan) ||
+                computerPlan is not { Handled: true, Actions.Count: > 0 })
+                return Results.Problem("Kế hoạch Computer Use không hợp lệ hoặc không được phép. Chưa thực hiện thao tác.", statusCode: 502);
+            if (computerPlan.Actions.Any(action => !currentRequestScope.AllowsFixedAction(action)))
+                return Results.Problem("Kế hoạch Computer Use vượt scope trực tiếp. Chưa thực hiện thao tác.", statusCode: 403);
             app.Logger.LogInformation("Gateway planned {StepCount} allowlisted Computer Use steps.", computerPlan.Actions.Count);
             return await ExecutePlannedComputerUse(computerPlan);
         }
         var desktopUiCalls = calls.Where(call => call.GetProperty("name").GetString() == ComputerUseUiPlanner.ToolName).ToArray();
         if (desktopUiCalls.Length > 0)
         {
+            var currentRequestScope = desktopRequestScope;
             if (!desktopUiToolAvailable || calls.Length != 1 ||
                 !ComputerUseUiPlanner.TryParse(desktopUiCalls[0].GetProperty("arguments").GetString(), out var firstUiAction) ||
-                firstUiAction is null || desktopRequestScope is null)
+                firstUiAction is null || currentRequestScope is null)
                 return Results.Problem("Yêu cầu UI không hợp lệ hoặc không được phép; chưa thao tác trên Windows.", statusCode: 502);
-            if (!ComputerUsePolicy.TryAuthorizeInteractiveUiAction(desktopRequestScope, firstUiAction,
+            if (!ComputerUsePolicy.TryAuthorizeModelAssistedUiAction(
+                    consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "OpenClaw Gateway"),
+                    currentRequestScope, firstUiAction,
                     onAuthorized: () => consentPolicy.RecordExplicitAction(owner,
                         new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", "local_only"),
                         "chat_desktop_ui", request.RequestId)))
-                return Results.Problem("Yêu cầu UI không khớp scope thao tác trực tiếp của lượt chat; chưa thao tác trên Windows.", statusCode: 403);
+                return Results.Problem("Quyền gửi observation tới Gateway đã bị thu hồi hoặc yêu cầu UI vượt scope; chưa thao tác trên Windows.", statusCode: 403);
             if (firstUiAction.Operation == "type" &&
                 !ComputerUseUiPlanner.IsExactUserText(firstUiAction.Text!, message))
                 return Results.BadRequest(new { error = "Chỉ có thể nhập nguyên văn nội dung có trong yêu cầu hiện tại." });
@@ -1256,10 +1262,12 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                              observedUiTargets.TryGetValue(uiAction.ObservationId, out var observationTarget))
                         requestedTarget = observationTarget;
                     else requestedTarget = null;
-                    if (!ComputerUsePolicy.TryAuthorizeInteractiveUiAction(desktopRequestScope, uiAction,
-                            requestedElementName, requestedTarget))
-                        return Results.Json(new { reply = "Kế hoạch UI vượt scope của yêu cầu hiện tại; đã dừng trước thao tác.",
-                            toolUsed = true, verifiedSteps, allActionsVerified = false }, statusCode: 403);
+                    if (!ComputerUsePolicy.TryAuthorizeModelAssistedUiAction(
+                            consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "OpenClaw Gateway"),
+                            currentRequestScope, uiAction, requestedElementName, requestedTarget))
+                        return Results.Json(new { reply = "Quyền gửi observation tới Gateway đã bị thu hồi hoặc kế hoạch UI vượt scope; đã dừng trước thao tác.",
+                            toolUsed = true, verifiedSteps, allActionsVerified = false,
+                            stoppedAt = "consent_revoked_or_scope" }, statusCode: 403);
                     if (step == maximumUiSteps)
                         return Results.Json(new { reply = "Đã đạt giới hạn 8 thao tác cho một lượt. Các bước đã xác minh được liệt kê bên dưới.",
                             toolUsed = true, verifiedSteps, allActionsVerified = false, stoppedAt = "step_limit" }, statusCode: 409);
