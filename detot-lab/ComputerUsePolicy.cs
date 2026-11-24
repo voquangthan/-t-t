@@ -17,6 +17,12 @@ public static class ComputerUsePolicy
 
     public static bool CanObserve(string? target) => target is not null && ObservationTargets.Contains(target);
 
+    public static string IsolatedGatewaySessionKey(Guid? requestId)
+    {
+        var sessionId = requestId is { } id && id != Guid.Empty ? id : Guid.NewGuid();
+        return $"agent:main:detot-computer-use-{sessionId:N}";
+    }
+
     public static bool CanNavigate(string? action)
     {
         if (action is null) return false;

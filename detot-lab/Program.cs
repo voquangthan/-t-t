@@ -741,6 +741,10 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
         var caseState = request.ConversationId is Guid caseId ? practice?.Case(caseId) : null;
         var practicing = ComputerUseChatDispatcher.IsPracticeMode(request.StartPractice, caseState is not null);
         var miniPractice = ComputerUseChatDispatcher.IsMiniPracticeMode(request.MiniPractice, request.StartMiniPractice);
+        var normalDesktopContext = !practicing && !miniPractice && request.DocumentContext is null &&
+            visionImages.Length == 0 && string.IsNullOrWhiteSpace(request.CalendarContext) && !calendarRequest;
+        ComputerUseIntentScope? desktopRequestScope = null;
+        var hasDesktopRequestScope = normalDesktopContext && ComputerUseIntentScope.TryCreate(message, out desktopRequestScope);
 
         async Task<IResult> ExecuteDirectComputerUse(string computerAction)
         {
@@ -839,7 +843,9 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             "chat_send", request.RequestId);
 
         using var gateway = factory.CreateClient("gateway");
-        if (request.ConversationId is Guid conversationId)
+        if (hasDesktopRequestScope)
+            gateway.DefaultRequestHeaders.Add("x-openclaw-session-key", ComputerUsePolicy.IsolatedGatewaySessionKey(request.RequestId));
+        else if (request.ConversationId is Guid conversationId)
             gateway.DefaultRequestHeaders.Add("x-openclaw-session-key", ConversationKey(conversationId));
         var tools = new List<object>();
         Practice.AgenticTask? reminderTask = null;
@@ -1135,11 +1141,8 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                 }
             });
         var desktopUiConsent = consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "OpenClaw Gateway");
-        var hasDesktopRequestScope = ComputerUseIntentScope.TryCreate(message, out var desktopRequestScope);
         var localDesktopAvailable = DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
             context.Connection.RemoteIpAddress);
-        var normalDesktopContext = !practicing && !miniPractice && request.DocumentContext is null &&
-            visionImages.Length == 0 && string.IsNullOrWhiteSpace(request.CalendarContext) && !calendarRequest;
         var desktopActionsAvailable = normalDesktopContext && tools.Count == 0 && localDesktopAvailable;
         var desktopUiToolAvailable = ComputerUsePolicy.ShouldExposeInteractiveUiTool(
             normalChat: normalDesktopContext,

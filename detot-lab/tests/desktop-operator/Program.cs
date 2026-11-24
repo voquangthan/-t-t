@@ -38,6 +38,13 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
+var chatConversationId = Guid.NewGuid();
+var useRequestId = Guid.NewGuid();
+var isolatedComputerUseSession = ComputerUsePolicy.IsolatedGatewaySessionKey(useRequestId);
+Check(isolatedComputerUseSession == ComputerUsePolicy.IsolatedGatewaySessionKey(useRequestId) &&
+      isolatedComputerUseSession.StartsWith("agent:main:detot-computer-use-", StringComparison.Ordinal) &&
+      !isolatedComputerUseSession.Contains(chatConversationId.ToString("N"), StringComparison.Ordinal),
+    "Computer Use gets a request-scoped Gateway session instead of the conversation history session");
 Check(ComputerUsePolicy.CanNavigate("open-notepad") &&
       ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad",
     "Notepad remains a supported launch smoke test");
