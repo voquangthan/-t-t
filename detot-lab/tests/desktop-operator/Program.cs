@@ -700,10 +700,12 @@ try
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
         "sending filtered UI observations to the explicit DeepSeek route defaults to deny");
     var terminalOption = consent.Get("owner").Options.Single(option => option.Source == "computer_use_terminal");
+    var directGitRequestParsed = ComputerUseCommandScope.TryCreate("Chạy git status", out var directGitScope);
     Check(terminalOption.Destination == "local_only" &&
           !consent.IsAllowed("owner", "computer_use_terminal", "direct_request", "local_only") &&
+          directGitRequestParsed &&
           !ComputerUsePolicy.TryAuthorizeSafeTerminalCommand(false,
-              ComputerUseCommandScope.TryCreate("Chạy git status", out var directGitScope) ? directGitScope : null,
+              directGitScope,
               new ComputerUseCommandAction("git-status")),
         "safe terminal requires a separate local-only consent and a directly requested command scope");
     consent.Set("owner", "computer_use_terminal", "direct_request", "local_only", true, "owner", Guid.NewGuid());
