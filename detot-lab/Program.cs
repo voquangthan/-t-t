@@ -1277,6 +1277,10 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
 
                     var uiResult = await desktopCompanion.ExecuteUiAsync(uiAction, cancellationToken);
                     var modelUiResultJson = desktopRequestScope!.FilterObservationForModel(uiResult, uiAction, requestedTarget);
+                    if (modelUiResultJson == "{\"status\":\"egress_blocked\"}")
+                        return Results.Json(new { reply = "Đã dừng Computer Use vì observation không qua được kiểm tra dữ liệu trước khi gửi model. Không gửi nội dung UI; bước vừa rồi có thể đã xảy ra, hãy kiểm tra cửa sổ trước khi thử lại.",
+                            toolUsed = true, computerUseAction = "egress-blocked", verifiedSteps,
+                            allActionsVerified = false, stoppedAt = "egress_policy" }, statusCode: 502);
                     using var modelUiResultDocument = JsonDocument.Parse(modelUiResultJson);
                     var modelUiResult = modelUiResultDocument.RootElement;
                     ComputerUseIntentScope.RecordObservedElements(modelUiResult, observedUiElements);

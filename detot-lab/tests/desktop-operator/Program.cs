@@ -495,6 +495,30 @@ Check(restrictedElements.GetArrayLength() == 1 && restrictedElements[0].GetPrope
       !restrictedElements[0].TryGetProperty("value", out _) && !restrictedElements[0].TryGetProperty("automationId", out _) &&
       !restrictedWindow.TryGetProperty("title", out _) && restrictedWindow.TryGetProperty("windowId", out _),
     "target-only observation returns only the requested input label and opaque window IDs, not UI values or titles");
+Check(ComputerUseIntentScope.TryCreate("Xem toàn bộ màn hình desktop", out var wholeDesktopScope),
+    "explicit whole-desktop observation has a bounded scope");
+using (var broadUi = JsonDocument.Parse("""
+    {"status":"observed","app":"desktop","complete":true,"observationId":"00000000000000000000000000000021",
+     "windowTitle":"private title","screenshot":"base64-private-image","screenText":"private screen text",
+     "diagnosticData":{"secret":"must not leave host"},
+     "elements":[{"id":"e1","type":"Button","name":"Task view","enabled":true,"value":"private value","tooltip":"private tooltip"},
+                 {"id":"e2","type":"Text","name":"password field","value":"private"}]}
+    """))
+using (var broadFiltered = JsonDocument.Parse(wholeDesktopScope!.FilterObservationForModel(broadUi.RootElement,
+           new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null))))
+    Check(!broadFiltered.RootElement.TryGetProperty("screenshot", out _) &&
+          !broadFiltered.RootElement.TryGetProperty("screenText", out _) &&
+          !broadFiltered.RootElement.TryGetProperty("windowTitle", out _) &&
+          !broadFiltered.RootElement.TryGetProperty("diagnosticData", out _) &&
+          broadFiltered.RootElement.GetProperty("elements").GetArrayLength() == 1 &&
+          broadFiltered.RootElement.GetProperty("elements")[0].GetProperty("name").GetString() == "Task view" &&
+          !broadFiltered.RootElement.GetProperty("elements")[0].TryGetProperty("value", out _) &&
+          !broadFiltered.RootElement.GetProperty("elements")[0].TryGetProperty("tooltip", out _),
+        "whole-desktop observations pass through the egress allowlist; screenshots, values, unknown fields and protected labels are denied");
+using (var unknownOnly = JsonDocument.Parse("""{"status":"observed","privateNewField":"do not send"}"""))
+    Check(ComputerUseEgressPolicy.TryFilterUiObservation(unknownOnly.RootElement, out var filteredUnknown) &&
+          !filteredUnknown.Contains("privateNewField", StringComparison.Ordinal),
+        "future Companion fields are denied by default at the final model egress boundary");
 var postActionUi = JsonDocument.Parse("""
     {"status":"verified","actionVerified":true,"observation":{"observationId":"00000000000000000000000000000013",
      "elements":[{"id":"e1","type":"Edit","name":"Search"},{"id":"e2","type":"Text","name":"Inbox message preview"}]}}

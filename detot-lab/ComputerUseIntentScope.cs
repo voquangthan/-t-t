@@ -259,15 +259,28 @@ public sealed class ComputerUseIntentScope
 
     public string FilterObservationForModel(JsonElement result, ComputerUseUiAction sourceAction, string? observedTarget = null)
     {
-        if (wholeDesktop || allowCurrentUiObservation)
-            return result.GetRawText();
-        if (sourceAction.App == "desktop" && sourceAction.Operation == "observe" && sourceAction.Text is not null)
-            observedTarget = $"{Normalize(sourceAction.Text)}|observed";
+        JsonElement scopedResult = result;
+        JsonDocument? scopedDocument = null;
+        try
+        {
+            if (!wholeDesktop && !allowCurrentUiObservation)
+            {
+                if (sourceAction.App == "desktop" && sourceAction.Operation == "observe" && sourceAction.Text is not null)
+                    observedTarget = $"{Normalize(sourceAction.Text)}|observed";
 
-        var root = JsonNode.Parse(result.GetRawText());
-        if (root is null || !ContainsObservation(root)) return result.GetRawText();
-        RestrictObservation(root);
-        return root.ToJsonString();
+                var root = JsonNode.Parse(result.GetRawText());
+                if (root is not null && ContainsObservation(root))
+                {
+                    RestrictObservation(root);
+                    scopedDocument = JsonDocument.Parse(root.ToJsonString());
+                    scopedResult = scopedDocument.RootElement;
+                }
+            }
+
+            return ComputerUseEgressPolicy.TryFilterUiObservation(scopedResult, out var filtered)
+                ? filtered : "{\"status\":\"egress_blocked\"}";
+        }
+        finally { scopedDocument?.Dispose(); }
 
         static bool ContainsObservation(JsonNode? node)
         {
