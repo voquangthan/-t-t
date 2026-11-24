@@ -14,9 +14,10 @@ public static class ComputerUsePolicy
         requestScope is { HasInteractiveUiScope: true };
 
     public static bool TryAuthorizeModelAssistedFixedAction(bool modelConsentAllowed,
-        ComputerUseIntentScope? requestScope, string? action, Action? onAuthorized = null)
+        ComputerUseIntentScope? requestScope, string action, Action? onAuthorized = null)
     {
-        if (!modelConsentAllowed || requestScope is null || !requestScope.AllowsFixedAction(action)) return false;
+        if (!modelConsentAllowed || requestScope is null || string.IsNullOrWhiteSpace(action) ||
+            !requestScope.AllowsFixedAction(action)) return false;
         onAuthorized?.Invoke();
         return true;
     }
