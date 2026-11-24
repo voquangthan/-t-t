@@ -841,6 +841,49 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             return null;
         }
 
+        if (normalDesktopContext && !practicing && !miniPractice &&
+            ComputerUseCommandScope.TryCreate(message, out var directCommandScope) && directCommandScope is not null)
+        {
+            if (!DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
+                    context.Connection.RemoteIpAddress))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            const string terminalConsentSource = "computer_use_terminal";
+            var commandId = directCommandScope.CommandIdsRequested.Single();
+            var terminalAction = new ComputerUseCommandAction(commandId);
+            var terminalRequirement = new ConsentPolicy.ConsentRequirement(terminalConsentSource, "direct_request", "local_only");
+            var terminalConsent = consentPolicy.Check(owner, [terminalRequirement], "chat_safe_terminal_preflight",
+                request.RequestId, out _);
+            if (!ComputerUsePolicy.TryAuthorizeSafeTerminalCommand(terminalConsent, directCommandScope, terminalAction))
+                return Results.Json(new { error = "Chưa cấp quyền chạy các lệnh chẩn đoán an toàn trong mục Quyền riêng tư." },
+                    statusCode: StatusCodes.Status403Forbidden);
+            if (!consentPolicy.IsAllowed(owner, terminalConsentSource, "direct_request", "local_only") ||
+                !directCommandScope.Allows(terminalAction))
+                return Results.Json(new { error = "Lệnh không nằm trong phạm vi yêu cầu trực tiếp." }, statusCode: StatusCodes.Status403Forbidden);
+            var commandResult = await desktopCompanion.ExecuteCommandAsync(terminalAction, cancellationToken);
+            var commandStatus = commandResult.TryGetProperty("status", out var commandStatusElement) &&
+                commandStatusElement.ValueKind == JsonValueKind.String ? commandStatusElement.GetString() : "failed";
+            app.Logger.LogInformation("Safe terminal command {CommandId} returned {Status}.", commandId, commandStatus);
+            if (commandStatus != "completed")
+                return Results.Json(new { reply = $"Lệnh chẩn đoán chưa hoàn tất ({commandStatus}). Không có lệnh khác được thử tự động.",
+                    toolUsed = true, computerUseAction = "safe-terminal", commandId, status = commandStatus },
+                    statusCode: commandStatus == "timed_out" ? StatusCodes.Status504GatewayTimeout : StatusCodes.Status502BadGateway);
+
+            consentPolicy.RecordExplicitAction(owner, terminalRequirement, "chat_safe_terminal", request.RequestId);
+            var output = commandResult.TryGetProperty("stdout", out var stdout) && stdout.ValueKind == JsonValueKind.String
+                ? stdout.GetString() : "";
+            var errors = commandResult.TryGetProperty("stderr", out var stderr) && stderr.ValueKind == JsonValueKind.String
+                ? stderr.GetString() : "";
+            var exitCode = commandResult.TryGetProperty("exitCode", out var exitCodeElement) && exitCodeElement.TryGetInt32(out var parsedExitCode)
+                ? parsedExitCode : -1;
+            var truncated = commandResult.TryGetProperty("outputTruncated", out var truncatedElement) && truncatedElement.ValueKind == JsonValueKind.True;
+            return Results.Ok(new
+            {
+                reply = $"Lệnh an toàn `{commandId}` kết thúc với mã {exitCode}.\n{(string.IsNullOrWhiteSpace(output) ? "(stdout trống)" : output)}" +
+                    (string.IsNullOrWhiteSpace(errors) ? "" : $"\nSTDERR:\n{errors}") + (truncated ? "\n[Đầu ra đã được giới hạn.]" : ""),
+                toolUsed = true, computerUseAction = "safe-terminal", commandId, exitCode, outputTruncated = truncated
+            });
+        }
+
         var chatRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync<IResult>(message,
             practicing, miniPractice, ExecuteDirectComputerUse, AuthorizeNormalChat);
         if (!chatRoute.ContinueToChat) return chatRoute.Result ??
@@ -1241,6 +1284,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             var observedUiElements = new Dictionary<string, string>(StringComparer.Ordinal);
             var observedUiTargets = new Dictionary<string, string>(StringComparer.Ordinal);
             var selectableUiWindowTargets = new Dictionary<string, string>(StringComparer.Ordinal);
+            var recoveredUiObservations = 0;
             JsonDocument currentResponse = first;
             JsonDocument? ownedResponse = null;
             const int maximumUiSteps = 8;
@@ -1311,11 +1355,16 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     ComputerUseIntentScope.RecordObservedTargets(modelUiResult, uiAction, observedUiTargets, selectableUiWindowTargets);
                     var status = uiResult.TryGetProperty("status", out var statusValue) && statusValue.ValueKind == JsonValueKind.String
                         ? statusValue.GetString()! : "failed";
+                    var recoveredObservation = status == "recovered_observation";
+                    if (recoveredObservation && ++recoveredUiObservations > ComputerUseRecoveryPolicy.MaximumReplansPerTurn)
+                        return Results.Json(new { reply = "Đã dừng sau hai lần làm mới bằng chứng UI; không lặp lại thao tác cũ.",
+                            toolUsed = true, verifiedSteps, allActionsVerified = false, stoppedAt = "recovery_limit" },
+                            statusCode: StatusCodes.Status409Conflict);
                     app.Logger.LogInformation("Computer Use step {Step}: {Operation} on {App} returned {Status}.",
                         step + 1, uiAction.Operation, uiAction.App, status);
                     if (status == "confirmation_required")
                     {
-                        if (uiAction.Operation != "invoke")
+                        if (uiAction.Operation is not ("invoke" or "click"))
                             return Results.Json(new { reply = "Đã dừng vì thao tác nhập hoặc lấy focus có thể ảnh hưởng dữ liệu; trường hợp này chưa hỗ trợ xác nhận an toàn.",
                                 toolUsed = true, computerUseAction = "confirmation-required", verifiedSteps, allActionsVerified = false },
                                 statusCode: StatusCodes.Status403Forbidden);
@@ -1343,7 +1392,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                         new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
                         "chat_desktop_ui_observation", request.RequestId);
 
-                    verifiedSteps.Add($"{uiAction.Operation}:{uiAction.App}");
+                    if (!recoveredObservation) verifiedSteps.Add($"{uiAction.Operation}:{uiAction.App}");
                     foreach (var outputItem in responseOutput) gatewayInputItems.Add(outputItem.Clone());
                     gatewayInputItems.Add(new
                     {

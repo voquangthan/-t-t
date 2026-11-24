@@ -58,6 +58,10 @@ public static class ComputerUsePolicy
         app is not null && ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) &&
         operation is not null && ComputerUseUiPlanner.AllowedOperations.Contains(operation, StringComparer.Ordinal);
 
+    public static bool TryAuthorizeSafeTerminalCommand(bool terminalConsentAllowed,
+        ComputerUseCommandScope? scope, ComputerUseCommandAction action) =>
+        terminalConsentAllowed && scope is not null && scope.Allows(action);
+
     public static bool ShouldExposeInteractiveUiTool(bool normalChat, bool hasOtherTools, bool desktopAvailable,
         bool uiDataConsent, ComputerUseIntentScope? requestScope) =>
         normalChat && !hasOtherTools && desktopAvailable && uiDataConsent &&
@@ -94,9 +98,22 @@ public static class ComputerUsePolicy
         {
             apps = ComputerUseUiPlanner.AllowedApps,
             operations = ComputerUseUiPlanner.AllowedOperations,
-            restrictions = new[] { "navigation_only_invoke", "approved_text_fields_only", "exact_user_text_only", "no_sensitive_text", "no_submit", "no_terminal", "no_credentials", "confirm_risky_actions" }
+            restrictions = new[] { "request_scoped_ui_actions", "fresh_evidence_required", "approved_text_fields_only", "exact_user_text_only", "no_sensitive_text", "no_submit", "no_arbitrary_terminal", "no_credentials", "confirm_risky_actions" }
         },
         write = Array.Empty<string>(),
+        terminal = new { commands = ComputerUseCommandPlanner.CommandIds, consentRequired = true, arbitraryCommand = false },
         codeExecution = false
     };
+}
+
+public static class ComputerUseRecoveryPolicy
+{
+    public const int MaximumReplansPerTurn = 2;
+    private static readonly HashSet<string> RefreshableNoSideEffectStatuses = new(StringComparer.Ordinal)
+    {
+        "stale_observation", "app_process_not_approved", "observation_incomplete", "element_not_observed",
+        "window_changed", "stale_element"
+    };
+
+    public static bool CanRefreshAndReplan(string? status) => status is not null && RefreshableNoSideEffectStatuses.Contains(status);
 }

@@ -64,8 +64,9 @@ while (!shutdown.IsCancellationRequested)
             continue;
         }
         using var actionDeadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
-        actionDeadline.CancelAfter(TimeSpan.FromSeconds(request.UiAction?.Operation is "launch" or "navigate" ? 20 : 10));
-        var result = await handler.ExecuteAsync(request.Action, request.UiAction, request.UserConfirmed, actionDeadline.Token);
+        actionDeadline.CancelAfter(TimeSpan.FromSeconds(request.Action == "run-safe-command" ? 15 :
+            request.UiAction?.Operation is "launch" or "navigate" ? 20 : 10));
+        var result = await handler.ExecuteAsync(request.Action, request.UiAction, request.CommandAction, request.UserConfirmed, actionDeadline.Token);
         await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = request.RequestId, result }));
     }
     catch (OperationCanceledException) { }
@@ -155,6 +156,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
 {
     private static readonly HttpClient Github = CreateGithubClient();
     private readonly CompanionDesktopUi desktopUi = new();
+    private readonly SafeTerminalExecutor safeTerminal = new(workspace);
     private const int ProcessCommandLineInformation = 60;
     private sealed record EdgeVerificationResult(string Status, IReadOnlyList<string> States, bool WindowFound,
         bool UrlVerified, int? SessionId, string? CanonicalUrl);
@@ -168,12 +170,13 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     [StructLayout(LayoutKind.Sequential)] private struct UnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
 
     public Task<object> ExecuteAsync(string action, CancellationToken cancellationToken) =>
-        ExecuteAsync(action, null, false, cancellationToken);
+        ExecuteAsync(action, null, null, false, cancellationToken);
 
     public Task<object> ExecuteAsync(string action, ComputerUseUiAction? uiAction, CancellationToken cancellationToken) =>
-        ExecuteAsync(action, uiAction, false, cancellationToken);
+        ExecuteAsync(action, uiAction, null, false, cancellationToken);
 
-    public async Task<object> ExecuteAsync(string action, ComputerUseUiAction? uiAction, bool userConfirmed,
+    public async Task<object> ExecuteAsync(string action, ComputerUseUiAction? uiAction,
+        ComputerUseCommandAction? commandAction, bool userConfirmed,
         CancellationToken cancellationToken) => action switch
     {
         "observe-applications" => ObserveApplications(),
@@ -186,6 +189,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         "read-github-pull-requests" => await ReadPullRequestsAsync(cancellationToken),
         "ui-operation" or "confirmed-ui-operation" when uiAction is not null =>
             await ExecuteUiOperationAsync(uiAction, userConfirmed, cancellationToken),
+        "run-safe-command" when commandAction is not null &&
+            ComputerUseCommandPlanner.CommandIds.Contains(commandAction.CommandId, StringComparer.Ordinal) =>
+            await safeTerminal.ExecuteAsync(commandAction.CommandId, cancellationToken),
         _ => new { error = "action_not_allowed" }
     };
 

@@ -68,13 +68,39 @@ internal sealed class CompanionDesktopUi
         if (action.ObservationId is null || action.ElementId is null ||
             !observations.TryGetValue(action.ObservationId, out var cached) || cached.App != action.App ||
             DateTimeOffset.UtcNow - cached.CreatedAt > ObservationLifetime)
-            return new { status = "stale_observation", actionVerified = false };
-        if (!processIds.Contains(cached.ProcessId)) return new { status = "app_process_not_approved", actionVerified = false };
-        if (!cached.Complete) return new { status = "observation_incomplete", actionVerified = false };
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "stale_observation", cancellationToken);
+        if (!processIds.Contains(cached.ProcessId))
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "app_process_not_approved", cancellationToken);
+        if (!cached.Complete)
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "observation_incomplete", cancellationToken);
         if (!cached.Elements.TryGetValue(action.ElementId, out var prior))
-            return new { status = "element_not_observed", actionVerified = false };
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "element_not_observed", cancellationToken);
         if (!IsWindow(cached.WindowHandle) || !WindowBelongsToProcess(cached.WindowHandle, cached.ProcessId))
-            return new { status = "window_changed", actionVerified = false };
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "window_changed", cancellationToken);
+
+        if (action.Operation == "wait")
+        {
+            var deadline = DateTimeOffset.UtcNow.AddMilliseconds(action.TimeoutMs ?? 1500);
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await Task.Delay(200, cancellationToken);
+                if (!IsWindow(cached.WindowHandle) || !WindowBelongsToProcess(cached.WindowHandle, cached.ProcessId))
+                    return new { status = "window_changed", actionVerified = false };
+                var currentElements = await CompanionUiAutomation.Api.InspectAsync(
+                    UiTarget.FromWindowHandle(cached.WindowHandle), null, InspectDepth, cancellationToken);
+                var currentMap = currentElements.Where(item => item.Id is not null && !ComputerUseUiPlanner.IsSensitiveName(item.Name))
+                    .ToDictionary(item => item.Id!, StringComparer.Ordinal);
+                if (!SameSnapshot(cached.Elements, currentMap))
+                {
+                    var changedObservation = await ObserveWindowAsync(action.App, cached.ProcessId,
+                        cached.WindowHandle, cached.WindowTitle, cancellationToken);
+                    return new { status = ReadObservationComplete(changedObservation) ? "state_changed" : "observation_incomplete",
+                        actionVerified = ReadObservationComplete(changedObservation), observation = changedObservation };
+                }
+            }
+            return new { status = "wait_timeout", actionVerified = false };
+        }
 
         var automation = CompanionUiAutomation.Api;
         var target = UiTarget.FromWindowHandle(cached.WindowHandle);
@@ -82,10 +108,10 @@ internal sealed class CompanionDesktopUi
         var liveElements = current.Where(item => item.Id is not null && !ComputerUseUiPlanner.IsSensitiveName(item.Name))
             .ToDictionary(item => item.Id!, StringComparer.Ordinal);
         if (!SameSnapshot(cached.Elements, liveElements))
-            return new { status = "stale_observation", actionVerified = false };
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "stale_observation", cancellationToken);
         var element = current.FirstOrDefault(item => item.Id == action.ElementId);
         if (element is null || !SameIdentity(prior, element))
-            return new { status = "stale_element", actionVerified = false };
+            return await RefreshAfterNoSideEffectAsync(action.App, processIds, "stale_element", cancellationToken);
         if (element.IsOffscreen) return new { status = "element_offscreen", actionVerified = false };
         if (ComputerUseUiPlanner.IsProtectedSurface(cached.WindowTitle) ||
             ComputerUseUiPlanner.IsProtectedSurface(element.Name))
@@ -94,7 +120,7 @@ internal sealed class CompanionDesktopUi
         var classification = ComputerUseUiPlanner.ClassifyAction(action.Operation, element.Type, element.Name ?? string.Empty,
             element.ScrollDir);
         if (classification == "denied" || classification == "confirmation_required" && !userConfirmed ||
-            userConfirmed && (classification != "confirmation_required" || action.Operation != "invoke"))
+            userConfirmed && (classification != "confirmation_required" || action.Operation is not ("invoke" or "click")))
             return new { status = classification, actionVerified = false, elementType = element.Type,
                 elementName = ComputerUseUiPlanner.IsSensitiveName(element.Name) ? "[redacted]" : Limit(element.Name, 100) };
 
@@ -120,8 +146,12 @@ internal sealed class CompanionDesktopUi
                 break;
             }
             case "invoke":
+            case "click":
+            case "select":
             {
-                var requestedAction = element.Type is "TabItem" or "TreeItem"
+                if (action.Operation == "select" && element.Type is not ("TabItem" or "TreeItem" or "ListItem"))
+                    return new { status = "control_not_selectable", actionVerified = false };
+                var requestedAction = action.Operation == "select" || element.Type is "TabItem" or "TreeItem"
                     ? UiInvokeAction.Select : UiInvokeAction.Invoke;
                 var invokeResult = await automation.InvokeAsync(target, element, requestedAction, cancellationToken);
                 if (!string.Equals(invokeResult.PerformedAction, requestedAction.ToString().ToLowerInvariant(), StringComparison.Ordinal))
@@ -329,6 +359,31 @@ internal sealed class CompanionDesktopUi
             actionVerified = false,
             elements
         };
+    }
+
+    private async Task<object> RefreshAfterNoSideEffectAsync(string app, IReadOnlyList<int> processIds,
+        string reason, CancellationToken cancellationToken)
+    {
+        if (!ComputerUseRecoveryPolicy.CanRefreshAndReplan(reason))
+            return new { status = "recovery_not_allowed", actionVerified = false };
+        var refreshed = await ObserveAsync(app, processIds, cancellationToken);
+        if (!ReadObservationComplete(refreshed) && !HasWindowChoices(refreshed))
+            return new { status = reason, actionVerified = false };
+        return new { status = "recovered_observation", actionVerified = true,
+            recoveryReason = reason, observation = refreshed };
+    }
+
+    private static bool HasWindowChoices(object? value)
+    {
+        if (value is null) return false;
+        try
+        {
+            using var json = System.Text.Json.JsonSerializer.SerializeToDocument(value);
+            return json.RootElement.TryGetProperty("status", out var status) && status.GetString() == "window_selection_required" &&
+                json.RootElement.TryGetProperty("windows", out var windows) && windows.ValueKind == System.Text.Json.JsonValueKind.Array &&
+                windows.GetArrayLength() is > 1 and <= 32;
+        }
+        catch { return false; }
     }
 
     private static async Task<bool> IsSafeEditableAsync(IUiAutomation automation, UiTarget target, UiElement element,

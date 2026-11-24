@@ -9,7 +9,7 @@ public static class DesktopCompanionProtocol
     {
         "observe-applications", "open-workspace", "open-edge", "open-github",
         "open-vscode", "read-workspace", "read-github-account", "read-github-pull-requests",
-        "ui-operation", "confirmed-ui-operation"
+        "ui-operation", "confirmed-ui-operation", "run-safe-command"
     };
 
     public static string PipeNameForCurrentUser()
@@ -42,7 +42,7 @@ public static class DesktopCompanionProtocol
 
     public static string SerializeRequest(string? action, string requestId)
     {
-        if (!IsAllowedAction(action)) throw new ArgumentException("Desktop action is not allowed.", nameof(action));
+        if (!IsAllowedAction(action) || action == "run-safe-command") throw new ArgumentException("Desktop action requires a typed request or is not allowed.", nameof(action));
         if (!Guid.TryParseExact(requestId, "N", out _)) throw new ArgumentException("Invalid request id.", nameof(requestId));
         return JsonSerializer.Serialize(new { action = action!, requestId });
     }
@@ -64,9 +64,19 @@ public static class DesktopCompanionProtocol
         if (uiAction.Text is not null) payload["text"] = uiAction.Text;
         if (uiAction.Url is not null) payload["url"] = uiAction.Url;
         if (uiAction.Direction is not null) payload["direction"] = uiAction.Direction;
+        if (uiAction.TimeoutMs is not null) payload["timeoutMs"] = uiAction.TimeoutMs;
         return userConfirmed
             ? JsonSerializer.Serialize(new { action = "confirmed-ui-operation", requestId, uiAction = payload, userConfirmed = true })
             : JsonSerializer.Serialize(new { action = "ui-operation", requestId, uiAction = payload });
+    }
+
+    public static string SerializeCommandRequest(ComputerUseCommandAction commandAction, string requestId)
+    {
+        if (!Guid.TryParseExact(requestId, "N", out _) ||
+            !ComputerUseCommandPlanner.CommandIds.Contains(commandAction.CommandId, StringComparer.Ordinal))
+            throw new ArgumentException("Terminal command is not allowed.", nameof(commandAction));
+        return JsonSerializer.Serialize(new { action = "run-safe-command", requestId,
+            commandAction = new { commandId = commandAction.CommandId } });
     }
 
     public static bool TryParseRequest(string? json, out Request? request)
@@ -91,17 +101,26 @@ public static class DesktopCompanionProtocol
                 if (confirmed && (!root.TryGetProperty("userConfirmed", out var confirmation) ||
                     confirmation.ValueKind != JsonValueKind.True)) return false;
                 if (!confirmed && root.TryGetProperty("userConfirmed", out _)) return false;
-                request = new Request(action.GetString()!, id.GetString()!, parsedUiAction, confirmed);
+                request = new Request(action.GetString()!, id.GetString()!, parsedUiAction, null, confirmed);
+                return true;
+            }
+            if (action.GetString() == "run-safe-command")
+            {
+                if (root.EnumerateObject().Count() != 3 || !root.TryGetProperty("commandAction", out var commandAction) ||
+                    commandAction.ValueKind != JsonValueKind.Object ||
+                    !ComputerUseCommandPlanner.TryParse(commandAction.GetRawText(), out var parsedCommand)) return false;
+                request = new Request(action.GetString()!, id.GetString()!, null, parsedCommand, false);
                 return true;
             }
             if (root.EnumerateObject().Count() != 2) return false;
-            request = new Request(action.GetString()!, id.GetString()!, null, false);
+            request = new Request(action.GetString()!, id.GetString()!, null, null, false);
             return true;
         }
         catch (JsonException) { return false; }
     }
 
-    public sealed record Request(string Action, string RequestId, ComputerUseUiAction? UiAction, bool UserConfirmed);
+    public sealed record Request(string Action, string RequestId, ComputerUseUiAction? UiAction,
+        ComputerUseCommandAction? CommandAction, bool UserConfirmed);
 }
 
 public sealed class DesktopCompanionClient
@@ -113,6 +132,7 @@ public sealed class DesktopCompanionClient
     {
         if (!DesktopCompanionProtocol.IsAllowedAction(action))
             return JsonSerializer.SerializeToElement(new { error = "action_not_allowed" });
+        if (action == "run-safe-command") return JsonSerializer.SerializeToElement(new { error = "command_id_required" });
         if (action == "ui-operation") return JsonSerializer.SerializeToElement(new { error = "invalid_ui_operation" });
         return await SendAsync(DesktopCompanionProtocol.SerializeRequest(action, Guid.NewGuid().ToString("N")), cancellationToken);
     }
@@ -122,6 +142,14 @@ public sealed class DesktopCompanionClient
 
     public async Task<JsonElement> ExecuteConfirmedUiAsync(ComputerUseUiAction action, CancellationToken cancellationToken = default)
         => await ExecuteUiAsync(action, true, cancellationToken);
+
+    public async Task<JsonElement> ExecuteCommandAsync(ComputerUseCommandAction action, CancellationToken cancellationToken = default)
+    {
+        string serialized;
+        try { serialized = DesktopCompanionProtocol.SerializeCommandRequest(action, Guid.NewGuid().ToString("N")); }
+        catch (ArgumentException) { return JsonSerializer.SerializeToElement(new { error = "command_not_allowed" }); }
+        return await SendAsync(serialized, cancellationToken, 15);
+    }
 
     private async Task<JsonElement> ExecuteUiAsync(ComputerUseUiAction action, bool userConfirmed,
         CancellationToken cancellationToken)

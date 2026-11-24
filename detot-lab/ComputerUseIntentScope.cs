@@ -228,7 +228,8 @@ public sealed class ComputerUseIntentScope
             if (!wholeDesktop && !IsScopedTarget(observedTarget, requireNewWindow: requiresNewWindow)) return false;
             return action.Operation switch
             {
-                "invoke" => allowInvoke && MatchesClickTarget(action.App, observedElementName, observedTarget),
+                "invoke" or "click" or "select" => allowInvoke && MatchesClickTarget(action.App, observedElementName, observedTarget),
+                "wait" => allowInvoke || allowFocus || allowScroll || allowType,
                 "focus" => allowFocus && (MatchesClickTarget(action.App, observedElementName, observedTarget) || MatchesTypeTarget(action.App, observedElementName, observedTarget)),
                 "scroll" => allowScroll && AllowsScroll(action.App, observedTarget),
                 "type" => allowType && MatchesTypeTarget(action.App, observedElementName, observedTarget) && action.Text is not null &&
@@ -247,7 +248,8 @@ public sealed class ComputerUseIntentScope
                 ComputerUseUiPlanner.IsExactUserText(action.Text!, originalRequest),
             "navigate" => allowNavigate && action.App == "edge" && action.Url is not null &&
                 ComputerUseUiPlanner.IsExactUserText(action.Url, originalRequest),
-            "invoke" => allowInvoke && MatchesClickTarget(action.App, observedElementName),
+            "invoke" or "click" or "select" => allowInvoke && MatchesClickTarget(action.App, observedElementName),
+            "wait" => allowInvoke || allowFocus || allowScroll || allowType,
             "focus" => allowFocus && (MatchesClickTarget(action.App, observedElementName) || MatchesTypeTarget(action.App, observedElementName)),
             "scroll" => allowScroll && AllowsScroll(action.App),
             "type" => allowType && MatchesTypeTarget(action.App, observedElementName) && action.Text is not null &&

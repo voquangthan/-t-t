@@ -9,5 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="../../Detot.Lab.csproj" />
     <Compile Include="../../desktop-companion/InstalledApplicationShortcutResolver.cs" Link="InstalledApplicationShortcutResolver.cs" />
+    <Compile Include="../../desktop-companion/SafeTerminalExecutor.cs" Link="SafeTerminalExecutor.cs" />
   </ItemGroup>
 </Project>

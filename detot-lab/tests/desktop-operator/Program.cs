@@ -105,8 +105,51 @@ Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge"}""", 
       ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"desktop","text":"Notepad"}""", out var targetedDesktopObservation) &&
       targetedDesktopObservation is { Operation: "observe", App: "desktop", Text: "Notepad" } &&
       ComputerUseUiPlanner.TryParse("""{"operation":"activate-window","app":"vscode","windowId":"00000000000000000000000000000001"}""", out var activateWindowUi) &&
-      activateWindowUi is { Operation: "activate-window", WindowId: "00000000000000000000000000000001" },
+      activateWindowUi is { Operation: "activate-window", WindowId: "00000000000000000000000000000001" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"click","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e1"}""", out var clickUi) &&
+      clickUi is { Operation: "click", ElementId: "e1" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"select","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e2"}""", out var selectUi) &&
+      selectUi is { Operation: "select", ElementId: "e2" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"wait","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e2","timeoutMs":1200}""", out var waitUi) &&
+      waitUi is { Operation: "wait", TimeoutMs: 1200 } &&
+      DesktopCompanionProtocol.TryParseRequest(DesktopCompanionProtocol.SerializeUiRequest(waitUi!, Guid.NewGuid().ToString("N")), out var waitUiRequest) &&
+      waitUiRequest?.UiAction is { Operation: "wait", TimeoutMs: 1200 } &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"wait","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e2","timeoutMs":30000}""", out _),
     "generic UI planner parses one bounded operation using app-scoped recent observation IDs");
+Check(ComputerUseCommandPlanner.TryParse("""{"commandId":"git-status"}""", out var gitStatusCommand) &&
+      gitStatusCommand is { CommandId: "git-status" } &&
+      !ComputerUseCommandPlanner.TryParse("""{"commandId":"powershell-date; Remove-Item *"}""", out _) &&
+      !ComputerUseCommandPlanner.TryParse("""{"commandId":"git-status","args":["--ignored"]}""", out _) &&
+      ComputerUseCommandScope.TryCreate("Chạy git status", out var commandScope) &&
+      commandScope!.Allows(gitStatusCommand!) &&
+      !commandScope.Allows(new ComputerUseCommandAction("git-branch")) &&
+      !ComputerUseCommandScope.TryCreate("Chạy Remove-Item *", out _) &&
+      !ComputerUseCommandScope.TryCreate("Chạy git status; Remove-Item *", out _) &&
+      !ComputerUseCommandScope.TryCreate("Giải thích lệnh git status", out _),
+    "terminal scope accepts only one explicitly requested fixed read-only command and rejects injection/destructive text");
+var fixedGitCommand = SafeTerminalExecutor.CreateStartInfo("git-status", Path.GetTempPath());
+var fixedPowerShellCommand = SafeTerminalExecutor.CreateStartInfo("powershell-date", Path.GetTempPath());
+Check(fixedGitCommand is { ArgumentList.Count: 7 } &&
+      Path.GetFileName(fixedGitCommand.FileName).Equals("git.exe", StringComparison.OrdinalIgnoreCase) &&
+      fixedGitCommand.ArgumentList.SequenceEqual(["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", "status", "--short"]) &&
+      fixedPowerShellCommand is { ArgumentList.Count: 5 } &&
+      Path.GetFileName(fixedPowerShellCommand.FileName).Equals("powershell.exe", StringComparison.OrdinalIgnoreCase) &&
+      fixedPowerShellCommand.ArgumentList[^1] == "Get-Date -Format o" &&
+      SafeTerminalExecutor.CreateStartInfo("git-status; Remove-Item *", Path.GetTempPath()) is null,
+    "safe terminal adapter maps command IDs to fixed executables/arguments only");
+if (OperatingSystem.IsWindows())
+{
+    var safeTerminal = new SafeTerminalExecutor(Path.GetTempPath());
+    using var cmdResult = JsonDocument.Parse(JsonSerializer.Serialize(await safeTerminal.ExecuteAsync("cmd-version", CancellationToken.None)));
+    using var psResult = JsonDocument.Parse(JsonSerializer.Serialize(await safeTerminal.ExecuteAsync("powershell-date", CancellationToken.None)));
+    Check(cmdResult.RootElement.GetProperty("status").GetString() == "completed" &&
+          cmdResult.RootElement.GetProperty("exitCode").GetInt32() == 0 &&
+          cmdResult.RootElement.GetProperty("stdout").GetString()!.Contains("Windows", StringComparison.OrdinalIgnoreCase) &&
+          psResult.RootElement.GetProperty("status").GetString() == "completed" &&
+          psResult.RootElement.GetProperty("exitCode").GetInt32() == 0 &&
+          DateTimeOffset.TryParse(psResult.RootElement.GetProperty("stdout").GetString(), out _),
+        "real bounded CMD and PowerShell read-only commands return stdout and exit code");
+}
 var syntheticTokenText = string.Concat("ghp_", new string('a', 26), new string('0', 10));
 var syntheticTokenRequest = JsonSerializer.Serialize(new
 {
@@ -187,6 +230,11 @@ Check(ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Address and sear
       !ComputerUseUiPlanner.IsExactUserText("+84 912 345 678", "search +84 912 345 678"),
     "ordinary Edge text entry is enabled while identity, financial, file-name and code surfaces remain blocked");
 Check(ComputerUseUiPlanner.ClassifyAction("invoke", "TabItem", "Calendar") == "allowed" &&
+      ComputerUseUiPlanner.ClassifyAction("click", "Button", "Open") == "allowed" &&
+      ComputerUseUiPlanner.ClassifyAction("click", "Button", "Save") == "confirmation_required" &&
+      ComputerUseUiPlanner.ClassifyAction("select", "TabItem", "Calendar") == "allowed" &&
+      ComputerUseUiPlanner.ClassifyAction("select", "Button", "Open") == "denied" &&
+      ComputerUseUiPlanner.ClassifyAction("wait", "Text", "Loading") == "allowed" &&
       ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Save") == "confirmation_required" &&
       ComputerUseUiPlanner.ClassifyAction("invoke", "Hyperlink", "Download report") == "confirmation_required" &&
       ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Delete") == "denied" &&
@@ -194,6 +242,12 @@ Check(ComputerUseUiPlanner.ClassifyAction("invoke", "TabItem", "Calendar") == "a
       ComputerUseUiPlanner.ClassifyAction("type", "Edit", "Search") == "allowed" &&
       ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Run") == "denied",
     "UI action classification allows navigation and gates save/delete/run controls");
+Check(ComputerUseRecoveryPolicy.CanRefreshAndReplan("stale_observation") &&
+      ComputerUseRecoveryPolicy.CanRefreshAndReplan("element_not_observed") &&
+      !ComputerUseRecoveryPolicy.CanRefreshAndReplan("confirmation_required") &&
+      !ComputerUseRecoveryPolicy.CanRefreshAndReplan("action_invoked") &&
+      ComputerUseRecoveryPolicy.MaximumReplansPerTurn == 2,
+    "UI recovery only refreshes stale pre-action evidence, never repeats an action, and is bounded to two replans");
 using (var uiTool = JsonDocument.Parse(JsonSerializer.Serialize(ComputerUseUiPlanner.CreateToolDefinition())))
 {
     var root = uiTool.RootElement;
@@ -342,6 +396,9 @@ Check(ComputerUseIntentScope.TryCreate("Mở Edge, bấm tab Gmail, rồi cuộn
       edgeScope!.HasInteractiveUiScope &&
       edgeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       edgeScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
+      edgeScope.Allows(new ComputerUseUiAction("click", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
+      edgeScope.Allows(new ComputerUseUiAction("select", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
+      edgeScope.Allows(new ComputerUseUiAction("wait", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
       !edgeScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e2", null, null, null, null), "Outlook") &&
       edgeScope.Allows(new ComputerUseUiAction("scroll", "edge", "00000000000000000000000000000000", "e3", null, null, null, "down")) &&
       !edgeScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
@@ -642,6 +699,24 @@ try
         "legacy Gateway consent does not authorize the newly explicit DeepSeek destination");
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
         "sending filtered UI observations to the explicit DeepSeek route defaults to deny");
+    var terminalOption = consent.Get("owner").Options.Single(option => option.Source == "computer_use_terminal");
+    Check(terminalOption.Destination == "local_only" &&
+          !consent.IsAllowed("owner", "computer_use_terminal", "direct_request", "local_only") &&
+          !ComputerUsePolicy.TryAuthorizeSafeTerminalCommand(false,
+              ComputerUseCommandScope.TryCreate("Chạy git status", out var directGitScope) ? directGitScope : null,
+              new ComputerUseCommandAction("git-status")),
+        "safe terminal requires a separate local-only consent and a directly requested command scope");
+    consent.Set("owner", "computer_use_terminal", "direct_request", "local_only", true, "owner", Guid.NewGuid());
+    Check(ComputerUsePolicy.TryAuthorizeSafeTerminalCommand(true, directGitScope,
+              new ComputerUseCommandAction("git-status")) &&
+          !ComputerUsePolicy.TryAuthorizeSafeTerminalCommand(true, directGitScope,
+              new ComputerUseCommandAction("git-branch")),
+        "terminal consent can be reused for a separately requested command but cannot widen its command scope");
+    consent.Set("owner", "computer_use_terminal", "direct_request", "local_only", false, "owner", Guid.NewGuid());
+    Check(!ComputerUsePolicy.TryAuthorizeSafeTerminalCommand(
+              consent.IsAllowed("owner", "computer_use_terminal", "direct_request", "local_only"), directGitScope,
+              new ComputerUseCommandAction("git-status")),
+        "terminal consent revocation blocks the next command immediately");
     consent.Set("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination, true, "owner", Guid.NewGuid());
     Check(consent.IsAllowed("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
         "explicit consent for the DeepSeek route enables scoped UI planning");
@@ -663,6 +738,13 @@ Check(DesktopCompanionProtocol.TryParseRequest(uiRequestJson, out var uiRequest)
       uiRequest?.Action == "ui-operation" && uiRequest.UiAction is { Operation: "observe", App: "edge" } &&
       !DesktopCompanionProtocol.IsAllowedAction("run-shell"),
     "authenticated Companion protocol carries only validated universal UI operations");
+var safeCommandJson = DesktopCompanionProtocol.SerializeCommandRequest(new ComputerUseCommandAction("git-status"), Guid.NewGuid().ToString("N"));
+Check(DesktopCompanionProtocol.IsAllowedAction("run-safe-command") &&
+      DesktopCompanionProtocol.TryParseRequest(safeCommandJson, out var safeCommandRequest) &&
+      safeCommandRequest is { Action: "run-safe-command", CommandAction.CommandId: "git-status" } &&
+      !DesktopCompanionProtocol.TryParseRequest("""{"action":"run-safe-command","requestId":"00000000000000000000000000000000","commandAction":{"commandId":"git-status; Remove-Item *"}}""", out _) &&
+      !DesktopCompanionProtocol.TryParseRequest("""{"action":"run-safe-command","requestId":"00000000000000000000000000000000","commandAction":{"commandId":"git-status","args":["--ignored"]}}""", out _),
+    "authenticated Companion IPC admits fixed safe command IDs only and rejects injected arguments");
 var selectWindowAction = new ComputerUseUiAction("activate-window", "vscode", null, null,
     "00000000000000000000000000000001", null, null, null);
 var selectWindowJson = DesktopCompanionProtocol.SerializeUiRequest(selectWindowAction, Guid.NewGuid().ToString("N"));
@@ -1026,7 +1108,11 @@ Check(authorizedChatRoute.ContinueToChat && authorizedChatRoute.Result is null &
     "normal chat continues to the provider only after history consent is granted");
 var permissionDescription = System.Text.Json.JsonSerializer.Serialize(ComputerUsePolicy.Describe());
 Check(permissionDescription.Contains("\"codeExecution\":false", StringComparison.Ordinal),
-    "the exposed permission description keeps code execution disabled");
+    "the exposed permission description keeps arbitrary project code execution disabled");
+Check(permissionDescription.Contains("\"arbitraryCommand\":false", StringComparison.Ordinal) &&
+      permissionDescription.Contains("git-status", StringComparison.Ordinal) &&
+      permissionDescription.Contains("\"consentRequired\":true", StringComparison.Ordinal),
+    "the permission contract exposes only a fixed local diagnostic command catalog behind separate consent");
 Check(WindowsDesktopAutomation.ReadOpenApprovedApplications().All(name =>
         name is "Visual Studio Code" or "Microsoft Edge" or "File Explorer" or "Visual Studio" or "Notepad" or "Windows Terminal"),
     "application observation returns only approved app identities");
