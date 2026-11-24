@@ -210,7 +210,15 @@ internal sealed class CompanionDesktopUi
         CancellationToken cancellationToken)
     {
         if (!requestedAppWindows.TryGetValue(requestedApp, out var requested))
-            return new { status = "launch_required", app = requestedApp, actionVerified = false };
+        {
+            if (!ComputerUseUiPlanner.IsKnownDesktopAppTarget(requestedApp))
+                return new { status = "launch_required", app = requestedApp, actionVerified = false };
+            var approvedProcessIds = processIds.Where(processId =>
+                IsRequestedProcess(processId, requestedApp)).ToArray();
+            if (approvedProcessIds.Length == 0)
+                return new { status = "window_not_found", app = requestedApp, actionVerified = false };
+            return await ObserveAsync("desktop", approvedProcessIds, cancellationToken);
+        }
         var selected = requested.Window;
         if (DateTimeOffset.UtcNow - selected.CreatedAt > ObservationLifetime ||
             !processIds.Contains(selected.ProcessId) || !IsWindow(selected.WindowHandle) ||
@@ -235,6 +243,20 @@ internal sealed class CompanionDesktopUi
         return await ObserveWindowAsync(selected.App, selected.ProcessId, selected.WindowHandle,
             selected.Title, cancellationToken)
             ?? (object)new { status = "observation_unavailable", app = requestedApp, actionVerified = false };
+    }
+
+    private static bool IsRequestedProcess(int processId, string requestedApp)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return ComputerUseUiPlanner.IsRequestedProcessTarget(requestedApp, process.ProcessName);
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException or
+            System.ComponentModel.Win32Exception or NotSupportedException or System.Security.SecurityException)
+        {
+            return false;
+        }
     }
 
     private async Task<object> ActivateWindowAsync(ComputerUseUiAction action, IReadOnlyList<int> processIds,

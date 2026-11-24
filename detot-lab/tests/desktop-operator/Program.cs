@@ -385,7 +385,9 @@ Check(ComputerUseIntentScope.TryCreate("Mở Calculator", out var genericOpenOnl
 Check(ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "notepad") &&
       ComputerUseUiPlanner.IsRequestedProcessTarget("VS Code", "Code") &&
       !ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "msedge") &&
-      !ComputerUseUiPlanner.IsRequestedProcessTarget("Windows Terminal", "WindowsTerminal"),
+      !ComputerUseUiPlanner.IsRequestedProcessTarget("Windows Terminal", "WindowsTerminal") &&
+      ComputerUseUiPlanner.IsKnownDesktopAppTarget("Edge") &&
+      !ComputerUseUiPlanner.IsKnownDesktopAppTarget("Calculator"),
     "targeted desktop observations resolve only the explicitly requested non-blocked process");
 Check(ComputerUseUiPlanner.IsSameVerifiedWindow(410, 638000000000000000, 1001, 410, 638000000000000000, 1001) &&
       !ComputerUseUiPlanner.IsSameVerifiedWindow(410, 638000000000000000, 1001, 410, 638000000000000000, 1002) &&

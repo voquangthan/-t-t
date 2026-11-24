@@ -164,17 +164,13 @@ public static partial class ComputerUseUiPlanner
     {
         if (!IsSafeInstalledApplicationName(requestedApp)) return false;
         var normalizedRequest = NormalizeAppName(requestedApp);
-        var expectedProcess = normalizedRequest switch
-        {
-            "edge" or "microsoftedge" or "browser" or "trinhduyet" => "msedge",
-            "vscode" or "visualstudiocode" => "code",
-            "visualstudio" or "microsoftvisualstudio" => "devenv",
-            "fileexplorer" or "explorer" or "filemanager" or "quanlytep" => "explorer",
-            "notepad" or "soghinchu" => "notepad",
-            _ => normalizedRequest
-        };
+        var expectedProcess = ResolveKnownAppProcess(normalizedRequest) ?? normalizedRequest;
         return expectedProcess.Length > 0 && expectedProcess == NormalizeAppName(processName);
     }
+
+    public static bool IsKnownDesktopAppTarget(string requestedApp) =>
+        IsSafeInstalledApplicationName(requestedApp) &&
+        ResolveKnownAppProcess(NormalizeAppName(requestedApp)) is not null;
 
     public static bool IsSameVerifiedWindow(int expectedProcessId, long expectedProcessStartUtcTicks,
         long expectedWindowHandle, int observedProcessId, long observedProcessStartUtcTicks, long observedWindowHandle) =>
@@ -187,6 +183,16 @@ public static partial class ComputerUseUiPlanner
             .Where(character => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character) !=
                 System.Globalization.UnicodeCategory.NonSpacingMark && char.IsLetterOrDigit(character)))
             .ToLowerInvariant();
+
+    private static string? ResolveKnownAppProcess(string normalizedRequest) => normalizedRequest switch
+    {
+        "edge" or "microsoftedge" or "browser" or "trinhduyet" => "msedge",
+        "vscode" or "visualstudiocode" => "code",
+        "visualstudio" or "microsoftvisualstudio" => "devenv",
+        "fileexplorer" or "explorer" or "filemanager" or "quanlytep" => "explorer",
+        "notepad" or "soghinchu" => "notepad",
+        _ => null
+    };
 
     public static bool IsSafeTypingSurface(string app, string controlType, string name)
     {
