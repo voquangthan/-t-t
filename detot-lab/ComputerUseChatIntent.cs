@@ -8,6 +8,8 @@ public static class ComputerUseChatIntent
     private static readonly Regex DirectInstalledAppLaunch = new(
         Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:ứng\s+dụng\s+)?(?<app>[\p{L}\p{N}][\p{L}\p{N} &+._'-]{0,60}?)(?=\s+(?:rồi|sau\s+đó|và|and|then|để|for|to|đi|nha|nhé|với|please)\b|[,;.!?]|$)" + Suffix,
         Options);
+    private static readonly Regex DirectAppContinuation = new(
+        @"\s+(?:rồi|sau\s+đó|và|and|then|để|for|to)\b", Options);
 
     private static readonly (string Action, Regex Pattern)[] Patterns =
     [
@@ -36,7 +38,8 @@ public static class ComputerUseChatIntent
         if (launch.Success)
         {
             var appName = launch.Groups["app"].Value.Trim();
-            if (ComputerUseUiPlanner.IsSafeInstalledApplicationName(appName)) return "open-installed:" + appName;
+            if (!DirectAppContinuation.IsMatch(appName) && ComputerUseUiPlanner.IsSafeInstalledApplicationName(appName))
+                return "open-installed:" + appName;
         }
         return null;
     }

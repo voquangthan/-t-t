@@ -39,13 +39,17 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
 Check(ComputerUsePolicy.CanNavigate("open-notepad") &&
-      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad" &&
-      ComputerUseChatIntent.DetectDirectRequest("Mở Calculator") == "open-installed:Calculator" &&
-      ComputerUseChatIntent.DetectDirectRequest("Mở Calculator rồi giải phương trình") is null &&
-      ComputerUseChatIntent.DetectDirectRequest("Mở PowerShell") is null &&
-      ComputerUsePolicy.CanNavigate("open-installed:Calculator") &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad",
+    "Notepad remains a supported launch smoke test");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở Calculator") == "open-installed:Calculator",
+    "a simple generic app request is normalized into the shared launch action");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở Calculator rồi giải phương trình") is null,
+    "multi-step app requests stay on the model-assisted route");
+Check(ComputerUseChatIntent.DetectDirectRequest("Mở PowerShell") is null,
+    "blocked shell apps are not launched by the direct path");
+Check(ComputerUsePolicy.CanNavigate("open-installed:Calculator") &&
       !ComputerUsePolicy.CanNavigate("open-installed:PowerShell"),
-    "direct installed-app launches use the shared safe-name policy; multi-step and blocked-app requests stay on the smart route");
+    "the shared launch action applies the safe installed-app policy");
 Check(ComputerUsePlanner.MightBeActionRequest("Mở VS Code rồi xem các PR và CI") &&
       ComputerUsePlanner.MightBeActionRequest("Mở Edge, bấm tab Gmail, rồi cuộn xuống") &&
       ComputerUsePlanner.MightBeActionRequest("Mở Notepad") &&
