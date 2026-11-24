@@ -55,6 +55,7 @@ public sealed class ComputerUseIntentScope
     private readonly HashSet<string> typeTargets;
     private readonly Dictionary<string, HashSet<string>> appClickTargets;
     private readonly Dictionary<string, HashSet<string>> appTypeTargets;
+    private readonly Dictionary<string, HashSet<string>> appTypeTexts;
     private readonly HashSet<string> appScrollTargets;
     private readonly bool wholeDesktop;
     private readonly bool allowInvoke;
@@ -72,7 +73,7 @@ public sealed class ComputerUseIntentScope
         bool allowScroll, bool allowType, bool allowNavigate, bool requiresNewWindow,
         bool allowCurrentUiObservation, bool allowTargetOnlyObservation, bool hasInteractiveUiScope,
         Dictionary<string, HashSet<string>> appClickTargets, Dictionary<string, HashSet<string>> appTypeTargets,
-        HashSet<string> appScrollTargets)
+        Dictionary<string, HashSet<string>> appTypeTexts, HashSet<string> appScrollTargets)
     {
         originalRequest = request;
         this.apps = apps;
@@ -81,6 +82,7 @@ public sealed class ComputerUseIntentScope
         this.typeTargets = typeTargets;
         this.appClickTargets = appClickTargets;
         this.appTypeTargets = appTypeTargets;
+        this.appTypeTexts = appTypeTexts;
         this.appScrollTargets = appScrollTargets;
         this.wholeDesktop = wholeDesktop;
         this.allowInvoke = allowInvoke;
@@ -154,6 +156,7 @@ public sealed class ComputerUseIntentScope
 
         var typeTargets = new HashSet<string>(StringComparer.Ordinal);
         var appTypeTargets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var appTypeTexts = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var typeMatches = TypeTarget.Matches(request);
         foreach (Match match in typeMatches)
         {
@@ -164,7 +167,14 @@ public sealed class ComputerUseIntentScope
             {
                 var normalizedTarget = Normalize(target);
                 typeTargets.Add(normalizedTarget);
-                BindTargetToNearestApp(request, match.Index, normalizedTarget, apps, appTypeTargets);
+                var boundApp = BindTargetToNearestApp(request, match.Index, normalizedTarget, apps, appTypeTargets);
+                var typedText = ExtractTypedText(request, match.Index);
+                if (boundApp is not null && typedText.Length is > 0 and <= 2000)
+                {
+                    if (!appTypeTexts.TryGetValue(boundApp, out var appTexts))
+                        appTypeTexts[boundApp] = appTexts = new HashSet<string>(StringComparer.Ordinal);
+                    appTexts.Add(typedText);
+                }
             }
         }
 
@@ -191,7 +201,7 @@ public sealed class ComputerUseIntentScope
         scope = new ComputerUseIntentScope(request, apps, openTargets, clickTargets, typeTargets, wholeDesktop,
             hasClick, FocusCue.IsMatch(request) || hasType, hasScroll, hasType, hasNavigate, requiresNewWindow,
             allowCurrentUiObservation, allowTargetOnlyObservation, hasInteractiveUiScope,
-            appClickTargets, appTypeTargets, appScrollTargets);
+            appClickTargets, appTypeTargets, appTypeTexts, appScrollTargets);
         return true;
     }
 
@@ -217,6 +227,7 @@ public sealed class ComputerUseIntentScope
                 "focus" => allowFocus && (MatchesClickTarget(action.App, observedElementName) || MatchesTypeTarget(action.App, observedElementName)),
                 "scroll" => allowScroll && AllowsScroll(action.App),
                 "type" => allowType && MatchesTypeTarget(action.App, observedElementName) && action.Text is not null &&
+                    AllowsTypeText(action.App, action.Text) &&
                     ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest),
                 _ => false
             };
@@ -235,6 +246,7 @@ public sealed class ComputerUseIntentScope
             "focus" => allowFocus && (MatchesClickTarget(action.App, observedElementName) || MatchesTypeTarget(action.App, observedElementName)),
             "scroll" => allowScroll && AllowsScroll(action.App),
             "type" => allowType && MatchesTypeTarget(action.App, observedElementName) && action.Text is not null &&
+                AllowsTypeText(action.App, action.Text) &&
                 ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest),
             _ => false
         };
@@ -446,21 +458,34 @@ public sealed class ComputerUseIntentScope
 
     private bool AllowsScroll(string appName) => apps.Count == 1 || appScrollTargets.Contains(Normalize(appName));
 
+    private bool AllowsTypeText(string appName, string text) => apps.Count == 1 ||
+        appTypeTexts.TryGetValue(Normalize(appName), out var texts) && texts.Contains(text);
+
     private bool HasAppScopedInteraction(string appName)
     {
         var key = Normalize(appName);
         return appClickTargets.ContainsKey(key) || appTypeTargets.ContainsKey(key) || appScrollTargets.Contains(key);
     }
 
-    private static void BindTargetToNearestApp(string request, int beforeIndex, string target,
+    private static string? BindTargetToNearestApp(string request, int beforeIndex, string target,
         HashSet<string> apps, Dictionary<string, HashSet<string>> bindings)
     {
         var app = FindNearestNamedApp(request, beforeIndex, apps);
         if (app is null && apps.Count == 1) app = apps.First();
-        if (app is null) return;
+        if (app is null) return null;
         var key = Normalize(app);
         if (!bindings.TryGetValue(key, out var targets)) bindings[key] = targets = new HashSet<string>(StringComparer.Ordinal);
         targets.Add(target);
+        return key;
+    }
+
+    private static string ExtractTypedText(string request, int targetStart)
+    {
+        var cue = TypeCue.Matches(request).Cast<Match>().LastOrDefault(match => match.Index < targetStart);
+        if (cue is null) return "";
+        var start = cue.Index + cue.Length;
+        if (start > targetStart) return "";
+        return request[start..targetStart].Trim(' ', '\t', ',', ':', ';');
     }
 
     private static HashSet<string> BindCueToApps(string request, Regex cue, HashSet<string> apps)
