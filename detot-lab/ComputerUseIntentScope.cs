@@ -13,7 +13,7 @@ public sealed class ComputerUseIntentScope
         @"^\s*(?:(?:please|hãy|vui\s+lòng|làm\s+ơn|giúp\s+(?:tôi|tao|mình))\s+)*(?:mở|vào|xem|kiểm\s+tra|đọc|liệt\s+kê|bấm|nhấn|chọn|cuộn|nhập|gõ|điền|focus|click|press|select|scroll|type|enter|fill|open|launch|check|inspect|read|list|show|verify|go\s+to)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex UnsafeContext = new(
-        @"(?:ví\s+dụ|chẳng\s+hạn|giả\s+sử|tưởng\s+tượng|nếu\s+như|đừng|không\s+(?:mở|vào|xem|bấm|nhấn|chọn|cuộn|nhập|gõ|điền)|do\s+not|don't|never|hypothetical|for\s+example|example\s*:|how\s+(?:do\s+i|can\s+i|to)|what\s+does|explain\s+(?:the\s+)?(?:phrase|words?)|should\s+i|can\s+i)",
+        @"(?:ví\s+dụ|chẳng\s+hạn|giả\s+sử|tưởng\s+tượng|nếu\s+như|đừng|không\s+(?:mở|vào|xem|bấm|nhấn|chọn|cuộn|nhập|gõ|điền)|đọc\s+(?:câu|đoạn\s+văn|nội\s+dung)|read\s+(?:this\s+)?(?:text|sentence|the\s+following)|dịch|translate|giải\s+thích|explain|summarize|tóm\s+tắt|phân\s+tích|analyze|báo\s+lỗi|bị\s+lỗi|error|failed|not\s+working|can't|cannot|won't|doesn't|do\s+not|don't|never|hypothetical|for\s+example|example\s*:|how\s+(?:do\s+i|can\s+i|to)|what\s+does|explain\s+(?:the\s+)?(?:phrase|words?)|should\s+i|can\s+i|cách\s+mở|mô\s+tả\s+về|description\s+of)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex OpenCue = new(
         @"\b(?:mở|vào|open|launch|go\s+to)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -40,6 +40,9 @@ public sealed class ComputerUseIntentScope
     private static readonly Regex TypeTarget = new(
         @"\b(?:vào|in|into)\s+(?:(?:the|ô|trường|hộp|thanh|field|input|search\s+box|address\s+bar)\s+)?(?<target>[^,;.!?\r\n]+)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex CurrentUiSurface = new(
+        @"\b(?:cửa\s+sổ|window|tab|trang|page|giao\s+diện|ui|màn\s+hình|screen)\b.{0,32}\b(?:đang\s+mở|hiện\s+tại|đang\s+hiển\s+thị|currently\s+open|currently\s+visible|open\s+now|visible\s+now)\b|\b(?:đang\s+mở|hiện\s+tại|đang\s+hiển\s+thị|currently\s+open|currently\s+visible|open\s+now|visible\s+now)\b.{0,32}\b(?:cửa\s+sổ|window|tab|trang|page|giao\s+diện|ui|màn\s+hình|screen)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly string originalRequest;
     private readonly HashSet<string> apps;
@@ -52,10 +55,14 @@ public sealed class ComputerUseIntentScope
     private readonly bool allowScroll;
     private readonly bool allowType;
     private readonly bool allowNavigate;
+    private readonly bool requiresNewWindow;
+    private readonly bool allowCurrentUiObservation;
+    public bool HasInteractiveUiScope { get; }
 
     private ComputerUseIntentScope(string request, HashSet<string> apps, HashSet<string> openTargets,
         HashSet<string> clickTargets, HashSet<string> typeTargets, bool wholeDesktop, bool allowInvoke, bool allowFocus,
-        bool allowScroll, bool allowType, bool allowNavigate)
+        bool allowScroll, bool allowType, bool allowNavigate, bool requiresNewWindow,
+        bool allowCurrentUiObservation, bool hasInteractiveUiScope)
     {
         originalRequest = request;
         this.apps = apps;
@@ -68,6 +75,9 @@ public sealed class ComputerUseIntentScope
         this.allowScroll = allowScroll;
         this.allowType = allowType;
         this.allowNavigate = allowNavigate;
+        this.requiresNewWindow = requiresNewWindow;
+        this.allowCurrentUiObservation = allowCurrentUiObservation;
+        HasInteractiveUiScope = hasInteractiveUiScope;
     }
 
     public static bool TryCreate(string? request, out ComputerUseIntentScope? scope)
@@ -132,27 +142,48 @@ public sealed class ComputerUseIntentScope
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         if (apps.Count == 0 && openTargets.Count == 0) return false;
         if (apps.Count == 0 && !(hasOpen && openTargets.Count > 0)) return false;
+        var requiresNewWindow = Regex.IsMatch(request, @"(?:cửa\s+sổ\s+mới|new\s+window)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var allowCurrentUiObservation = apps.Count == 1 &&
+            (CurrentUiSurface.IsMatch(request) || hasClick || hasType || hasScroll || hasNavigate);
+        var hasInteractiveUiScope = wholeDesktop || openTargets.Count > 0 || allowCurrentUiObservation ||
+            hasClick || hasType || hasScroll || hasNavigate;
         scope = new ComputerUseIntentScope(request, apps, openTargets, clickTargets, typeTargets, wholeDesktop,
-            hasClick, FocusCue.IsMatch(request) || hasType, hasScroll, hasType, hasNavigate);
+            hasClick, FocusCue.IsMatch(request) || hasType, hasScroll, hasType, hasNavigate, requiresNewWindow,
+            allowCurrentUiObservation, hasInteractiveUiScope);
         return true;
     }
 
-    public bool Allows(ComputerUseUiAction action, string? observedElementName = null)
+    public bool Allows(ComputerUseUiAction action, string? observedElementName = null, string? observedTarget = null)
     {
         if (!ComputerUseUiPlanner.AllowedApps.Contains(action.App, StringComparer.Ordinal)) return false;
         if (action.App == "desktop")
         {
-            if (action.Operation is "observe" or "activate-window") return wholeDesktop;
+            if (action.Operation == "observe")
+                return wholeDesktop || action.Text is not null && AllowsExistingUiTarget(action.Text) &&
+                    ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest);
+            if (action.Operation == "activate-window")
+                return wholeDesktop || IsScopedTarget(observedTarget, requireNewWindow: requiresNewWindow);
             if (action.Operation == "launch-installed")
                 return openTargets.Contains(Normalize(action.Text ?? "")) &&
                     ComputerUseUiPlanner.IsExactUserText(action.Text!, originalRequest);
-            return false;
+            if (!wholeDesktop && !IsScopedTarget(observedTarget, requireNewWindow: requiresNewWindow)) return false;
+            return action.Operation switch
+            {
+                "invoke" => allowInvoke && MatchesClickTarget(observedElementName),
+                "focus" => allowFocus && (MatchesClickTarget(observedElementName) || MatchesTypeTarget(observedElementName)),
+                "scroll" => allowScroll,
+                "type" => allowType && MatchesTypeTarget(observedElementName) && action.Text is not null &&
+                    ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest),
+                _ => false
+            };
         }
         if (!apps.Contains(action.App)) return false;
 
         return action.Operation switch
         {
-            "observe" or "activate-window" => true,
+            "observe" or "activate-window" => openTargets.Any(target => IsAppTarget(action.App, target)) ||
+                allowCurrentUiObservation,
             "launch-installed" => openTargets.Contains(Normalize(action.Text ?? "")) &&
                 ComputerUseUiPlanner.IsExactUserText(action.Text!, originalRequest),
             "navigate" => allowNavigate && action.App == "edge" && action.Url is not null &&
@@ -203,6 +234,47 @@ public sealed class ComputerUseIntentScope
         }
     }
 
+    public static void RecordObservedTargets(JsonElement result, ComputerUseUiAction sourceAction,
+        IDictionary<string, string> observationTargets, IDictionary<string, string> windowTargets)
+    {
+        string? target;
+        if (sourceAction.App != "desktop") target = sourceAction.App;
+        else if (sourceAction.Operation is "observe" or "launch-installed") target = sourceAction.Text;
+        else if (sourceAction.Operation == "activate-window" && sourceAction.WindowId is not null &&
+                 windowTargets.TryGetValue(sourceAction.WindowId, out var selectedTarget)) target = selectedTarget;
+        else if (sourceAction.ObservationId is not null &&
+                 observationTargets.TryGetValue(sourceAction.ObservationId, out var priorTarget)) target = priorTarget;
+        else target = null;
+        if (target is not null)
+        {
+            var scopedTarget = sourceAction.App == "desktop" && !target.Contains('|')
+                ? $"{Normalize(target)}|{(sourceAction.Operation == "launch-installed" ? "new" : "observed")}" : target;
+            RecordObservationTarget(result, scopedTarget);
+            if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("observation", out var nested))
+                RecordObservationTarget(nested, scopedTarget);
+            if (sourceAction.App == "desktop" && (sourceAction.Operation is "observe" or "launch-installed") &&
+                result.ValueKind == JsonValueKind.Object && result.TryGetProperty("windows", out var windows) &&
+                windows.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var window in windows.EnumerateArray())
+                    if (window.ValueKind == JsonValueKind.Object && window.TryGetProperty("windowId", out var id) &&
+                        id.ValueKind == JsonValueKind.String)
+                        windowTargets[id.GetString()!] = scopedTarget;
+            }
+            if (sourceAction.App == "desktop" && sourceAction.Operation == "launch-installed" &&
+                result.ValueKind == JsonValueKind.Object && result.TryGetProperty("windowId", out var launchedWindowId) &&
+                launchedWindowId.ValueKind == JsonValueKind.String)
+                windowTargets[launchedWindowId.GetString()!] = scopedTarget;
+        }
+
+        void RecordObservationTarget(JsonElement observation, string scopedTarget)
+        {
+            if (observation.ValueKind == JsonValueKind.Object &&
+                observation.TryGetProperty("observationId", out var id) && id.ValueKind == JsonValueKind.String)
+                observationTargets[id.GetString()!] = scopedTarget;
+        }
+    }
+
     private bool MatchesClickTarget(string? elementName)
     {
         if (string.IsNullOrWhiteSpace(elementName) || clickTargets.Count == 0) return false;
@@ -219,6 +291,34 @@ public sealed class ComputerUseIntentScope
                 Regex.IsMatch(originalRequest, @"\b(?:tìm\s+kiếm|search)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
             normalized.Contains("address", StringComparison.Ordinal) &&
                 Regex.IsMatch(originalRequest, @"\b(?:địa\s+chỉ|address)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    private bool IsScopedTarget(string? target, bool requireNewWindow)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return false;
+        var separator = target.IndexOf('|');
+        var appName = separator < 0 ? target : target[..separator];
+        var origin = separator < 0 ? "observed" : target[(separator + 1)..];
+        return AllowsExistingUiTarget(appName) && (!requireNewWindow || origin == "new");
+    }
+
+    private bool AllowsExistingUiTarget(string appName) => openTargets.Any(target => IsAppTarget(appName, target)) ||
+        allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName));
+
+    private static bool IsAppTarget(string app, string target)
+    {
+        var normalizedApp = Normalize(app);
+        var normalizedTarget = Normalize(target);
+        var aliases = normalizedApp switch
+        {
+            "edge" => new[] { "edge", "microsoftedge", "browser", "trinhduyet" },
+            "vscode" => new[] { "vscode", "visualstudiocode" },
+            "visualstudio" => new[] { "visualstudio", "microsoftvisualstudio" },
+            "explorer" => new[] { "explorer", "fileexplorer", "filemanager", "quanlytep" },
+            "notepad" => new[] { "notepad", "soghinchu" },
+            _ => new[] { normalizedApp }
+        };
+        return aliases.Contains(normalizedTarget, StringComparer.Ordinal);
     }
 
     private static void AddIfMatch(string request, string pattern, string app, ISet<string> apps)

@@ -5,6 +5,7 @@
 - Work REVISE trên PR #5 phát hiện tool call do model tự sinh có thể được ghi audit như direct user request dù lượt chat không yêu cầu thao tác desktop.
 - Local fix derives a bounded per-turn scope from the user's current direct request before exposing either UI tool. Backend revalidates app, operation, exact launch/type/URL text and observed target label before Companion dispatch or consent audit. Quoted/example/negative/unrelated requests do not create scope; both generic UI and fixed planner dispatches use the gate.
 - Regression cases added for unrelated, quoted, example, negative, wrong-app, wrong-operation, wrong-element, exact typing and fixed GitHub/app-list actions.
+- Scoped `app=desktop` observation now accepts the exact requested process name and filters process IDs before UIA inspection. A launch result carries an opaque window ID only after a new window handle is verified; the request scope can activate only that ID when the user requested a new window.
 - `git diff --check` passes. Build and C# regression could not run here: no .NET SDK/MSBuild is available in PATH or the checked standard locations. Do not count these as PASS; publish to PR for hosted CI verification. Interactive Windows E2E is still pending.
 
 ## Computer Use — reusable desktop window target (24/11/2026)
@@ -269,3 +270,9 @@
 - **Next exact step:** commit/push the Gateway-tool optimization and verify CI/Work review for the exact SHA. Keep claims limited to code/CI until an interactive Windows smoke confirms multi-step Companion execution.
 
 - Follow-up regression coverage moved action-result verification into the planner helper and checks that navigation needs matching window/URL evidence, observations reject uncertain or partial status, and HTTP/error results never count as success. The test-only follow-up was pushed as `0209116`; CI passed. Live DeepSeek and interactive Windows execution remain unverified.
+
+## PR #5 review follow-up — current UI intent scope (24/11/2026)
+
+- Addressing the latest PR #5 REVISE at HEAD `9ef15ea6ee6ab3d75e28590a798f873634914308`: information requests such as “Đọc mô tả về Edge” and “Xem cách mở Edge” must not expose the interactive UI tool or authorize a Companion call. API-only GitHub reads retain their fixed API scope but do not expose generic UI observation. Explicit requests for a named open app/window, or a bounded click/type/scroll task, can observe only the single requested app.
+- Added regression coverage for those negative cases, a positive “Xem cửa sổ Edge đang mở” case, API-only GitHub reads, and an explicit tab click. Process-filtered observation and opaque launch-window binding remain in the same PR #5 scope.
+- Local `git diff --check` passes. This environment has no `dotnet` or `msbuild`, so the C# regression/build has not run locally; CI must verify the exact pushed SHA. Windows interactive E2E and live DeepSeek remain unverified. PR #4 is not being modified in this follow-up.

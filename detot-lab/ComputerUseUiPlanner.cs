@@ -92,7 +92,8 @@ public static partial class ComputerUseUiPlanner
                 observationId = new { type = "string", minLength = 32, maxLength = 32 },
                 elementId = new { type = "string", minLength = 1, maxLength = 32 },
                 windowId = new { type = "string", minLength = 32, maxLength = 32 },
-                text = new { type = "string", maxLength = MaximumTextLength },
+                text = new { type = "string", maxLength = MaximumTextLength,
+                    description = "Exact user text for type/launch-installed; or the exact app name as a process filter for app=desktop observe." },
                 url = new { type = "string", maxLength = 1500 },
                 direction = new { type = "string", @enum = new[] { "up", "down", "left", "right" } }
             },
@@ -125,7 +126,9 @@ public static partial class ComputerUseUiPlanner
             if (observationId == "!invalid" || elementId == "!invalid" || windowId == "!invalid" || text == "!invalid" || url == "!invalid" || direction == "!invalid") return false;
 
             var needsElement = operation is "focus" or "scroll" or "invoke" or "type";
-            if (((operation is "observe" or "launch") && (observationId is not null || elementId is not null || windowId is not null || text is not null || url is not null || direction is not null)) ||
+            if ((operation == "observe" && (observationId is not null || elementId is not null || windowId is not null || url is not null || direction is not null ||
+                    text is not null && (app != "desktop" || !IsSafeInstalledApplicationName(text)))) ||
+                (operation == "launch" && (observationId is not null || elementId is not null || windowId is not null || text is not null || url is not null || direction is not null)) ||
                 (operation == "launch-installed" && (app != "desktop" || observationId is not null || elementId is not null || windowId is not null || text is null || url is not null || direction is not null || !IsSafeInstalledApplicationName(text))) ||
                 (operation == "navigate" && (app != "edge" || url is null || observationId is not null || elementId is not null || windowId is not null || text is not null || direction is not null)) ||
                 (operation == "activate-window" && (windowId is null || observationId is not null || elementId is not null || text is not null || url is not null || direction is not null)) ||
@@ -133,7 +136,7 @@ public static partial class ComputerUseUiPlanner
                 (operation != "activate-window" && windowId is not null) ||
                 (needsElement && (observationId is null || elementId is null)) ||
                 (operation == "type" && (text is null || direction is not null)) ||
-                (operation is not ("type" or "launch-installed") && text is not null) ||
+                (operation is not ("type" or "launch-installed" or "observe") && text is not null) ||
                 (operation == "scroll" && direction is null) ||
                 (operation != "scroll" && direction is not null)) return false;
             if (observationId is not null && !Guid.TryParseExact(observationId, "N", out _)) return false;
@@ -156,6 +159,28 @@ public static partial class ComputerUseUiPlanner
     public static bool IsSafeInstalledApplicationName(string? name) =>
         !string.IsNullOrWhiteSpace(name) && name == name.Trim() && !SensitiveText().IsMatch(name) &&
         SafeInstalledApplicationName().IsMatch(name) && CanObserveDesktopProcess(name);
+
+    public static bool IsRequestedProcessTarget(string requestedApp, string processName)
+    {
+        if (!IsSafeInstalledApplicationName(requestedApp)) return false;
+        var normalizedRequest = NormalizeAppName(requestedApp);
+        var expectedProcess = normalizedRequest switch
+        {
+            "edge" or "microsoftedge" or "browser" or "trinhduyet" => "msedge",
+            "vscode" or "visualstudiocode" => "code",
+            "visualstudio" or "microsoftvisualstudio" => "devenv",
+            "fileexplorer" or "explorer" or "filemanager" or "quanlytep" => "explorer",
+            "notepad" or "soghinchu" => "notepad",
+            _ => normalizedRequest
+        };
+        return expectedProcess.Length > 0 && expectedProcess == NormalizeAppName(processName);
+    }
+
+    private static string NormalizeAppName(string value) =>
+        string.Concat(value.Normalize(System.Text.NormalizationForm.FormD)
+            .Where(character => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character) !=
+                System.Globalization.UnicodeCategory.NonSpacingMark && char.IsLetterOrDigit(character)))
+            .ToLowerInvariant();
 
     public static bool IsSafeTypingSurface(string app, string controlType, string name)
     {

@@ -381,6 +381,9 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 return new { status = "application_launch_denied", actionVerified = false, reason = "target_not_a_trusted_app_executable" };
 
             var processName = Path.GetFileNameWithoutExtension(targetPath);
+            var existingProcessIds = ReadProcessIdsByNameInCurrentSession(processName);
+            var existingWindowHandles = CompanionDesktopUi.FindAppWindows("desktop", existingProcessIds)
+                .Select(window => (nint)window.Handle).ToHashSet();
             using var started = Process.Start(new ProcessStartInfo(targetPath!)
             {
                 UseShellExecute = true,
@@ -392,20 +395,16 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             do
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var processIds = new List<int>();
-                foreach (var process in Process.GetProcessesByName(processName))
+                var processIds = ReadProcessIdsByNameInCurrentSession(processName);
+                var newWindow = CompanionDesktopUi.FindAppWindows("desktop", processIds)
+                    .FirstOrDefault(window => DesktopCompanionVerification.IsNewWindow(window.Handle, existingWindowHandles));
+                if (newWindow.Handle != IntPtr.Zero)
                 {
-                    using (process)
-                    {
-                        try
-                        {
-                            if (process.SessionId == Process.GetCurrentProcess().SessionId) processIds.Add(process.Id);
-                        }
-                        catch (InvalidOperationException) { }
-                    }
+                    var windowId = desktopUi.RegisterSelectableWindow("desktop", newWindow.ProcessId,
+                        newWindow.Handle, newWindow.Title);
+                    if (windowId is not null)
+                        return new { status = "verified", actionVerified = true, newWindowVerified = true, windowId, app = appName };
                 }
-                if (CompanionDesktopUi.FindAppWindows("desktop", processIds).Count > 0)
-                    return new { status = "verified", actionVerified = true, app = appName };
                 await Task.Delay(250, cancellationToken);
             } while (DateTime.UtcNow < deadline);
 
@@ -447,6 +446,25 @@ sealed class CompanionActions(string workspace, string edgeProfile)
             }
         }
         return ids;
+    }
+
+    private static List<int> ReadProcessIdsByNameInCurrentSession(string processName)
+    {
+        using var current = Process.GetCurrentProcess();
+        var currentSessionId = current.SessionId;
+        var processIds = new List<int>();
+        foreach (var process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.SessionId == currentSessionId) processIds.Add(process.Id);
+                }
+                catch (InvalidOperationException) { }
+            }
+        }
+        return processIds;
     }
 
     public async Task<JsonElement> RunSmokeTestAsync(CancellationToken cancellationToken)

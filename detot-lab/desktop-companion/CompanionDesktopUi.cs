@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Windows.SDK.BuildTools.WinApp.UIAutomation;
 
@@ -17,11 +18,28 @@ internal sealed class CompanionDesktopUi
     private sealed record ElementView(string Id, string Type, string Name, bool Enabled, bool Offscreen,
         bool Invokable, string? ScrollDirection);
 
+    public string? RegisterSelectableWindow(string app, int processId, IntPtr handle, string title)
+    {
+        if (!ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) || processId <= 0 ||
+            !IsWindow(handle) || !WindowBelongsToProcess(handle, processId) ||
+            ComputerUseUiPlanner.IsProtectedSurface(title)) return null;
+        var id = Guid.NewGuid().ToString("N");
+        selectableWindows[id] = new CachedWindow(app, processId, handle, title, DateTimeOffset.UtcNow);
+        PruneSelectableWindows();
+        return id;
+    }
+
     public async Task<object> ExecuteAsync(ComputerUseUiAction action, IReadOnlyList<int> processIds,
         bool userConfirmed, CancellationToken cancellationToken)
     {
         if (action.Operation == "launch") return new { error = "launch_requires_companion_dispatch" };
-        if (action.Operation == "observe") return await ObserveAsync(action.App, processIds, cancellationToken);
+        if (action.Operation == "observe")
+        {
+            var targetedProcessIds = action.App == "desktop" && action.Text is not null
+                ? processIds.Where(processId => IsRequestedProcess(processId, action.Text)).ToArray()
+                : processIds;
+            return await ObserveAsync(action.App, targetedProcessIds, cancellationToken);
+        }
         if (action.Operation == "activate-window") return await ActivateWindowAsync(action, processIds, cancellationToken);
         if (action.ObservationId is null || action.ElementId is null ||
             !observations.TryGetValue(action.ObservationId, out var cached) || cached.App != action.App ||
@@ -162,6 +180,20 @@ internal sealed class CompanionDesktopUi
         }
         return await ObserveWindowAsync(app, selected.ProcessId, selected.Handle, selected.Title, cancellationToken)
             ?? (object)new { status = "observation_unavailable", app, actionVerified = false };
+    }
+
+    private static bool IsRequestedProcess(int processId, string requestedApp)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return ComputerUseUiPlanner.IsRequestedProcessTarget(requestedApp, process.ProcessName);
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException or
+                                      System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            return false;
+        }
     }
 
     private async Task<object> ActivateWindowAsync(ComputerUseUiAction action, IReadOnlyList<int> processIds,

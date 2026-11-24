@@ -27,6 +27,15 @@ public static class ComputerUsePolicy
         bool uiDataConsent, bool hasVerifiedRequestScope) =>
         normalChat && !hasOtherTools && desktopAvailable && uiDataConsent && hasVerifiedRequestScope;
 
+    public static bool TryAuthorizeInteractiveUiAction(ComputerUseIntentScope? scope,
+        ComputerUseUiAction action, string? observedElementName = null, string? observedTarget = null,
+        Action? onAuthorized = null)
+    {
+        if (scope is null || !scope.Allows(action, observedElementName, observedTarget)) return false;
+        onAuthorized?.Invoke();
+        return true;
+    }
+
     // GCM's current chooser is not bound to a trusted pending Git operation, repository, or host.
     // Keep account selection denied until such transaction context can be verified end to end.
     public static bool CanSelectGitHubAccount(string? action) => false;

@@ -77,6 +77,8 @@ Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge"}""", 
       typeUi is { Text: "ASP.NET Core" } &&
       ComputerUseUiPlanner.TryParse("""{"operation":"navigate","app":"edge","url":"https://github.com/voquangthan/-t-t/pulls"}""", out var navigateUi) &&
       navigateUi is { Operation: "navigate", Url: "https://github.com/voquangthan/-t-t/pulls" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"desktop","text":"Notepad"}""", out var targetedDesktopObservation) &&
+      targetedDesktopObservation is { Operation: "observe", App: "desktop", Text: "Notepad" } &&
       ComputerUseUiPlanner.TryParse("""{"operation":"activate-window","app":"vscode","windowId":"00000000000000000000000000000001"}""", out var activateWindowUi) &&
       activateWindowUi is { Operation: "activate-window", WindowId: "00000000000000000000000000000001" },
     "generic UI planner parses one bounded operation using app-scoped recent observation IDs");
@@ -91,6 +93,8 @@ Check(!ComputerUseUiPlanner.TryParse("""{"operation":"invoke","app":"WindowsTerm
       !ComputerUseUiPlanner.TryParse("""{"operation":"type","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e3","text":"password is abc"}""", out _) &&
       !ComputerUseUiPlanner.TryParse(syntheticTokenRequest, out _) &&
       !ComputerUseUiPlanner.TryParse("""{"operation":"navigate","app":"edge","url":"http://127.0.0.1:5183"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge","text":"Notepad"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"desktop","text":"PowerShell"}""", out _) &&
       !ComputerUseUiPlanner.TryParse("""{"operation":"navigate","app":"edge","url":"https://user:pass@example.com"}""", out _) &&
       !ComputerUseUiPlanner.TryParse("""{"operation":"activate-window","app":"vscode","windowId":"not-a-guid"}""", out _) &&
       !ComputerUseUiPlanner.TryParse("""{"operation":"invoke","app":"edge","observationId":"bad","elementId":"e3"}""", out _),
@@ -234,8 +238,12 @@ Check(ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOther
           uiDataConsent: false, hasVerifiedRequestScope: true),
     "UI tool requires an independently derived request scope as well as mode, runtime and data-consent gates");
 Check(!ComputerUseIntentScope.TryCreate("Giải thích cách mở Edge", out _) &&
+      !ComputerUseIntentScope.TryCreate("Đọc mô tả về Edge", out _) &&
+      !ComputerUseIntentScope.TryCreate("Xem cách mở Edge", out _) &&
       !ComputerUseIntentScope.TryCreate("Từ ‘open Edge’ nghĩa là gì?", out _) &&
       !ComputerUseIntentScope.TryCreate("Ví dụ: bấm tab Gmail", out _) &&
+      !ComputerUseIntentScope.TryCreate("Đọc câu open Edge", out _) &&
+      !ComputerUseIntentScope.TryCreate("Mở Edge báo lỗi 403", out _) &&
       !ComputerUseIntentScope.TryCreate("Đừng mở Edge", out _) &&
       !ComputerUseIntentScope.TryCreate("Không bấm nút Gmail", out _) &&
       !ComputerUseIntentScope.TryCreate("chào buổi sáng", out _),
@@ -245,14 +253,48 @@ Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge"}""", 
       noUiScope is null && !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false,
           desktopAvailable: true, uiDataConsent: true, hasVerifiedRequestScope: false),
     "a valid model-authored UI tool payload still cannot create scope or expose/dispatch the Companion tool");
+var fakeCompanionCalls = 0;
+var fakeObservationUploads = 0;
+var fakeAuditWrites = 0;
+var leakedUiToolExposures = 0;
+foreach (var unrelatedTurn in new[] { "Giải thích cách mở Edge", "Đọc mô tả về Edge", "Xem cách mở Edge", "Kiểm tra pull requests trên GitHub", "Ví dụ: bấm tab Gmail", "Đừng mở Edge", "Không bấm nút Gmail" })
+{
+    ComputerUseIntentScope.TryCreate(unrelatedTurn, out var injectedScope);
+    var uiToolExposed = ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false,
+        desktopAvailable: true, uiDataConsent: true,
+        hasVerifiedRequestScope: injectedScope is { HasInteractiveUiScope: true });
+    if (uiToolExposed) leakedUiToolExposures++;
+    var authorized = ComputerUsePolicy.TryAuthorizeInteractiveUiAction(injectedScope, injectedUiCall!,
+        onAuthorized: () => fakeAuditWrites++);
+    if (authorized) { fakeCompanionCalls++; fakeObservationUploads++; }
+}
+Check(leakedUiToolExposures == 0 && fakeCompanionCalls == 0 && fakeObservationUploads == 0 && fakeAuditWrites == 0,
+    "valid injected tool calls from information/example/negative turns are not exposed and cause no Companion call, UI payload, or direct-request audit");
 Check(ComputerUseIntentScope.TryCreate("Mở Edge, bấm tab Gmail, rồi cuộn xuống", out var edgeScope) &&
-      edgeScope!.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      edgeScope!.HasInteractiveUiScope &&
+      edgeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       edgeScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
       !edgeScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e2", null, null, null, null), "Outlook") &&
       edgeScope.Allows(new ComputerUseUiAction("scroll", "edge", "00000000000000000000000000000000", "e3", null, null, null, "down")) &&
       !edgeScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
       !edgeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e4", null, "attacker text", null, null)),
     "a direct request is bound to its named app, requested target and operation set");
+Check(ComputerUseIntentScope.TryCreate("Xem cửa sổ Edge đang mở", out var existingEdgeScope) &&
+      existingEdgeScope!.HasInteractiveUiScope &&
+      existingEdgeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      existingEdgeScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Edge", null, null)) &&
+      !existingEdgeScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
+      ComputerUseIntentScope.TryCreate("Kiểm tra pull requests trên GitHub", out var apiOnlyGithubScope) &&
+      !apiOnlyGithubScope!.HasInteractiveUiScope &&
+      !apiOnlyGithubScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: true, hasVerifiedRequestScope: apiOnlyGithubScope.HasInteractiveUiScope),
+    "UI observation requires a concrete open UI target; app-information and API-only requests do not expose the interactive tool");
+Check(ComputerUseIntentScope.TryCreate("Bấm tab Gmail", out var directClickScope) &&
+      directClickScope!.HasInteractiveUiScope &&
+      directClickScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      directClickScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail"),
+    "an explicit bounded UI operation can observe only its single inferred app to locate the requested target");
 Check(ComputerUseIntentScope.TryCreate("Mở Edge rồi nhập hello vào ô Search", out var typeScope) &&
       typeScope!.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "hello", null, null), "Search") &&
       typeScope.Allows(new ComputerUseUiAction("focus", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Search") &&
@@ -267,6 +309,20 @@ Check(ComputerUseIntentScope.TryCreate("Mở VS Code rồi xem PR và CI", out v
       vscodeScope.AllowsFixedAction("open-vscode") && !vscodeScope.AllowsFixedAction("open-edge") &&
       !vscodeScope.AllowsFixedAction("read-github-pull-requests"),
     "the model cannot widen an app-launch request to another installed application");
+Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mới lên trước", out var notepadScope) &&
+      notepadScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
+      notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
+      !notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
+      !notepadScope.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000002", null, null, null), observedTarget: "Notepad") &&
+      !notepadScope.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000002", null, null, null)),
+    "desktop observation and window activation stay filtered to the explicitly requested process");
+Check(ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "notepad") &&
+      ComputerUseUiPlanner.IsRequestedProcessTarget("VS Code", "Code") &&
+      !ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "msedge") &&
+      !ComputerUseUiPlanner.IsRequestedProcessTarget("Windows Terminal", "WindowsTerminal"),
+    "targeted desktop observations resolve only the explicitly requested non-blocked process");
 Check(ComputerUseIntentScope.TryCreate("Mở GitHub", out var githubScope) &&
       githubScope!.AllowsFixedAction("open-github") && !githubScope.AllowsFixedAction("read-github-account") &&
       !githubScope.AllowsFixedAction("read-github-pull-requests") &&
@@ -283,6 +339,25 @@ Check(scopedElements.TryGetValue("00000000000000000000000000000000:e1", out var 
       edgeScope!.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), observedName),
     "target binding uses the observed element label associated with its observation ID");
 scopeObservation.Dispose();
+var windowScopeObservation = JsonDocument.Parse("""{"status":"window_selection_required","windows":[{"windowId":"00000000000000000000000000000002","title":"Untitled"}]}""");
+var scopedWindows = new Dictionary<string, string>(StringComparer.Ordinal);
+ComputerUseIntentScope.RecordObservedTargets(windowScopeObservation.RootElement,
+    new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null),
+    new Dictionary<string, string>(StringComparer.Ordinal), scopedWindows);
+Check(scopedWindows.TryGetValue("00000000000000000000000000000002", out var selectedWindowTarget) &&
+      !notepadScope!.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000002", null, null, null), observedTarget: selectedWindowTarget),
+    "an existing window from a process-filtered observation cannot substitute for the newly launched window");
+windowScopeObservation.Dispose();
+var launchedWindowResult = JsonDocument.Parse("""{"status":"verified","newWindowVerified":true,"windowId":"00000000000000000000000000000003"}""");
+ComputerUseIntentScope.RecordObservedTargets(launchedWindowResult.RootElement,
+    new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null),
+    new Dictionary<string, string>(StringComparer.Ordinal), scopedWindows);
+Check(scopedWindows.TryGetValue("00000000000000000000000000000003", out var newlyLaunchedTarget) &&
+      notepadScope!.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000003", null, null, null), observedTarget: newlyLaunchedTarget),
+    "only the opaque window handle returned for the verified newly launched process can satisfy a new-window request");
+launchedWindowResult.Dispose();
 var consentTestRoot = Path.Combine(Path.GetTempPath(), "detot-ui-consent-" + Guid.NewGuid().ToString("N"));
 try
 {
