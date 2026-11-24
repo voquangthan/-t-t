@@ -265,6 +265,32 @@ Check(ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true, has
       !ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true, hasOtherTools: false,
           desktopAvailable: true, modelConsentAllowed: true, requestScope: verifiedRequestScope, isActionRequest: false),
     "Computer Use planner tool requires direct action scope and current DeepSeek UI-data consent");
+var grantBeforePlannerReply = true;
+var authorizedActionsDuringPlannerWait = 0;
+var plannerWasExposed = ComputerUsePolicy.ShouldExposeComputerUsePlannerTool(normalChat: true,
+    hasOtherTools: false, desktopAvailable: true, modelConsentAllowed: grantBeforePlannerReply,
+    requestScope: verifiedRequestScope, isActionRequest: true);
+grantBeforePlannerReply = false; // Simulate revocation while the Gateway is planning.
+Check(plannerWasExposed &&
+      !ComputerUsePolicy.TryAuthorizeModelAssistedFixedAction(grantBeforePlannerReply, verifiedRequestScope,
+          "open-edge", () => authorizedActionsDuringPlannerWait++) &&
+      authorizedActionsDuringPlannerWait == 0,
+    "revoking smart-mode consent while the model plans blocks the returned action before execution or audit");
+ComputerUseIntentScope.TryCreate("Mở Edge, mở GitHub rồi đọc PR #5", out var multiActionScope);
+Check(multiActionScope is not null && multiActionScope.AllowsFixedAction("open-edge") &&
+      multiActionScope.AllowsFixedAction("read-github-pull-requests"),
+    "multi-step consent revalidation fixture contains both explicitly requested actions");
+var grantDuringPlan = true;
+var executedPlannedActions = 0;
+var auditedPlannedActions = 0;
+var firstPlannedActionAllowed = ComputerUsePolicy.TryAuthorizeModelAssistedFixedAction(grantDuringPlan,
+    multiActionScope, "open-edge", () => { auditedPlannedActions++; executedPlannedActions++; });
+grantDuringPlan = false; // Simulate revocation between two planned actions.
+var secondPlannedActionAllowed = ComputerUsePolicy.TryAuthorizeModelAssistedFixedAction(grantDuringPlan,
+    multiActionScope, "read-github-pull-requests", () => { auditedPlannedActions++; executedPlannedActions++; });
+Check(firstPlannedActionAllowed && !secondPlannedActionAllowed &&
+      executedPlannedActions == 1 && auditedPlannedActions == 1,
+    "consent is revalidated for every fixed action and revocation prevents later execution and audit");
 Check(verifiedRequestScope is { HasInteractiveUiScope: true } &&
       ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
           uiDataConsent: true, requestScope: verifiedRequestScope) &&

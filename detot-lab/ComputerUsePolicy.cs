@@ -13,6 +13,14 @@ public static class ComputerUsePolicy
         normalChat && !hasOtherTools && desktopAvailable && modelConsentAllowed && isActionRequest &&
         requestScope is { HasInteractiveUiScope: true };
 
+    public static bool TryAuthorizeModelAssistedFixedAction(bool modelConsentAllowed,
+        ComputerUseIntentScope? requestScope, string? action, Action? onAuthorized = null)
+    {
+        if (!modelConsentAllowed || requestScope is null || !requestScope.AllowsFixedAction(action)) return false;
+        onAuthorized?.Invoke();
+        return true;
+    }
+
     private static readonly HashSet<string> ObservationTargets = new(StringComparer.Ordinal)
     {
         "approved-applications",

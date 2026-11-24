@@ -773,15 +773,23 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
             var replies = new List<string>();
             foreach (var computerAction in plan.Actions)
             {
+                var destination = computerAction is "open-github" or "read-github-account" or "read-github-pull-requests"
+                    ? "GitHub" : "local_only";
+                if (!ComputerUsePolicy.TryAuthorizeModelAssistedFixedAction(
+                        consentPolicy.IsAllowed(owner, "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
+                        desktopRequestScope,
+                        computerAction,
+                        onAuthorized: () => consentPolicy.RecordExplicitAction(owner,
+                            new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", destination),
+                            "chat_computer_use_plan", request.RequestId)))
+                    return Results.Json(new { reply = $"Đã dừng trước bước {computerAction}: quyền Chế độ thông minh đã bị thu hồi hoặc bước vượt scope.",
+                        toolUsed = true, computerUseAction = "multi-step", completedActions,
+                        stoppedAction = computerAction, allStepsVerified = false },
+                        statusCode: StatusCodes.Status403Forbidden);
+
                 var observationTarget = ComputerUseChatIntent.ObservationTargetForAction(computerAction);
                 if (!ComputerUsePolicy.CanNavigate(computerAction) && !ComputerUsePolicy.CanObserve(observationTarget))
                     return Results.BadRequest(new { error = "Kế hoạch có hành động Computer Use chưa được cấp quyền." });
-
-                var destination = computerAction is "open-github" or "read-github-account" or "read-github-pull-requests"
-                    ? "GitHub" : "local_only";
-                consentPolicy.RecordExplicitAction(owner,
-                    new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", destination),
-                    "chat_computer_use_plan", request.RequestId);
 
                 var actionResult = await ExecuteComputerUseChatAction(computerAction, desktopRepositoryRoot,
                     desktopCompanion, cancellationToken);
