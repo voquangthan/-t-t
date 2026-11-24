@@ -1,5 +1,15 @@
 # Đệ Tốt Pro — checkpoint
 
+## Computer Use — status after CI #91 (24/11/2026)
+
+- Current feature branch `codex/universal-computer-agent`, HEAD `1559e94c654a27883f0923ceedb8ce0955198411`; worktree clean. The commit revalidates `computer_use → OpenClaw Gateway` consent before each model-assisted UI operation and fixes the Calendar-candidate/definite-assignment build regressions.
+- GitHub Actions Computer Use CI #91 completed successfully for that exact SHA. Backend and desktop regression builds are therefore verified by hosted CI; no local .NET SDK is available here.
+- The two existing behaviors are bounded but not presented as explicit user-selectable modes: fixed, exact direct actions can stay local; multi-step UI planning uses `openclaw/default` only with Gateway consent, a scope independently derived from the current request, and filtered UI structure/labels. OpenClaw chooses the provider from its active configuration. DeepSeek V4 Flash has **not** been verified as the live provider/model for this route.
+- Progressive disclosure is partial: content/value/title/URL/screenshot fields remain withheld. The model can request that the user provide the needed excerpt, but there is no per-item review/approval flow that then shares exactly that UI content. Do not imply full content-aware DeepSeek reasoning is implemented.
+- The latest Work comment for this SHA is REVISE because CI was still pending when it reviewed; it reports no new P1/P2, but requires a Windows interactive multi-step smoke and notes PR #5 does not include PR #4's history. CI is now green, so only the interactive proof and intentional PR stacking/base decision remain. The comment is posted by `voquangthan`, the PR author; it is not an independent identity attestation.
+- No interactive Windows smoke has been run from the user's normal desktop in this turn. Do not claim end-to-end acceptance. Do not operate the Git Credential Manager UI, merge, or enable Controller execution.
+- **Next:** use the normal interactive Companion smoke for one harmless scoped multi-step task, recording verified actions without typing or saving content. Separately, resolve PR #4/#5 stacking deliberately before claiming the feature set is integrated; preserve both open PRs and do not merge into `main`.
+
 ## Computer Use — model egress and local launch (24/11/2026)
 
 - PR #5 head is `e43218ec86bdd8e4b7c1066b4c7e2d5cff15aea1` (`codex/universal-computer-agent`). Commits `e761f60` and `e43218e` add a final UI observation allowlist and an exact local Notepad-launch route; `f4cf077` corrected UIA test fixtures after CI exposed missing `type` fields.
