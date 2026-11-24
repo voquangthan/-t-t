@@ -404,7 +404,7 @@ Check(ComputerUseIntentScope.TryCreate("Mở Calculator, bấm nút Equals; mở
           observedElementName: "Save", observedTarget: "calculator|new") &&
       !genericOnlyMultiAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Edge", null, null)),
     "multiple generic installed apps retain independent scopes even though both use the desktop adapter");
-using (var genericMultiObservation = JsonDocument.Parse("""{"status":"observed","observationId":"00000000000000000000000000000022","elements":[{"id":"e1","name":"Equals"},{"id":"e2","name":"Save"}]}"""))
+using (var genericMultiObservation = JsonDocument.Parse("""{"status":"observed","observationId":"00000000000000000000000000000022","elements":[{"id":"e1","type":"Button","name":"Equals"},{"id":"e2","type":"Button","name":"Save"}]}"""))
 using (var genericMultiFiltered = JsonDocument.Parse(genericMultiAppScope!.FilterObservationForModel(
            genericMultiObservation.RootElement,
            new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null))))
@@ -428,7 +428,7 @@ Check(!genericAppScope!.Allows(new ComputerUseUiAction("activate-window", "deskt
       !genericAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000000", "e1", null, null, null, null),
           observedElementName: "Equals", observedTarget: "calculator|old"),
     "an older window without launch evidence cannot be activated or used for actions");
-using (var genericObservationEvidence = JsonDocument.Parse("""{"status":"observed","observation":{"observationId":"00000000000000000000000000000004","elements":[{"id":"e1","name":"Equals"},{"id":"e2","name":"Delete"}]}}"""))
+using (var genericObservationEvidence = JsonDocument.Parse("""{"status":"observed","observation":{"observationId":"00000000000000000000000000000004","elements":[{"id":"e1","type":"Button","name":"Equals"},{"id":"e2","type":"Button","name":"Delete"}]}}"""))
 {
     var filteredGenericObservation = JsonDocument.Parse(genericAppScope!.FilterObservationForModel(
         genericObservationEvidence.RootElement,
