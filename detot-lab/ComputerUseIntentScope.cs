@@ -120,6 +120,12 @@ public sealed class ComputerUseIntentScope
             if (ComputerUseUiPlanner.IsSafeInstalledApplicationName(target)) openTargets.Add(Normalize(target));
         }
 
+        // Keep the named adapters for common apps. For other explicitly requested
+        // installed apps, use the existing desktop UIA adapter as a narrowly scoped
+        // fallback; this does not grant whole-desktop observation.
+        if (openTargets.Any(target => !apps.Any(app => IsAppTarget(app, target))))
+            apps.Add("desktop");
+
         var clickTargets = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match match in ClickTarget.Matches(request))
         {
@@ -290,12 +296,12 @@ public sealed class ComputerUseIntentScope
     private bool AllowsObservationTarget(string appName) => wholeDesktop ||
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
-        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
+        openTargets.Any(target => IsAppTarget(appName, target));
 
     private bool AllowsWindowActivationTarget(string appName) => wholeDesktop ||
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
-        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
+        openTargets.Any(target => IsAppTarget(appName, target));
 
     public bool AllowsFixedAction(string action) => action switch
     {
@@ -397,15 +403,16 @@ public sealed class ComputerUseIntentScope
     {
         if (string.IsNullOrWhiteSpace(target)) return false;
         var separator = target.IndexOf('|');
-        var appName = separator < 0 ? target : target[..separator];
-        var origin = separator < 0 ? "observed" : target[(separator + 1)..];
-        return AllowsExistingUiTarget(appName) && (!requireNewWindow || origin == "new");
+        if (separator < 0) return false;
+        var appName = target[..separator];
+        var origin = target[(separator + 1)..];
+        return AllowsExistingUiTarget(appName, origin) && (!requireNewWindow || origin == "new");
     }
 
-    private bool AllowsExistingUiTarget(string appName) =>
+    private bool AllowsExistingUiTarget(string appName, string origin) =>
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
-        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
+        openTargets.Any(target => IsAppTarget(appName, target)) && (origin is "new" or "observed");
 
     private static bool IsAppTarget(string app, string target)
     {

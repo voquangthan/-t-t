@@ -401,7 +401,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 if (newWindow.Handle != IntPtr.Zero)
                 {
                     var windowId = desktopUi.RegisterSelectableWindow("desktop", newWindow.ProcessId,
-                        newWindow.Handle, newWindow.Title);
+                        newWindow.Handle, newWindow.Title, appName);
                     if (windowId is not null)
                         return new { status = "verified", actionVerified = true, newWindowVerified = true, windowId, app = appName };
                 }

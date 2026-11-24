@@ -11,6 +11,8 @@ internal sealed class CompanionDesktopUi
     private static readonly TimeSpan ObservationLifetime = TimeSpan.FromMinutes(2);
     private readonly ConcurrentDictionary<string, CachedObservation> observations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CachedWindow> selectableWindows = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (int ProcessId, DateTime ProcessStartUtc)> requestedAppProcesses =
+        new(StringComparer.OrdinalIgnoreCase);
 
     private sealed record CachedObservation(string App, int ProcessId, IntPtr WindowHandle, string WindowTitle,
         DateTimeOffset CreatedAt, bool Complete, IReadOnlyDictionary<string, UiElement> Elements);
@@ -18,11 +20,32 @@ internal sealed class CompanionDesktopUi
     private sealed record ElementView(string Id, string Type, string Name, bool Enabled, bool Offscreen,
         bool Invokable, string? ScrollDirection);
 
-    public string? RegisterSelectableWindow(string app, int processId, IntPtr handle, string title)
+    public string? RegisterSelectableWindow(string app, int processId, IntPtr handle, string title,
+        string? requestedAppName = null)
     {
         if (!ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) || processId <= 0 ||
             !IsWindow(handle) || !WindowBelongsToProcess(handle, processId) ||
             ComputerUseUiPlanner.IsProtectedSurface(title)) return null;
+        if (!string.IsNullOrWhiteSpace(requestedAppName))
+        {
+            if (!ComputerUseUiPlanner.IsSafeInstalledApplicationName(requestedAppName)) return null;
+            try
+            {
+                using var process = Process.GetProcessById(processId);
+                if (!ComputerUseUiPlanner.CanObserveDesktopProcess(process.ProcessName) ||
+                    process.SessionId != Process.GetCurrentProcess().SessionId) return null;
+                requestedAppProcesses[requestedAppName] = (processId, process.StartTime.ToUniversalTime());
+                if (requestedAppProcesses.Count > 64)
+                    foreach (var stale in requestedAppProcesses.Keys.Take(requestedAppProcesses.Count - 64))
+                        requestedAppProcesses.TryRemove(stale, out _);
+            }
+            catch (Exception error) when (error is ArgumentException or InvalidOperationException or
+                System.ComponentModel.Win32Exception or UnauthorizedAccessException or NotSupportedException or
+                System.Security.SecurityException)
+            {
+                return null;
+            }
+        }
         var id = Guid.NewGuid().ToString("N");
         selectableWindows[id] = new CachedWindow(app, processId, handle, title, DateTimeOffset.UtcNow);
         PruneSelectableWindows();
@@ -182,15 +205,20 @@ internal sealed class CompanionDesktopUi
             ?? (object)new { status = "observation_unavailable", app, actionVerified = false };
     }
 
-    private static bool IsRequestedProcess(int processId, string requestedApp)
+    private bool IsRequestedProcess(int processId, string requestedApp)
     {
         try
         {
             using var process = Process.GetProcessById(processId);
+            if (requestedAppProcesses.TryGetValue(requestedApp, out var trustedProcess) &&
+                trustedProcess.ProcessId == processId &&
+                trustedProcess.ProcessStartUtc == process.StartTime.ToUniversalTime() &&
+                ComputerUseUiPlanner.CanObserveDesktopProcess(process.ProcessName)) return true;
             return ComputerUseUiPlanner.IsRequestedProcessTarget(requestedApp, process.ProcessName);
         }
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or
-                                      System.ComponentModel.Win32Exception or NotSupportedException)
+                                      System.ComponentModel.Win32Exception or NotSupportedException or
+                                      System.Security.SecurityException)
         {
             return false;
         }

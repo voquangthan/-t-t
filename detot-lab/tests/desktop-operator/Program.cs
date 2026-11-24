@@ -152,6 +152,9 @@ Check(ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Address and sear
       !ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Credit card number") &&
       !ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Code Editor") &&
       !ComputerUseUiPlanner.IsSafeTypingSurface("vscode", "Edit", "Code Editor") &&
+      ComputerUseUiPlanner.IsSafeTypingSurface("desktop", "Edit", "Title") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("desktop", "Edit", "Password") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("desktop", "Edit", "Code Editor") &&
       !ComputerUseUiPlanner.IsExactUserText("person@example.com", "search person@example.com") &&
       !ComputerUseUiPlanner.IsExactUserText("+84 912 345 678", "search +84 912 345 678"),
     "ordinary Edge text entry is enabled while identity, financial, file-name and code surfaces remain blocked");
@@ -322,6 +325,53 @@ Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mớ
       !notepadScope.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
           "00000000000000000000000000000002", null, null, null)),
     "desktop observation and window activation stay filtered to the explicitly requested process");
+Check(ComputerUseIntentScope.TryCreate("Mở Calculator rồi bấm nút Equals", out var genericAppScope) &&
+      genericAppScope!.HasInteractiveUiScope &&
+      genericAppScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Calculator", null, null)) &&
+      genericAppScope.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000003", null, null, null), observedTarget: "calculator|new") &&
+      genericAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null)) &&
+      genericAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000000", "e1", null, null, null, null),
+          observedElementName: "Equals", observedTarget: "calculator|new") &&
+      !genericAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000000", "e2", null, null, null, null),
+          observedElementName: "Delete", observedTarget: "calculator|new") &&
+      !genericAppScope.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000003", null, null, null), observedTarget: "Calculator") &&
+      !genericAppScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
+      !ComputerUseIntentScope.TryCreate("Mở PowerShell rồi bấm nút Enter", out _),
+    "an unadapted installed app uses the desktop adapter only for its named window and requested control");
+var genericWindowTargets = new Dictionary<string, string>(StringComparer.Ordinal);
+var genericObservationTargets = new Dictionary<string, string>(StringComparer.Ordinal);
+using (var genericLaunchEvidence = JsonDocument.Parse("""{"status":"verified","windowId":"00000000000000000000000000000003"}"""))
+    ComputerUseIntentScope.RecordObservedTargets(genericLaunchEvidence.RootElement,
+        new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Calculator", null, null),
+        genericObservationTargets, genericWindowTargets);
+Check(genericWindowTargets.TryGetValue("00000000000000000000000000000003", out var genericWindowTarget) &&
+      genericWindowTarget == "calculator|new" &&
+      genericAppScope!.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000003", null, null, null), observedTarget: genericWindowTarget),
+    "a generic app window can be activated only through the ID returned by its verified launch");
+using (var genericObservationEvidence = JsonDocument.Parse("""{"status":"observed","observation":{"observationId":"00000000000000000000000000000004","elements":[{"id":"e1","name":"Equals"},{"id":"e2","name":"Delete"}]}}"""))
+{
+    var filteredGenericObservation = JsonDocument.Parse(genericAppScope!.FilterObservationForModel(
+        genericObservationEvidence.RootElement,
+        new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null)));
+    try
+    {
+        var elementNames = filteredGenericObservation.RootElement.GetProperty("observation").GetProperty("elements")
+            .EnumerateArray().Select(element => element.GetProperty("name").GetString()).ToArray();
+        Check(elementNames.SequenceEqual(new string?[] { "Equals" }),
+            "generic app observations expose only the control requested for the current task");
+    }
+    finally { filteredGenericObservation.Dispose(); }
+}
+Check(ComputerUseIntentScope.TryCreate("Mở Calculator rồi nhập 123 vào ô Result", out var genericTypingScope) &&
+      genericTypingScope!.Allows(new ComputerUseUiAction("type", "desktop", "00000000000000000000000000000000", "e1",
+          null, "123", null, null), observedElementName: "Result", observedTarget: "calculator|new") &&
+      !genericTypingScope.Allows(new ComputerUseUiAction("type", "desktop", "00000000000000000000000000000000", "e1",
+          null, "999", null, null), observedElementName: "Result", observedTarget: "calculator|new") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("desktop", "Edit", "Password"),
+    "generic-app typing remains bound to exact user text and excludes sensitive fields");
 Check(ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "notepad") &&
       ComputerUseUiPlanner.IsRequestedProcessTarget("VS Code", "Code") &&
       !ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "msedge") &&
