@@ -133,6 +133,9 @@ try
               [Path.Combine(shortcutTestRoot, "Program Files")]) &&
           !InstalledApplicationShortcutResolver.IsTrustedExecutableTarget(
               Path.Combine(shortcutTestRoot, "Program Files", "WindowsPowerShell", "powershell.exe"),
+              [Path.Combine(shortcutTestRoot, "Program Files")]) &&
+          !InstalledApplicationShortcutResolver.IsTrustedExecutableTarget(
+              Path.Combine(shortcutTestRoot, "Program Files", ".exe"),
               [Path.Combine(shortcutTestRoot, "Program Files")]),
         "installed app resolution is exact and launch targets must be trusted executables");
 }
@@ -678,6 +681,12 @@ Check(DesktopCompanionVerification.IsSmokeTestPassed(true, true, true, true, tru
       !DesktopCompanionVerification.IsSmokeTestPassed(true, true, true, true, true, "not_verified") &&
       !DesktopCompanionVerification.IsSmokeTestPassed(true, true, true, true, true, "failed"),
     "smoke cannot convert an unverified or failed GitHub account observation to PASS");
+using (var nullableSession = JsonDocument.Parse("""{"sessionId":null,"numericSessionId":5,"textSessionId":"5"}"""))
+    Check(DesktopCompanionVerification.ReadNullableInt(nullableSession.RootElement, "sessionId") is null &&
+          DesktopCompanionVerification.ReadNullableInt(nullableSession.RootElement, "numericSessionId") == 5 &&
+          DesktopCompanionVerification.ReadNullableInt(nullableSession.RootElement, "textSessionId") is null &&
+          DesktopCompanionVerification.ReadNullableInt(nullableSession.RootElement, "missing") is null,
+        "smoke session parser safely handles null, numeric, string, and missing values");
 var unavailableCompanion = await new DesktopCompanionClient($"detot-no-listener-{Guid.NewGuid():N}").ExecuteAsync("open-edge");
 Check(unavailableCompanion.TryGetProperty("error", out var unavailableCompanionError) &&
       unavailableCompanionError.GetString() is "companion_unavailable" or "companion_unauthorized",

@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 
 public static partial class DesktopCompanionVerification
 {
@@ -136,6 +137,10 @@ public static partial class DesktopCompanionVerification
         bool workspaceVerified, bool pullRequestsAvailable, string? accountStatus) =>
         authenticatedIpc && sameSession && edgeVerified && workspaceVerified && pullRequestsAvailable &&
         accountStatus is "verified" or "signed_out";
+
+    public static int? ReadNullableInt(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
 
     public static string GetEdgeVerificationStatus(bool processStarted, bool dedicatedProcessFound,
         bool windowFound, bool urlVerified)

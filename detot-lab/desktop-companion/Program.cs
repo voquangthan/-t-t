@@ -381,6 +381,8 @@ sealed class CompanionActions(string workspace, string edgeProfile)
                 return new { status = "application_launch_denied", actionVerified = false, reason = "target_not_a_trusted_app_executable" };
 
             var processName = Path.GetFileNameWithoutExtension(targetPath);
+            if (string.IsNullOrWhiteSpace(processName))
+                return new { status = "application_launch_denied", actionVerified = false, reason = "target_has_no_process_name" };
             var existingProcessIds = ReadProcessIdsByNameInCurrentSession(processName);
             var existingWindowHandles = CompanionDesktopUi.FindAppWindows("desktop", existingProcessIds)
                 .Select(window => (nint)window.Handle).ToHashSet();
@@ -530,7 +532,7 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
 
     private static int? ReadNullableInt(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : null;
+        DesktopCompanionVerification.ReadNullableInt(element, name);
 
     private static JsonElement ToElement(object value) => JsonSerializer.SerializeToElement(value);
 
@@ -1059,43 +1061,58 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         var status = await DesktopOperator.ReadWorkspaceStatusAsync(workspace, cancellationToken);
         var repoPath = DesktopOperator.SafeGitHubRepository(status.Repository);
         if (repoPath is null) return new { error = "github_repository_unavailable" };
-        using var response = await Github.GetAsync($"repos/{repoPath}/pulls?state=all&per_page=3", cancellationToken);
-        if (!response.IsSuccessStatusCode) return new { error = $"github_http_{(int)response.StatusCode}" };
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
-        if (document.RootElement.ValueKind != JsonValueKind.Array) return new { error = "github_response_invalid" };
-        var pulls = new List<object>();
-        foreach (var pull in document.RootElement.EnumerateArray())
+        try
         {
-            if (!pull.TryGetProperty("number", out var number) || !number.TryGetInt32(out var n) ||
-                !pull.TryGetProperty("title", out var title) || title.ValueKind != JsonValueKind.String) continue;
-            var state = pull.TryGetProperty("state", out var stateElement) ? stateElement.GetString() : null;
-            var sha = pull.TryGetProperty("head", out var head) && head.TryGetProperty("sha", out var shaElement)
-                ? shaElement.GetString() : null;
-            var checksStatus = "unavailable";
-            object[] checks = [];
-            if (sha is { Length: >= 40 })
+            using var response = await Github.GetAsync($"repos/{repoPath}/pulls?state=all&per_page=3", cancellationToken);
+            if (!response.IsSuccessStatusCode) return new { error = $"github_http_{(int)response.StatusCode}" };
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return new { error = "github_response_invalid" };
+            var pulls = new List<object>();
+            foreach (var pull in document.RootElement.EnumerateArray())
             {
-                using var checkResponse = await Github.GetAsync($"repos/{repoPath}/commits/{sha}/check-runs?per_page=20", cancellationToken);
-                if (checkResponse.IsSuccessStatusCode)
+                if (!pull.TryGetProperty("number", out var number) || !number.TryGetInt32(out var n) ||
+                    !pull.TryGetProperty("title", out var title) || title.ValueKind != JsonValueKind.String) continue;
+                var state = pull.TryGetProperty("state", out var stateElement) ? stateElement.GetString() : null;
+                var sha = pull.TryGetProperty("head", out var head) && head.TryGetProperty("sha", out var shaElement)
+                    ? shaElement.GetString() : null;
+                var checksStatus = "unavailable";
+                object[] checks = [];
+                if (sha is { Length: >= 40 })
                 {
-                    using var checkDocument = JsonDocument.Parse(await checkResponse.Content.ReadAsStringAsync(cancellationToken));
-                    if (checkDocument.RootElement.TryGetProperty("check_runs", out var runs) && runs.ValueKind == JsonValueKind.Array)
+                    using var checkResponse = await Github.GetAsync($"repos/{repoPath}/commits/{sha}/check-runs?per_page=20", cancellationToken);
+                    if (checkResponse.IsSuccessStatusCode)
                     {
-                        checksStatus = runs.GetArrayLength() == 0 ? "empty" : "available";
-                        checks = runs.EnumerateArray().Take(8).Select(run => (object)new
+                        using var checkDocument = JsonDocument.Parse(await checkResponse.Content.ReadAsStringAsync(cancellationToken));
+                        if (checkDocument.RootElement.TryGetProperty("check_runs", out var runs) && runs.ValueKind == JsonValueKind.Array)
                         {
-                            name = run.TryGetProperty("name", out var name) ? name.GetString() : "check",
-                            status = run.TryGetProperty("status", out var runStatus) ? runStatus.GetString() : null,
-                            conclusion = run.TryGetProperty("conclusion", out var conclusion) && conclusion.ValueKind == JsonValueKind.String
-                                ? conclusion.GetString() : null
-                        }).ToArray();
+                            checksStatus = runs.GetArrayLength() == 0 ? "empty" : "available";
+                            checks = runs.EnumerateArray().Take(8).Select(run => (object)new
+                            {
+                                name = run.TryGetProperty("name", out var name) ? name.GetString() : "check",
+                                status = run.TryGetProperty("status", out var runStatus) ? runStatus.GetString() : null,
+                                conclusion = run.TryGetProperty("conclusion", out var conclusion) && conclusion.ValueKind == JsonValueKind.String
+                                    ? conclusion.GetString() : null
+                            }).ToArray();
+                        }
                     }
                 }
+                pulls.Add(new { number = n, title = title.GetString()![..Math.Min(180, title.GetString()!.Length)], state,
+                    headSha = sha is { Length: >= 8 } ? sha[..8] : null, checksStatus, checks });
             }
-            pulls.Add(new { number = n, title = title.GetString()![..Math.Min(180, title.GetString()!.Length)], state,
-                headSha = sha is { Length: >= 8 } ? sha[..8] : null, checksStatus, checks });
+            return new { repository = repoPath, pullRequests = pulls };
         }
-        return new { repository = repoPath, pullRequests = pulls };
+        catch (HttpRequestException)
+        {
+            return new { error = "github_network_unavailable" };
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new { error = "github_timeout" };
+        }
+        catch (JsonException)
+        {
+            return new { error = "github_response_invalid" };
+        }
     }
 
     private static HttpClient CreateGithubClient()
