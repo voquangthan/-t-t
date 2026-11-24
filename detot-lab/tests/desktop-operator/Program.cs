@@ -341,12 +341,15 @@ Check(ComputerUseIntentScope.TryCreate("Mở Edge và VS Code", out var multiOpe
       !multiOpenOnlyScope!.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       !multiOpenOnlyScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)),
     "opening multiple apps without an observation or interaction request does not authorize reading their UI");
-Check(ComputerUseIntentScope.TryCreate("Mở Edge, nhập hello vào ô Search; mở VS Code, nhập code vào ô Search", out var multiAppTypeScope) &&
-      multiAppTypeScope!.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "hello", null, null), "Search") &&
-      multiAppTypeScope.Allows(new ComputerUseUiAction("type", "vscode", "00000000000000000000000000000001", "e2", null, "code", null, null), "Search") &&
-      !multiAppTypeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e2", null, "code", null, null), "Search") &&
+Check(ComputerUseIntentScope.TryCreate("Mở Edge, nhập hello vào ô Search; mở VS Code, nhập code vào ô Search", out var multiAppTypeScope),
+    "a multi-app typing request is recognized");
+Check(multiAppTypeScope!.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "hello", null, null), "Search"),
+    "multi-app typing allows exact text in the target app");
+Check(multiAppTypeScope.Allows(new ComputerUseUiAction("type", "vscode", "00000000000000000000000000000001", "e2", null, "code", null, null), "Search"),
+    "multi-app typing maps the second app's own input");
+Check(!multiAppTypeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e2", null, "code", null, null), "Search") &&
       !multiAppTypeScope.Allows(new ComputerUseUiAction("type", "vscode", "00000000000000000000000000000001", "e1", null, "hello", null, null), "Search"),
-    "multi-app typing binds each input target and exact text to its named app");
+    "multi-app typing denies transferring exact text across app scopes");
 Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mới lên trước", out var notepadScope) &&
       notepadScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
       !notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
