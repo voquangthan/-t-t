@@ -316,7 +316,7 @@ Check(ComputerUseIntentScope.TryCreate("Mở VS Code", out var vscodeScope) &&
       vscodeScope.AllowsFixedAction("open-vscode") && !vscodeScope.AllowsFixedAction("open-edge") &&
       !vscodeScope.AllowsFixedAction("read-github-pull-requests"),
     "opening an app authorizes its launch but does not authorize reading its UI or unrelated fixed actions");
-Check(ComputerUseIntentScope.TryCreate("Mở Edge rồi mở VS Code", out var multiAppScope) &&
+Check(ComputerUseIntentScope.TryCreate("Mở Edge, cửa sổ mới; mở VS Code, cửa sổ mới", out var multiAppScope) &&
       multiAppScope!.HasInteractiveUiScope &&
       multiAppScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Edge", null, null)) &&
       multiAppScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "VS Code", null, null)) &&
@@ -324,7 +324,7 @@ Check(ComputerUseIntentScope.TryCreate("Mở Edge rồi mở VS Code", out var m
       multiAppScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)) &&
       !multiAppScope.Allows(new ComputerUseUiAction("observe", "explorer", null, null, null, null, null, null)) &&
       !multiAppScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)),
-    "a multi-app request can use each named app adapter while excluding an unrequested application");
+    "a multi-app request can verify its explicitly requested new windows while excluding an unrequested application");
 Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mới lên trước", out var notepadScope) &&
       notepadScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
       !notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
