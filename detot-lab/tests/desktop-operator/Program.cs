@@ -506,6 +506,8 @@ using var restrictedUi = JsonDocument.Parse(restrictedUiText);
 var restrictedElements = restrictedUi.RootElement.GetProperty("elements");
 var restrictedWindow = restrictedUi.RootElement.GetProperty("windows")[0];
 Check(restrictedElements.GetArrayLength() == 1 && restrictedElements[0].GetProperty("name").GetString() == "Search" &&
+      restrictedUi.RootElement.GetProperty("egressLevel").GetString() == "structure_and_scoped_labels" &&
+      restrictedUi.RootElement.GetProperty("contentWithheld").GetBoolean() &&
       !restrictedElements[0].TryGetProperty("value", out _) && !restrictedElements[0].TryGetProperty("automationId", out _) &&
       !restrictedWindow.TryGetProperty("title", out _) && restrictedWindow.TryGetProperty("windowId", out _),
     "target-only observation returns only the requested input label and opaque window IDs, not UI values or titles");

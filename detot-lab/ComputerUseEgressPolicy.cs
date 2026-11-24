@@ -23,6 +23,8 @@ public static class ComputerUseEgressPolicy
         if (source.ValueKind != JsonValueKind.Object) return false;
 
         var result = new JsonObject();
+        result["egressLevel"] = "structure_and_scoped_labels";
+        result["contentWithheld"] = true;
         CopyString(source, result, "status", 64);
         CopyString(source, result, "app", 64);
         CopyString(source, result, "operation", 32);
