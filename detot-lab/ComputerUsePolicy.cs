@@ -19,6 +19,13 @@ public static class ComputerUsePolicy
 
     public static bool CanNavigate(string? action) => action is not null && NavigationActions.Contains(action);
 
+    public static bool CanUseUiOperation(string? app, string? operation) =>
+        app is not null && ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) &&
+        operation is not null && ComputerUseUiPlanner.AllowedOperations.Contains(operation, StringComparer.Ordinal);
+
+    public static bool ShouldExposeInteractiveUiTool(bool normalChat, bool hasOtherTools, bool desktopAvailable,
+        bool uiDataConsent) => normalChat && !hasOtherTools && desktopAvailable && uiDataConsent;
+
     // GCM's current chooser is not bound to a trusted pending Git operation, repository, or host.
     // Keep account selection denied until such transaction context can be verified end to end.
     public static bool CanSelectGitHubAccount(string? action) => false;
@@ -31,6 +38,12 @@ public static class ComputerUsePolicy
         observe = new[] { "approved-applications", "github-account", "github-pull-requests" },
         navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode" },
         accountSelection = Array.Empty<string>(),
+        ui = new
+        {
+            apps = ComputerUseUiPlanner.AllowedApps,
+            operations = ComputerUseUiPlanner.AllowedOperations,
+            restrictions = new[] { "navigation_only_invoke", "approved_text_fields_only", "exact_user_text_only", "no_sensitive_text", "no_submit", "no_terminal", "no_credentials", "confirm_risky_actions" }
+        },
         write = Array.Empty<string>(),
         codeExecution = false
     };

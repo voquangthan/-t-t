@@ -3,6 +3,7 @@ using System.IO.Pipes;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.DataProtection;
 
 var checks = 0;
 void Check(bool condition, string name)
@@ -38,6 +39,9 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
     "GitHub account observation is available only through the read-only Companion action");
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
 Check(ComputerUsePlanner.MightBeActionRequest("Mở VS Code rồi xem các PR và CI") &&
+      ComputerUsePlanner.MightBeActionRequest("Mở Edge, bấm tab Gmail, rồi cuộn xuống") &&
+      !ComputerUsePlanner.MightBeActionRequest("How do I open Edge?") &&
+      !ComputerUsePlanner.MightBeActionRequest("Làm sao bấm nút đăng nhập an toàn?") &&
       !ComputerUsePlanner.MightBeActionRequest("Ví dụ: `open Edge` rồi chạy lệnh này") &&
       !ComputerUsePlanner.MightBeActionRequest("chào buổi sáng"),
     "multi-step planning is attempted only for short, direct action requests");
@@ -64,6 +68,107 @@ using (var computerUseTool = JsonDocument.Parse(JsonSerializer.Serialize(Compute
           actionSchema.GetProperty("items").GetProperty("enum").EnumerateArray()
               .Select(item => item.GetString()).SequenceEqual(ComputerUsePlanner.AllowedActionIds),
         "Gateway Computer Use tool exposes only the bounded existing permission action IDs");
+}
+Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge"}""", out var observeUi) &&
+      observeUi is { Operation: "observe", App: "edge" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"invoke","app":"vscode","observationId":"00000000000000000000000000000000","elementId":"e12"}""", out var invokeUi) &&
+      invokeUi is { Operation: "invoke", App: "vscode", ElementId: "e12" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"type","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e3","text":"ASP.NET Core"}""", out var typeUi) &&
+      typeUi is { Text: "ASP.NET Core" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"navigate","app":"edge","url":"https://github.com/voquangthan/-t-t/pulls"}""", out var navigateUi) &&
+      navigateUi is { Operation: "navigate", Url: "https://github.com/voquangthan/-t-t/pulls" } &&
+      ComputerUseUiPlanner.TryParse("""{"operation":"activate-window","app":"vscode","windowId":"00000000000000000000000000000001"}""", out var activateWindowUi) &&
+      activateWindowUi is { Operation: "activate-window", WindowId: "00000000000000000000000000000001" },
+    "generic UI planner parses one bounded operation using app-scoped recent observation IDs");
+var syntheticTokenText = string.Concat("ghp_", new string('a', 26), new string('0', 10));
+var syntheticTokenRequest = JsonSerializer.Serialize(new
+{
+    operation = "type", app = "edge", observationId = "00000000000000000000000000000000", elementId = "e3", text = syntheticTokenText
+});
+Check(!ComputerUseUiPlanner.TryParse("""{"operation":"invoke","app":"WindowsTerminal","observationId":"00000000000000000000000000000000","elementId":"e2"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"run-shell","app":"edge"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge","command":"whoami"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"type","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e3","text":"password is abc"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse(syntheticTokenRequest, out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"navigate","app":"edge","url":"http://127.0.0.1:5183"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"navigate","app":"edge","url":"https://user:pass@example.com"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"activate-window","app":"vscode","windowId":"not-a-guid"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"invoke","app":"edge","observationId":"bad","elementId":"e3"}""", out _),
+    "generic UI planner rejects terminal, shell, injected fields, secret-like text, and invalid evidence IDs");
+Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"desktop"}""", out var genericDesktop) &&
+      genericDesktop is { Operation: "observe", App: "desktop" } &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"launch","app":"desktop"}""", out _) &&
+      !ComputerUseUiPlanner.CanObserveDesktopProcess("WindowsTerminal") &&
+      !ComputerUseUiPlanner.CanObserveDesktopProcess("KeePass.exe") &&
+      !ComputerUseUiPlanner.CanObserveDesktopProcess("CredentialUIBroker") &&
+      ComputerUseUiPlanner.CanObserveDesktopProcess("WINWORD.exe") &&
+      ComputerUseUiPlanner.CanObserveDesktopProcess("msedge"),
+    "generic desktop observation targets running user apps while excluding terminals, credential tools and security surfaces");
+Check(ComputerUseUiPlanner.TryParse("""{"operation":"launch-installed","app":"desktop","text":"Word"}""", out var launchInstalled) &&
+      launchInstalled is { Operation: "launch-installed", App: "desktop", Text: "Word" } &&
+      ComputerUseUiPlanner.IsExactUserText("Word", "Mở Word") &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"launch-installed","app":"desktop","text":"C:\\Windows\\System32\\cmd.exe"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"launch-installed","app":"edge","text":"Word"}""", out _) &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"launch-installed","app":"desktop","text":"PowerShell"}""", out _) &&
+      !ComputerUseUiPlanner.CanObserveDesktopProcess("mshta.exe"),
+    "installed app launch accepts only the exact requested safe app name, never paths or shell names");
+var shortcutTestRoot = Path.Combine(Path.GetTempPath(), "detot-shortcut-test-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var shortcutFolder = Path.Combine(shortcutTestRoot, "Programs", "Office");
+    Directory.CreateDirectory(shortcutFolder);
+    File.WriteAllText(Path.Combine(shortcutFolder, "Word.lnk"), "test shortcut placeholder");
+    File.WriteAllText(Path.Combine(shortcutFolder, "WordPad.lnk"), "test shortcut placeholder");
+    var shortcutSearch = InstalledApplicationShortcutResolver.FindExact([Path.Combine(shortcutTestRoot, "Programs")], "Word");
+    Check(shortcutSearch.Complete && shortcutSearch.Matches.Count == 1 && shortcutSearch.Matches[0].DisplayName == "Word" &&
+          InstalledApplicationShortcutResolver.IsTrustedExecutableTarget(
+              Path.Combine(shortcutTestRoot, "Program Files", "Office", "WINWORD.EXE"),
+              [Path.Combine(shortcutTestRoot, "Program Files")]) &&
+          !InstalledApplicationShortcutResolver.IsTrustedExecutableTarget(
+              Path.Combine(shortcutTestRoot, "Downloads", "untrusted.exe"),
+              [Path.Combine(shortcutTestRoot, "Program Files")]) &&
+          !InstalledApplicationShortcutResolver.IsTrustedExecutableTarget(
+              Path.Combine(shortcutTestRoot, "Program Files", "WindowsPowerShell", "powershell.exe"),
+              [Path.Combine(shortcutTestRoot, "Program Files")]),
+        "installed app resolution is exact and launch targets must be trusted executables");
+}
+finally
+{
+    Directory.Delete(shortcutTestRoot, recursive: true);
+}
+Check(ComputerUseUiPlanner.IsExactUserText("đặt lịch họp", "hãy nhập 'đặt lịch họp' vào ô tìm kiếm") &&
+      !ComputerUseUiPlanner.IsExactUserText("xóa dữ liệu", "hãy nhập tên vào ô tìm kiếm"),
+    "typing is restricted to exact text present in the user's current request");
+Check(ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Address and search bar") &&
+      ComputerUseUiPlanner.IsSafeTypingSurface("explorer", "Edit", "Search") &&
+      ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Message body") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Password") &&
+      ComputerUseUiPlanner.IsSafeTypingSurface("vscode", "Edit", "Search") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("explorer", "Edit", "File name") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Credit card number") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("edge", "Edit", "Code Editor") &&
+      !ComputerUseUiPlanner.IsSafeTypingSurface("vscode", "Edit", "Code Editor") &&
+      !ComputerUseUiPlanner.IsExactUserText("person@example.com", "search person@example.com") &&
+      !ComputerUseUiPlanner.IsExactUserText("+84 912 345 678", "search +84 912 345 678"),
+    "ordinary Edge text entry is enabled while identity, financial, file-name and code surfaces remain blocked");
+Check(ComputerUseUiPlanner.ClassifyAction("invoke", "TabItem", "Calendar") == "allowed" &&
+      ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Save") == "confirmation_required" &&
+      ComputerUseUiPlanner.ClassifyAction("invoke", "Hyperlink", "Download report") == "confirmation_required" &&
+      ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Delete") == "denied" &&
+      ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Restart") == "denied" &&
+      ComputerUseUiPlanner.ClassifyAction("type", "Edit", "Search") == "allowed" &&
+      ComputerUseUiPlanner.ClassifyAction("invoke", "Button", "Run") == "denied",
+    "UI action classification allows navigation and gates save/delete/run controls");
+using (var uiTool = JsonDocument.Parse(JsonSerializer.Serialize(ComputerUseUiPlanner.CreateToolDefinition())))
+{
+    var root = uiTool.RootElement;
+    var properties = root.GetProperty("parameters").GetProperty("properties");
+    Check(root.GetProperty("name").GetString() == ComputerUseUiPlanner.ToolName &&
+          properties.GetProperty("operation").GetProperty("enum").EnumerateArray()
+              .Select(item => item.GetString()).SequenceEqual(ComputerUseUiPlanner.AllowedOperations) &&
+          properties.GetProperty("app").GetProperty("enum").EnumerateArray()
+              .Select(item => item.GetString()).SequenceEqual(ComputerUseUiPlanner.AllowedApps),
+        "Gateway UI tool exposes only fixed app and operation enums without command or URL parameters");
 }
 using (var verifiedGithub = JsonDocument.Parse("""{"windowVerified":true,"urlVerified":true}"""))
 using (var missingGithubEvidence = JsonDocument.Parse("""{"windowVerified":true,"urlVerified":false}"""))
@@ -110,6 +215,31 @@ Check(successfulEmptyMessage.Status == "empty" && successfulEmptyMessage.Reply i
       successfulEmptyMessage.Reply.Contains("không thấy ứng dụng nào", StringComparison.OrdinalIgnoreCase),
     "only a successful complete empty observation may report no apps");
 Check(ComputerUsePolicy.CanNavigate("open-vscode"), "allowlisted application navigation has its own permission");
+Check(ComputerUsePolicy.CanUseUiOperation("edge", "observe") &&
+      ComputerUsePolicy.CanUseUiOperation("vscode", "invoke") &&
+      !ComputerUsePolicy.CanUseUiOperation("WindowsTerminal", "observe") &&
+      !ComputerUsePolicy.CanUseUiOperation("edge", "run-shell"),
+    "universal UI policy accepts only approved apps and bounded UI operations");
+Check(ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true, uiDataConsent: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: false, hasOtherTools: false, desktopAvailable: true, uiDataConsent: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: true, desktopAvailable: true, uiDataConsent: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: false, uiDataConsent: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true, uiDataConsent: false),
+    "semantic UI tool has no keyword gate and preserves mode, tool, runtime and explicit data-consent gates");
+var consentTestRoot = Path.Combine(Path.GetTempPath(), "detot-ui-consent-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var consent = new ConsentPolicy(consentTestRoot, new EphemeralDataProtectionProvider());
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
+        "sending UIA labels and results to DeepSeek defaults to deny");
+    consent.Set("owner", "computer_use", "direct_request", "DeepSeek", true, "owner", Guid.NewGuid());
+    Check(consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
+        "explicit one-time UI data consent enables semantic multi-step planning");
+    consent.Set("owner", "computer_use", "direct_request", "DeepSeek", false, "owner", Guid.NewGuid());
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
+        "revoking UI data consent disables subsequent UI tool availability");
+}
+finally { if (Directory.Exists(consentTestRoot)) Directory.Delete(consentTestRoot, recursive: true); }
 Check(!ComputerUsePolicy.CanNavigate("run-shell"), "navigation cannot be used to run shell commands");
 Check(!ComputerUsePolicy.CanWrite("edit-file"), "write actions remain hard-blocked");
 Check(!ComputerUsePolicy.CanWrite("run-tests"), "project code execution remains hard-blocked");
@@ -117,6 +247,39 @@ Check(DesktopCompanionProtocol.IsAllowedAction("read-workspace") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-pull-requests") &&
       DesktopCompanionProtocol.IsAllowedAction("read-github-account"),
     "Desktop Companion exposes only explicit read action IDs");
+var uiRequestJson = DesktopCompanionProtocol.SerializeUiRequest(
+    new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null), Guid.NewGuid().ToString("N"));
+Check(DesktopCompanionProtocol.TryParseRequest(uiRequestJson, out var uiRequest) &&
+      uiRequest?.Action == "ui-operation" && uiRequest.UiAction is { Operation: "observe", App: "edge" } &&
+      !DesktopCompanionProtocol.IsAllowedAction("run-shell"),
+    "authenticated Companion protocol carries only validated universal UI operations");
+var selectWindowAction = new ComputerUseUiAction("activate-window", "vscode", null, null,
+    "00000000000000000000000000000001", null, null, null);
+var selectWindowJson = DesktopCompanionProtocol.SerializeUiRequest(selectWindowAction, Guid.NewGuid().ToString("N"));
+Check(DesktopCompanionProtocol.TryParseRequest(selectWindowJson, out var selectedWindowRequest) &&
+      selectedWindowRequest?.UiAction == selectWindowAction,
+    "window-selection IDs survive authenticated IPC validation for explicit window activation");
+var confirmedUiRequestJson = DesktopCompanionProtocol.SerializeUiRequest(
+    new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e4", null, null, null, null),
+    Guid.NewGuid().ToString("N"), userConfirmed: true);
+Check(DesktopCompanionProtocol.TryParseRequest(confirmedUiRequestJson, out var confirmedUiRequest) &&
+      confirmedUiRequest is { Action: "confirmed-ui-operation", UserConfirmed: true } &&
+      !ComputerUseUiPlanner.TryParse("""{"operation":"invoke","app":"edge","observationId":"00000000000000000000000000000000","elementId":"e4","userConfirmed":true}""", out _),
+    "explicit-confirmation IPC is separate from and cannot be forged through the model tool schema");
+var approvalNow = DateTimeOffset.Parse("2026-11-22T10:00:00Z");
+var approvalAction = new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e4", null, null, null, null);
+var approvals = new ComputerUseApprovalQueue(() => "A1B2C3D4");
+var approvalChallenge = approvals.Create("owner-a", approvalAction, approvalNow);
+Check(approvalChallenge.Code == "A1B2C3D4" && approvalChallenge.ExpiresAt == approvalNow.AddMinutes(2) &&
+      !approvals.TryConsume("owner-b", "xác nhận mã A1B2C3D4", approvalNow, out _) &&
+      !approvals.TryConsume("owner-a", "xác nhận mã WRONG000", approvalNow, out _) &&
+      approvals.TryConsume("owner-a", "xác nhận mã A1B2C3D4", approvalNow, out var consumedApproval) &&
+      consumedApproval == approvalAction && !approvals.TryConsume("owner-a", "xác nhận mã A1B2C3D4", approvalNow, out _),
+    "risky UI approval is owner-scoped, exact-code, one-time, and separately consumed");
+var expiredApprovals = new ComputerUseApprovalQueue(() => "11223344");
+expiredApprovals.Create("owner-a", approvalAction, approvalNow);
+Check(!expiredApprovals.TryConsume("owner-a", "confirm 11223344", approvalNow.AddMinutes(2), out _) &&
+      !expiredApprovals.HasPending("owner-a"), "expired UI approvals cannot execute or be replayed");
 Check(!DesktopCompanionProtocol.IsAllowedAction("run-shell") &&
       !DesktopCompanionProtocol.IsAllowedAction("open-url:https://attacker.example") &&
       !DesktopCompanionProtocol.IsAllowedAction("read-file"),

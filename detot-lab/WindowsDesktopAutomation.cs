@@ -17,7 +17,6 @@ public static class WindowsDesktopAutomation
             ["explorer"] = "File Explorer",
             ["devenv"] = "Visual Studio",
             ["notepad"] = "Notepad",
-            ["WindowsTerminal"] = "Windows Terminal"
         };
 
     public static IReadOnlyList<string> ReadOpenApprovedApplications()

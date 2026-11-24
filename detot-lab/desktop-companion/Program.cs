@@ -63,7 +63,9 @@ while (!shutdown.IsCancellationRequested)
             await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = "", result = new { error = "invalid_request" } }));
             continue;
         }
-        var result = await handler.ExecuteAsync(request.Action, shutdown.Token);
+        using var actionDeadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
+        actionDeadline.CancelAfter(TimeSpan.FromSeconds(request.UiAction?.Operation is "launch" or "navigate" ? 20 : 10));
+        var result = await handler.ExecuteAsync(request.Action, request.UiAction, request.UserConfirmed, actionDeadline.Token);
         await writer.WriteLineAsync(JsonSerializer.Serialize(new { requestId = request.RequestId, result }));
     }
     catch (OperationCanceledException) { }
@@ -152,6 +154,7 @@ static class DesktopSessionDiagnostics
 sealed class CompanionActions(string workspace, string edgeProfile)
 {
     private static readonly HttpClient Github = CreateGithubClient();
+    private readonly CompanionDesktopUi desktopUi = new();
     private const int ProcessCommandLineInformation = 60;
     private sealed record EdgeVerificationResult(string Status, IReadOnlyList<string> States, bool WindowFound,
         bool UrlVerified, int? SessionId, string? CanonicalUrl);
@@ -164,7 +167,14 @@ sealed class CompanionActions(string workspace, string edgeProfile)
     private sealed record GithubAccountSnapshot(string Status, string? Username);
     [StructLayout(LayoutKind.Sequential)] private struct UnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
 
-    public async Task<object> ExecuteAsync(string action, CancellationToken cancellationToken) => action switch
+    public Task<object> ExecuteAsync(string action, CancellationToken cancellationToken) =>
+        ExecuteAsync(action, null, false, cancellationToken);
+
+    public Task<object> ExecuteAsync(string action, ComputerUseUiAction? uiAction, CancellationToken cancellationToken) =>
+        ExecuteAsync(action, uiAction, false, cancellationToken);
+
+    public async Task<object> ExecuteAsync(string action, ComputerUseUiAction? uiAction, bool userConfirmed,
+        CancellationToken cancellationToken) => action switch
     {
         "observe-applications" => ObserveApplications(),
         "open-workspace" => OpenWorkspace(),
@@ -174,8 +184,270 @@ sealed class CompanionActions(string workspace, string edgeProfile)
         "read-workspace" => await ReadWorkspaceAsync(cancellationToken),
         "read-github-account" => await ReadGithubAccountAsync(cancellationToken),
         "read-github-pull-requests" => await ReadPullRequestsAsync(cancellationToken),
+        "ui-operation" or "confirmed-ui-operation" when uiAction is not null =>
+            await ExecuteUiOperationAsync(uiAction, userConfirmed, cancellationToken),
         _ => new { error = "action_not_allowed" }
     };
+
+    private async Task<object> ExecuteUiOperationAsync(ComputerUseUiAction action, bool userConfirmed,
+        CancellationToken cancellationToken)
+    {
+        if (!ComputerUseUiPlanner.AllowedApps.Contains(action.App, StringComparer.Ordinal) ||
+            !ComputerUseUiPlanner.AllowedOperations.Contains(action.Operation, StringComparer.Ordinal))
+            return new { error = "action_not_allowed" };
+        if (action.App == "desktop" && action.Operation == "launch")
+            return new { status = "launch_denied", actionVerified = false, app = action.App,
+                reason = "generic_desktop_target_is_open_windows_only" };
+        if (action.App == "desktop" && action.Operation == "launch-installed")
+            return await LaunchInstalledApplicationAsync(action.Text!, cancellationToken);
+        if (action.Operation == "launch") return await LaunchApprovedAppAsync(action.App, cancellationToken);
+        if (action.Operation == "navigate")
+            return action.App == "edge" && action.Url is not null
+                ? await NavigateEdgeToUrlAsync(action.Url, cancellationToken)
+                : new { error = "action_not_allowed" };
+        var processIds = ReadUiProcessIds(action.App);
+        return await desktopUi.ExecuteAsync(action, processIds, userConfirmed, cancellationToken);
+    }
+
+    private async Task<object> NavigateEdgeToUrlAsync(string url, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var expected) || expected.Scheme != Uri.UriSchemeHttps ||
+            !string.IsNullOrEmpty(expected.UserInfo) || expected.IsLoopback || url.Length > 1500)
+            return new { status = "url_not_allowed", actionVerified = false, app = "edge" };
+        var executable = FindEdge();
+        if (executable is null) return new { status = "launch_failed", actionVerified = false, app = "edge" };
+        try
+        {
+            Directory.CreateDirectory(edgeProfile);
+            var start = new ProcessStartInfo(executable) { UseShellExecute = false };
+            start.ArgumentList.Add($"--user-data-dir={edgeProfile}");
+            start.ArgumentList.Add("--no-first-run");
+            start.ArgumentList.Add("--new-window");
+            start.ArgumentList.Add(expected.AbsoluteUri);
+            using var launched = Process.Start(start);
+            if (launched is null) return new { status = "launch_failed", actionVerified = false, app = "edge" };
+            var verification = await WaitForEdgeUrlAsync(expected, TimeSpan.FromSeconds(15), cancellationToken);
+            return new
+            {
+                status = verification ? "verified" : "url_not_verified",
+                actionVerified = verification,
+                app = "edge",
+                host = expected.IdnHost,
+                path = expected.AbsolutePath
+            };
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or
+                                      UnauthorizedAccessException or IOException)
+        {
+            return new { status = "launch_failed", actionVerified = false, app = "edge" };
+        }
+    }
+
+    private async Task<bool> WaitForEdgeUrlAsync(Uri expected, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var until = DateTime.UtcNow + timeout;
+        do
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                using var automation = new UIA3Automation();
+                foreach (var process in GetDedicatedEdgeProcesses())
+                {
+                    using (process)
+                    {
+                        foreach (var window in automation.GetDesktop().FindAllChildren(cf =>
+                                     cf.ByControlType(ControlType.Window).And(cf.ByProcessId(process.Id))))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var address = ReadAddressBar(window);
+                            if (address.Available && Uri.TryCreate(address.Value, UriKind.Absolute, out var observed) &&
+                                SameNavigationTarget(expected, observed)) return true;
+                        }
+                    }
+                }
+            }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or
+                COMException or UnauthorizedAccessException)
+            {
+                // Edge and UIA may still be starting; retry until the bounded deadline.
+            }
+            await Task.Delay(300, cancellationToken);
+        } while (DateTime.UtcNow < until);
+        return false;
+    }
+
+    private static bool SameNavigationTarget(Uri expected, Uri observed) =>
+        expected.Scheme == Uri.UriSchemeHttps && observed.Scheme == Uri.UriSchemeHttps &&
+        string.Equals(expected.IdnHost, observed.IdnHost, StringComparison.OrdinalIgnoreCase) &&
+        expected.Port == observed.Port && string.Equals(expected.AbsolutePath, observed.AbsolutePath, StringComparison.Ordinal) &&
+        string.Equals(expected.Query, observed.Query, StringComparison.Ordinal);
+
+    private async Task<object> LaunchApprovedAppAsync(string app, CancellationToken cancellationToken)
+    {
+        try
+        {
+            switch (app)
+            {
+                case "edge":
+                {
+                    var result = ToElement(OpenEdge("about:blank", "about:blank"));
+                    var verified = ReadBoolean(result, "windowVerified");
+                    return new { status = verified ? "verified" : "launch_not_verified", actionVerified = verified, app };
+                }
+                case "vscode":
+                {
+                    var result = ToElement(OpenVsCode());
+                    var verified = ReadBoolean(result, "workspaceVerified");
+                    return new { status = verified ? "verified" : "workspace_not_verified", actionVerified = verified, app };
+                }
+                case "explorer":
+                {
+                    var result = ToElement(OpenWorkspace());
+                    var verified = ReadBoolean(result, "workspaceVerified");
+                    return new { status = verified ? "verified" : "workspace_not_verified", actionVerified = verified, app };
+                }
+                case "notepad":
+                case "visual-studio":
+                    _ = Process.Start(new ProcessStartInfo(app == "notepad" ? "notepad.exe" : "devenv.exe")
+                    { UseShellExecute = true });
+                    var deadline = DateTime.UtcNow.AddSeconds(8);
+                    while (DateTime.UtcNow < deadline)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (CompanionDesktopUi.FindAppWindows(app, ReadUiProcessIds(app)).Count > 0)
+                            return new { status = "verified", actionVerified = true, app };
+                        await Task.Delay(200, cancellationToken);
+                    }
+                    return new { status = "window_not_verified", actionVerified = false, app };
+                default:
+                    return new { error = "app_not_allowed" };
+            }
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or
+                                      UnauthorizedAccessException or COMException)
+        {
+            return new { status = "launch_failed", actionVerified = false, app };
+        }
+    }
+
+    private async Task<object> LaunchInstalledApplicationAsync(string appName, CancellationToken cancellationToken)
+    {
+        if (!ComputerUseUiPlanner.IsSafeInstalledApplicationName(appName))
+            return new { status = "application_launch_denied", actionVerified = false };
+
+        var menuRoots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu)
+            }
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.Combine(path, "Programs"));
+        var search = InstalledApplicationShortcutResolver.FindExact(menuRoots, appName);
+        if (!search.Complete) return new { status = "application_search_incomplete", actionVerified = false };
+        if (search.Matches.Count == 0) return new { status = "application_not_found", actionVerified = false };
+        if (search.Matches.Count > 1) return new { status = "application_ambiguous", actionVerified = false };
+
+        object? shell = null;
+        object? shortcut = null;
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("WScript.Shell", throwOnError: false);
+            if (shellType is null) return new { status = "shortcut_resolver_unavailable", actionVerified = false };
+            shell = Activator.CreateInstance(shellType);
+            if (shell is null) return new { status = "shortcut_resolver_unavailable", actionVerified = false };
+            shortcut = shellType.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod,
+                binder: null, target: shell, args: [search.Matches[0].ShortcutPath]);
+            if (shortcut is null) return new { status = "shortcut_unavailable", actionVerified = false };
+
+            var shortcutType = shortcut.GetType();
+            var targetPath = Convert.ToString(shortcutType.InvokeMember("TargetPath",
+                System.Reflection.BindingFlags.GetProperty, binder: null, target: shortcut, args: null));
+            var arguments = Convert.ToString(shortcutType.InvokeMember("Arguments",
+                System.Reflection.BindingFlags.GetProperty, binder: null, target: shortcut, args: null));
+            if (!string.IsNullOrWhiteSpace(arguments))
+                return new { status = "application_launch_denied", actionVerified = false, reason = "shortcut_arguments_not_allowed" };
+
+            targetPath = targetPath is null ? null : Environment.ExpandEnvironmentVariables(targetPath);
+            var trustedRoots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs"),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows)
+            };
+            if (!InstalledApplicationShortcutResolver.IsTrustedExecutableTarget(targetPath, trustedRoots))
+                return new { status = "application_launch_denied", actionVerified = false, reason = "target_not_a_trusted_app_executable" };
+
+            var processName = Path.GetFileNameWithoutExtension(targetPath);
+            using var started = Process.Start(new ProcessStartInfo(targetPath!)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(targetPath!)!
+            });
+            if (started is null) return new { status = "launch_failed", actionVerified = false };
+
+            var deadline = DateTime.UtcNow.AddSeconds(12);
+            do
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var processIds = new List<int>();
+                foreach (var process in Process.GetProcessesByName(processName))
+                {
+                    using (process)
+                    {
+                        try
+                        {
+                            if (process.SessionId == Process.GetCurrentProcess().SessionId) processIds.Add(process.Id);
+                        }
+                        catch (InvalidOperationException) { }
+                    }
+                }
+                if (CompanionDesktopUi.FindAppWindows("desktop", processIds).Count > 0)
+                    return new { status = "verified", actionVerified = true, app = appName };
+                await Task.Delay(250, cancellationToken);
+            } while (DateTime.UtcNow < deadline);
+
+            return new { status = "window_not_verified", actionVerified = false, app = appName };
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or
+                                      UnauthorizedAccessException or COMException or System.Reflection.TargetInvocationException or
+                                      System.Security.SecurityException)
+        {
+            return new { status = "launch_failed", actionVerified = false, app = appName };
+        }
+        finally
+        {
+            if (shortcut is not null && Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+            if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+        }
+    }
+
+    private IReadOnlyList<int> ReadUiProcessIds(string app)
+    {
+        if (app == "desktop") return CompanionUiAutomation.GetInteractiveProcessIds();
+        var processName = app switch
+        {
+            "edge" => "msedge",
+            "vscode" => "Code",
+            "explorer" => "explorer",
+            "visual-studio" => "devenv",
+            "notepad" => "notepad",
+            _ => ""
+        };
+        if (processName.Length == 0) return [];
+        var processes = app == "edge" ? GetDedicatedEdgeProcesses() : Process.GetProcessesByName(processName).ToList();
+        var ids = new List<int>();
+        foreach (var process in processes)
+        {
+            using (process)
+            {
+                if (SafeSessionId(process) == Process.GetCurrentProcess().SessionId) ids.Add(process.Id);
+            }
+        }
+        return ids;
+    }
 
     public async Task<JsonElement> RunSmokeTestAsync(CancellationToken cancellationToken)
     {

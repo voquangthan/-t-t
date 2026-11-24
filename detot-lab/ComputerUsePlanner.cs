@@ -14,14 +14,18 @@ public static partial class ComputerUsePlanner
         "read-github-account", "read-github-pull-requests", "read-approved-applications"
     });
 
-    [GeneratedRegex(@"\b(mở|vào|xem|kiểm\s+tra|đọc|liệt\s+kê|open|launch|check|inspect|read|list|show|verify|go\s+to)\b",
+    [GeneratedRegex(@"\b(mở|vào|xem|kiểm\s+tra|đọc|liệt\s+kê|bấm|nhấn|chọn|cuộn|nhập|gõ|điền|click|press|select|scroll|type|enter|fill|open|launch|check|inspect|read|list|show|verify|go\s+to)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ActionCue();
 
+    [GeneratedRegex(@"^\s*(?:làm\s+sao|cách\s+(?:mở|dùng|bấm)|hướng\s+dẫn|how\s+(?:do\s+i|can\s+i|to)\b)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex InstructionQuestion();
+
     public static bool MightBeActionRequest(string? message) =>
-        !string.IsNullOrWhiteSpace(message) && message.Length <= 600 &&
+        !string.IsNullOrWhiteSpace(message) && message.Length <= 1500 &&
         !message.Contains('\n') && !message.Contains('\r') && !message.Contains('`') &&
-        !message.Contains('"') && !message.Contains('\'') && ActionCue().IsMatch(message);
+        !InstructionQuestion().IsMatch(message) && ActionCue().IsMatch(message);
 
     public static object CreateToolDefinition() => new
     {

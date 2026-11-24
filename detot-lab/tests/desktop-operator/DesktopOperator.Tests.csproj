@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../Detot.Lab.csproj" />
+    <Compile Include="../../desktop-companion/InstalledApplicationShortcutResolver.cs" Link="InstalledApplicationShortcutResolver.cs" />
   </ItemGroup>
 </Project>
