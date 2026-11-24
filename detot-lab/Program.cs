@@ -1134,7 +1134,7 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                     additionalProperties = false
                 }
             });
-        var desktopUiConsent = consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "DeepSeek");
+        var desktopUiConsent = consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "OpenClaw Gateway");
         var hasDesktopRequestScope = ComputerUseIntentScope.TryCreate(message, out var desktopRequestScope);
         var localDesktopAvailable = DesktopOperator.IsAvailable(OperatingSystem.IsWindows(), publicUri is not null,
             context.Connection.RemoteIpAddress);
@@ -1307,12 +1307,12 @@ app.MapPost("/api/chat", async Task<IResult> (HttpContext context, IHttpClientFa
                             stoppedAt = new { operation = uiAction.Operation, app = uiAction.App, status }, allActionsVerified = false },
                             statusCode: status == "protected_surface" ? 403 : 502);
 
-                    if (!consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "DeepSeek"))
-                        return Results.Json(new { reply = "Quyền gửi kết quả UI tới DeepSeek đã bị thu hồi; đã dừng trước khi gửi nội dung màn hình. Bước vừa rồi có thể đã xảy ra nhưng chưa được xác minh.",
+                    if (!consentPolicy.IsAllowed(owner, "computer_use", "direct_request", "OpenClaw Gateway"))
+                        return Results.Json(new { reply = "Quyền gửi kết quả UI qua OpenClaw Gateway đã bị thu hồi; đã dừng trước khi gửi nội dung màn hình. Bước vừa rồi có thể đã xảy ra nhưng chưa được xác minh.",
                             toolUsed = true, verifiedSteps, allActionsVerified = false, stoppedAt = "consent_revoked" },
                             statusCode: StatusCodes.Status403Forbidden);
                     consentPolicy.RecordExplicitAction(owner,
-                        new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", "DeepSeek"),
+                        new ConsentPolicy.ConsentRequirement("computer_use", "direct_request", "OpenClaw Gateway"),
                         "chat_desktop_ui_observation", request.RequestId);
 
                     verifiedSteps.Add($"{uiAction.Operation}:{uiAction.App}");

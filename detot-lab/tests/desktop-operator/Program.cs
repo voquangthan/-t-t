@@ -403,13 +403,16 @@ var consentTestRoot = Path.Combine(Path.GetTempPath(), "detot-ui-consent-" + Gui
 try
 {
     var consent = new ConsentPolicy(consentTestRoot, new EphemeralDataProtectionProvider());
-    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
-        "sending UIA labels and results to DeepSeek defaults to deny");
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
+        "sending filtered UI observations through the configured Gateway model defaults to deny");
     consent.Set("owner", "computer_use", "direct_request", "DeepSeek", true, "owner", Guid.NewGuid());
-    Check(consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
-        "explicit one-time UI data consent enables semantic multi-step planning");
-    consent.Set("owner", "computer_use", "direct_request", "DeepSeek", false, "owner", Guid.NewGuid());
-    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
+        "a legacy DeepSeek-only grant does not authorize data sent through the Gateway default model");
+    consent.Set("owner", "computer_use", "direct_request", "OpenClaw Gateway", true, "owner", Guid.NewGuid());
+    Check(consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
+        "explicit consent for the actual Gateway data path enables scoped UI planning");
+    consent.Set("owner", "computer_use", "direct_request", "OpenClaw Gateway", false, "owner", Guid.NewGuid());
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
         "revoking UI data consent disables subsequent UI tool availability");
 }
 finally { if (Directory.Exists(consentTestRoot)) Directory.Delete(consentTestRoot, recursive: true); }
