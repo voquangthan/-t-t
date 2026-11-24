@@ -24,7 +24,8 @@ public static class ComputerUsePolicy
         operation is not null && ComputerUseUiPlanner.AllowedOperations.Contains(operation, StringComparer.Ordinal);
 
     public static bool ShouldExposeInteractiveUiTool(bool normalChat, bool hasOtherTools, bool desktopAvailable,
-        bool uiDataConsent) => normalChat && !hasOtherTools && desktopAvailable && uiDataConsent;
+        bool uiDataConsent, bool hasVerifiedRequestScope) =>
+        normalChat && !hasOtherTools && desktopAvailable && uiDataConsent && hasVerifiedRequestScope;
 
     // GCM's current chooser is not bound to a trusted pending Git operation, repository, or host.
     // Keep account selection denied until such transaction context can be verified end to end.

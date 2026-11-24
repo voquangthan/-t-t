@@ -220,12 +220,69 @@ Check(ComputerUsePolicy.CanUseUiOperation("edge", "observe") &&
       !ComputerUsePolicy.CanUseUiOperation("WindowsTerminal", "observe") &&
       !ComputerUsePolicy.CanUseUiOperation("edge", "run-shell"),
     "universal UI policy accepts only approved apps and bounded UI operations");
-Check(ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true, uiDataConsent: true) &&
-      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: false, hasOtherTools: false, desktopAvailable: true, uiDataConsent: true) &&
-      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: true, desktopAvailable: true, uiDataConsent: true) &&
-      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: false, uiDataConsent: true) &&
-      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true, uiDataConsent: false),
-    "semantic UI tool has no keyword gate and preserves mode, tool, runtime and explicit data-consent gates");
+Check(ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: true, hasVerifiedRequestScope: false) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: false, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: true, desktopAvailable: true,
+          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: false,
+          uiDataConsent: true, hasVerifiedRequestScope: true) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: false, hasVerifiedRequestScope: true),
+    "UI tool requires an independently derived request scope as well as mode, runtime and data-consent gates");
+Check(!ComputerUseIntentScope.TryCreate("Giải thích cách mở Edge", out _) &&
+      !ComputerUseIntentScope.TryCreate("Từ ‘open Edge’ nghĩa là gì?", out _) &&
+      !ComputerUseIntentScope.TryCreate("Ví dụ: bấm tab Gmail", out _) &&
+      !ComputerUseIntentScope.TryCreate("Đừng mở Edge", out _) &&
+      !ComputerUseIntentScope.TryCreate("Không bấm nút Gmail", out _) &&
+      !ComputerUseIntentScope.TryCreate("chào buổi sáng", out _),
+    "non-action, quoted/example, negative and unrelated turns cannot create desktop authority");
+Check(ComputerUseUiPlanner.TryParse("""{"operation":"observe","app":"edge"}""", out var injectedUiCall) &&
+      injectedUiCall is not null && !ComputerUseIntentScope.TryCreate("Giải thích Edge giúp tao", out var noUiScope) &&
+      noUiScope is null && !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false,
+          desktopAvailable: true, uiDataConsent: true, hasVerifiedRequestScope: false),
+    "a valid model-authored UI tool payload still cannot create scope or expose/dispatch the Companion tool");
+Check(ComputerUseIntentScope.TryCreate("Mở Edge, bấm tab Gmail, rồi cuộn xuống", out var edgeScope) &&
+      edgeScope!.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      edgeScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail") &&
+      !edgeScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e2", null, null, null, null), "Outlook") &&
+      edgeScope.Allows(new ComputerUseUiAction("scroll", "edge", "00000000000000000000000000000000", "e3", null, null, null, "down")) &&
+      !edgeScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
+      !edgeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e4", null, "attacker text", null, null)),
+    "a direct request is bound to its named app, requested target and operation set");
+Check(ComputerUseIntentScope.TryCreate("Mở Edge rồi nhập hello vào ô Search", out var typeScope) &&
+      typeScope!.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "hello", null, null), "Search") &&
+      typeScope.Allows(new ComputerUseUiAction("focus", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Search") &&
+      !typeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e2", null, "hello", null, null), "Subject") &&
+      !typeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "other", null, null), "Search"),
+    "typing is bound to the named input target and exact user-provided text");
+Check(ComputerUseIntentScope.TryCreate("Mở VS Code rồi xem PR và CI", out var vscodeScope) &&
+      vscodeScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "VS Code", null, null)) &&
+      vscodeScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)) &&
+      !vscodeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      !vscodeScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
+      vscodeScope.AllowsFixedAction("open-vscode") && !vscodeScope.AllowsFixedAction("open-edge") &&
+      !vscodeScope.AllowsFixedAction("read-github-pull-requests"),
+    "the model cannot widen an app-launch request to another installed application");
+Check(ComputerUseIntentScope.TryCreate("Mở GitHub", out var githubScope) &&
+      githubScope!.AllowsFixedAction("open-github") && !githubScope.AllowsFixedAction("read-github-account") &&
+      !githubScope.AllowsFixedAction("read-github-pull-requests") &&
+      ComputerUseIntentScope.TryCreate("Kiểm tra pull requests trên GitHub", out var pullRequestScope) &&
+      pullRequestScope!.AllowsFixedAction("read-github-pull-requests") &&
+      !pullRequestScope.AllowsFixedAction("read-github-account") &&
+      ComputerUseIntentScope.TryCreate("Liệt kê ứng dụng đang mở", out var applicationsScope) &&
+      applicationsScope!.AllowsFixedAction("read-approved-applications"),
+    "fixed tools are authorized only for their requested app and operation");
+var scopeObservation = JsonDocument.Parse("""{"status":"observed","app":"edge","observationId":"00000000000000000000000000000000","elements":[{"id":"e1","name":"Gmail"}]}""");
+var scopedElements = new Dictionary<string, string>(StringComparer.Ordinal);
+ComputerUseIntentScope.RecordObservedElements(scopeObservation.RootElement, scopedElements);
+Check(scopedElements.TryGetValue("00000000000000000000000000000000:e1", out var observedName) && observedName == "Gmail" &&
+      edgeScope!.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), observedName),
+    "target binding uses the observed element label associated with its observation ID");
+scopeObservation.Dispose();
 var consentTestRoot = Path.Combine(Path.GetTempPath(), "detot-ui-consent-" + Guid.NewGuid().ToString("N"));
 try
 {

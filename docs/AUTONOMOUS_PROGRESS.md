@@ -1,5 +1,12 @@
 # Đệ Tốt Pro — checkpoint
 
+## Computer Use — request-scoped authorization follow-up (24/11/2026)
+
+- Work REVISE trên PR #5 phát hiện tool call do model tự sinh có thể được ghi audit như direct user request dù lượt chat không yêu cầu thao tác desktop.
+- Local fix derives a bounded per-turn scope from the user's current direct request before exposing either UI tool. Backend revalidates app, operation, exact launch/type/URL text and observed target label before Companion dispatch or consent audit. Quoted/example/negative/unrelated requests do not create scope; both generic UI and fixed planner dispatches use the gate.
+- Regression cases added for unrelated, quoted, example, negative, wrong-app, wrong-operation, wrong-element, exact typing and fixed GitHub/app-list actions.
+- `git diff --check` passes. Build and C# regression could not run here: no .NET SDK/MSBuild is available in PATH or the checked standard locations. Do not count these as PASS; publish to PR for hosted CI verification. Interactive Windows E2E is still pending.
+
 ## Computer Use — reusable desktop window target (24/11/2026)
 
 - Extended the existing UIA Companion with an `app=desktop` target for observing and operating already-running, visible, non-blocked windows in the current interactive session. It cannot launch arbitrary applications; app launches remain explicit adapters. Multi-window selection still uses short-lived window IDs, and each action requires fresh UIA evidence.
