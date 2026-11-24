@@ -1,5 +1,12 @@
 public static class ComputerUsePolicy
 {
+    public const string ModelRoute = "deepseek/deepseek-flash";
+    public const string ModelConsentDestination = "DeepSeek via OpenClaw Gateway";
+    public const string DefaultChatModelRoute = "openclaw/default";
+
+    public static string SelectModelRoute(bool computerUseRequest) =>
+        computerUseRequest ? ModelRoute : DefaultChatModelRoute;
+
     private static readonly HashSet<string> ObservationTargets = new(StringComparer.Ordinal)
     {
         "approved-applications",

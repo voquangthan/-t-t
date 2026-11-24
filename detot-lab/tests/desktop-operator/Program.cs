@@ -33,6 +33,9 @@ Check(nonWindowActionResponse.WindowVerified is null,
     "chat response preserves unavailable window-verification status for other actions");
 Check(!WindowsDesktopAutomation.HasVisibleWindow("arbitrary"), "UI Automation cannot inspect unlisted process names");
 Check(ComputerUsePolicy.CanObserve("approved-applications"), "approved application observation has its own permission");
+Check(ComputerUsePolicy.SelectModelRoute(computerUseRequest: true) == "deepseek/deepseek-flash" &&
+      ComputerUsePolicy.SelectModelRoute(computerUseRequest: false) == "openclaw/default",
+    "Computer Use pins DeepSeek Flash while unrelated Chat keeps the OpenClaw default route");
 Check(ComputerUsePolicy.CanObserve("github-pull-requests"), "GitHub observation has its own permission");
 Check(ComputerUsePolicy.CanObserve("github-account") &&
       JsonSerializer.Serialize(ComputerUsePolicy.Describe()).Contains("github-account", StringComparison.Ordinal),
@@ -593,21 +596,21 @@ try
     var consent = new ConsentPolicy(consentTestRoot, new EphemeralDataProtectionProvider());
     var computerUseOption = consent.Get("owner").Options.Single(option => option.Source == "computer_use");
     Check(computerUseOption.PurposeLabel.Contains("Chế độ thông minh", StringComparison.Ordinal) &&
-          computerUseOption.DestinationLabel.Contains("openclaw/default", StringComparison.Ordinal) &&
+          computerUseOption.Destination == ComputerUsePolicy.ModelConsentDestination &&
+          computerUseOption.DestinationLabel.Contains(ComputerUsePolicy.ModelRoute, StringComparison.Ordinal) &&
           computerUseOption.Description.Contains("vẫn chạy cục bộ", StringComparison.Ordinal) &&
           computerUseOption.Description.Contains("giá trị trường, ảnh, tiêu đề và URL vẫn bị giữ lại", StringComparison.Ordinal) &&
-          computerUseOption.Description.Contains("không xác nhận riêng DeepSeek", StringComparison.Ordinal),
-        "Computer Use privacy setting explains local-only and Gateway-assisted modes, filtered egress, and dynamic provider selection");
+          computerUseOption.Description.Contains("không dùng model mặc định thay thế", StringComparison.Ordinal),
+        "Computer Use privacy setting names the explicit DeepSeek Flash route and discloses local-only, filtered egress behavior");
     Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
-        "sending filtered UI observations through the configured Gateway model defaults to deny");
-    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
-        "the old DeepSeek-specific consent key is distinct from the Gateway data path");
-    consent.Set("owner", "computer_use", "direct_request", "OpenClaw Gateway", true, "owner", Guid.NewGuid());
-    Check(consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway") &&
-          !consent.IsAllowed("owner", "computer_use", "direct_request", "DeepSeek"),
-        "explicit consent for the actual Gateway data path enables scoped UI planning");
-    consent.Set("owner", "computer_use", "direct_request", "OpenClaw Gateway", false, "owner", Guid.NewGuid());
-    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", "OpenClaw Gateway"),
+        "legacy Gateway consent does not authorize the newly explicit DeepSeek destination");
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
+        "sending filtered UI observations to the explicit DeepSeek route defaults to deny");
+    consent.Set("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination, true, "owner", Guid.NewGuid());
+    Check(consent.IsAllowed("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
+        "explicit consent for the DeepSeek route enables scoped UI planning");
+    consent.Set("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination, false, "owner", Guid.NewGuid());
+    Check(!consent.IsAllowed("owner", "computer_use", "direct_request", ComputerUsePolicy.ModelConsentDestination),
         "revoking UI data consent disables subsequent UI tool availability");
 }
 finally { if (Directory.Exists(consentTestRoot)) Directory.Delete(consentTestRoot, recursive: true); }
