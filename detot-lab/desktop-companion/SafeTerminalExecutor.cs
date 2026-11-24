@@ -5,7 +5,7 @@ using System.Text;
 internal sealed class SafeTerminalExecutor(string workspaceRoot)
 {
     private const int MaximumOutputCharacters = 8192;
-    private static readonly TimeSpan MaximumDuration = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan MaximumDuration = TimeSpan.FromSeconds(30);
 
     public async Task<object> ExecuteAsync(string commandId, CancellationToken cancellationToken)
     {
