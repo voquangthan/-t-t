@@ -318,7 +318,7 @@ Check(ComputerUseIntentScope.TryCreate("Mở VS Code", out var vscodeScope) &&
     "opening an app authorizes its launch but does not authorize reading its UI or unrelated fixed actions");
 Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mới lên trước", out var notepadScope) &&
       notepadScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
-      notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
+      !notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
       !notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)) &&
       !notepadScope.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
           "00000000000000000000000000000002", null, null, null), observedTarget: "Notepad") &&
@@ -348,9 +348,15 @@ using (var genericLaunchEvidence = JsonDocument.Parse("""{"status":"verified","w
         genericObservationTargets, genericWindowTargets);
 Check(genericWindowTargets.TryGetValue("00000000000000000000000000000003", out var genericWindowTarget) &&
       genericWindowTarget == "calculator|new" &&
+      !genericWindowTargets.ContainsKey("00000000000000000000000000000005") &&
       genericAppScope!.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
           "00000000000000000000000000000003", null, null, null), observedTarget: genericWindowTarget),
-    "a generic app window can be activated only through the ID returned by its verified launch");
+    "a generic app's newly launched window is mapped, while an older same-app window ID is not");
+Check(!genericAppScope!.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
+          "00000000000000000000000000000005", null, null, null)) &&
+      !genericAppScope.Allows(new ComputerUseUiAction("invoke", "desktop", "00000000000000000000000000000000", "e1", null, null, null, null),
+          observedElementName: "Equals", observedTarget: "calculator|old"),
+    "an older window without launch evidence cannot be activated or used for actions");
 using (var genericObservationEvidence = JsonDocument.Parse("""{"status":"observed","observation":{"observationId":"00000000000000000000000000000004","elements":[{"id":"e1","name":"Equals"},{"id":"e2","name":"Delete"}]}}"""))
 {
     var filteredGenericObservation = JsonDocument.Parse(genericAppScope!.FilterObservationForModel(
@@ -381,6 +387,10 @@ Check(ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "notepad") &&
       !ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "msedge") &&
       !ComputerUseUiPlanner.IsRequestedProcessTarget("Windows Terminal", "WindowsTerminal"),
     "targeted desktop observations resolve only the explicitly requested non-blocked process");
+Check(ComputerUseUiPlanner.IsSameVerifiedWindow(410, 638000000000000000, 1001, 410, 638000000000000000, 1001) &&
+      !ComputerUseUiPlanner.IsSameVerifiedWindow(410, 638000000000000000, 1001, 410, 638000000000000000, 1002) &&
+      !ComputerUseUiPlanner.IsSameVerifiedWindow(410, 638000000000000000, 1001, 410, 638000000000000001, 1001),
+    "generic app targeting requires the exact launched process instance and window, rejecting an older same-app window");
 Check(ComputerUseIntentScope.TryCreate("Mở GitHub", out var githubScope) &&
       githubScope!.AllowsFixedAction("open-github") && !githubScope.AllowsFixedAction("read-github-account") &&
       !githubScope.AllowsFixedAction("read-github-pull-requests") &&

@@ -176,7 +176,8 @@ public sealed class ComputerUseIntentScope
         if (action.App == "desktop")
         {
             if (action.Operation == "observe")
-                return wholeDesktop || action.Text is not null && AllowsObservationTarget(action.Text) &&
+                return wholeDesktop || allowTargetOnlyObservation && action.Text is not null &&
+                    openTargets.Any(target => IsAppTarget(action.Text, target)) &&
                     ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest);
             if (action.Operation == "activate-window")
                 return wholeDesktop || IsScopedTarget(observedTarget, requireNewWindow: requiresNewWindow);

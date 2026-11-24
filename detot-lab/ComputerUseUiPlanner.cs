@@ -176,6 +176,12 @@ public static partial class ComputerUseUiPlanner
         return expectedProcess.Length > 0 && expectedProcess == NormalizeAppName(processName);
     }
 
+    public static bool IsSameVerifiedWindow(int expectedProcessId, long expectedProcessStartUtcTicks,
+        long expectedWindowHandle, int observedProcessId, long observedProcessStartUtcTicks, long observedWindowHandle) =>
+        expectedProcessId > 0 && expectedProcessId == observedProcessId &&
+        expectedProcessStartUtcTicks > 0 && expectedProcessStartUtcTicks == observedProcessStartUtcTicks &&
+        expectedWindowHandle != 0 && expectedWindowHandle == observedWindowHandle;
+
     private static string NormalizeAppName(string value) =>
         string.Concat(value.Normalize(System.Text.NormalizationForm.FormD)
             .Where(character => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character) !=

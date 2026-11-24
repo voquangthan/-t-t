@@ -11,12 +11,13 @@ internal sealed class CompanionDesktopUi
     private static readonly TimeSpan ObservationLifetime = TimeSpan.FromMinutes(2);
     private readonly ConcurrentDictionary<string, CachedObservation> observations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CachedWindow> selectableWindows = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, (int ProcessId, DateTime ProcessStartUtc)> requestedAppProcesses =
+    private readonly ConcurrentDictionary<string, RequestedAppWindow> requestedAppWindows =
         new(StringComparer.OrdinalIgnoreCase);
 
     private sealed record CachedObservation(string App, int ProcessId, IntPtr WindowHandle, string WindowTitle,
         DateTimeOffset CreatedAt, bool Complete, IReadOnlyDictionary<string, UiElement> Elements);
     private sealed record CachedWindow(string App, int ProcessId, IntPtr WindowHandle, string Title, DateTimeOffset CreatedAt);
+    private sealed record RequestedAppWindow(CachedWindow Window, DateTime ProcessStartUtc);
     private sealed record ElementView(string Id, string Type, string Name, bool Enabled, bool Offscreen,
         bool Invokable, string? ScrollDirection);
 
@@ -26,6 +27,7 @@ internal sealed class CompanionDesktopUi
         if (!ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) || processId <= 0 ||
             !IsWindow(handle) || !WindowBelongsToProcess(handle, processId) ||
             ComputerUseUiPlanner.IsProtectedSurface(title)) return null;
+        var cachedWindow = new CachedWindow(app, processId, handle, title, DateTimeOffset.UtcNow);
         if (!string.IsNullOrWhiteSpace(requestedAppName))
         {
             if (!ComputerUseUiPlanner.IsSafeInstalledApplicationName(requestedAppName)) return null;
@@ -34,10 +36,10 @@ internal sealed class CompanionDesktopUi
                 using var process = Process.GetProcessById(processId);
                 if (!ComputerUseUiPlanner.CanObserveDesktopProcess(process.ProcessName) ||
                     process.SessionId != Process.GetCurrentProcess().SessionId) return null;
-                requestedAppProcesses[requestedAppName] = (processId, process.StartTime.ToUniversalTime());
-                if (requestedAppProcesses.Count > 64)
-                    foreach (var stale in requestedAppProcesses.Keys.Take(requestedAppProcesses.Count - 64))
-                        requestedAppProcesses.TryRemove(stale, out _);
+                requestedAppWindows[requestedAppName] = new(cachedWindow, process.StartTime.ToUniversalTime());
+                if (requestedAppWindows.Count > 64)
+                    foreach (var stale in requestedAppWindows.Keys.Take(requestedAppWindows.Count - 64))
+                        requestedAppWindows.TryRemove(stale, out _);
             }
             catch (Exception error) when (error is ArgumentException or InvalidOperationException or
                 System.ComponentModel.Win32Exception or UnauthorizedAccessException or NotSupportedException or
@@ -47,7 +49,7 @@ internal sealed class CompanionDesktopUi
             }
         }
         var id = Guid.NewGuid().ToString("N");
-        selectableWindows[id] = new CachedWindow(app, processId, handle, title, DateTimeOffset.UtcNow);
+        selectableWindows[id] = cachedWindow;
         PruneSelectableWindows();
         return id;
     }
@@ -58,10 +60,9 @@ internal sealed class CompanionDesktopUi
         if (action.Operation == "launch") return new { error = "launch_requires_companion_dispatch" };
         if (action.Operation == "observe")
         {
-            var targetedProcessIds = action.App == "desktop" && action.Text is not null
-                ? processIds.Where(processId => IsRequestedProcess(processId, action.Text)).ToArray()
-                : processIds;
-            return await ObserveAsync(action.App, targetedProcessIds, cancellationToken);
+            if (action.App == "desktop" && action.Text is not null)
+                return await ObserveRequestedAppWindowAsync(action.Text, processIds, cancellationToken);
+            return await ObserveAsync(action.App, processIds, cancellationToken);
         }
         if (action.Operation == "activate-window") return await ActivateWindowAsync(action, processIds, cancellationToken);
         if (action.ObservationId is null || action.ElementId is null ||
@@ -205,23 +206,35 @@ internal sealed class CompanionDesktopUi
             ?? (object)new { status = "observation_unavailable", app, actionVerified = false };
     }
 
-    private bool IsRequestedProcess(int processId, string requestedApp)
+    private async Task<object> ObserveRequestedAppWindowAsync(string requestedApp, IReadOnlyList<int> processIds,
+        CancellationToken cancellationToken)
     {
+        if (!requestedAppWindows.TryGetValue(requestedApp, out var requested))
+            return new { status = "launch_required", app = requestedApp, actionVerified = false };
+        var selected = requested.Window;
+        if (DateTimeOffset.UtcNow - selected.CreatedAt > ObservationLifetime ||
+            !processIds.Contains(selected.ProcessId) || !IsWindow(selected.WindowHandle) ||
+            !WindowBelongsToProcess(selected.WindowHandle, selected.ProcessId))
+            return new { status = "launched_window_not_available", app = requestedApp, actionVerified = false };
         try
         {
-            using var process = Process.GetProcessById(processId);
-            if (requestedAppProcesses.TryGetValue(requestedApp, out var trustedProcess) &&
-                trustedProcess.ProcessId == processId &&
-                trustedProcess.ProcessStartUtc == process.StartTime.ToUniversalTime() &&
-                ComputerUseUiPlanner.CanObserveDesktopProcess(process.ProcessName)) return true;
-            return ComputerUseUiPlanner.IsRequestedProcessTarget(requestedApp, process.ProcessName);
+            using var process = Process.GetProcessById(selected.ProcessId);
+            if (!ComputerUseUiPlanner.IsSameVerifiedWindow(selected.ProcessId, requested.ProcessStartUtc.Ticks,
+                    selected.WindowHandle.ToInt64(), process.Id, process.StartTime.ToUniversalTime().Ticks,
+                    selected.WindowHandle.ToInt64()) ||
+                process.SessionId != Process.GetCurrentProcess().SessionId ||
+                !ComputerUseUiPlanner.CanObserveDesktopProcess(process.ProcessName))
+                return new { status = "launched_window_not_available", app = requestedApp, actionVerified = false };
         }
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or
-                                      System.ComponentModel.Win32Exception or NotSupportedException or
-                                      System.Security.SecurityException)
+            System.ComponentModel.Win32Exception or UnauthorizedAccessException or NotSupportedException or
+            System.Security.SecurityException)
         {
-            return false;
+            return new { status = "launched_window_not_available", app = requestedApp, actionVerified = false };
         }
+        return await ObserveWindowAsync(selected.App, selected.ProcessId, selected.WindowHandle,
+            selected.Title, cancellationToken)
+            ?? (object)new { status = "observation_unavailable", app = requestedApp, actionVerified = false };
     }
 
     private async Task<object> ActivateWindowAsync(ComputerUseUiAction action, IReadOnlyList<int> processIds,
