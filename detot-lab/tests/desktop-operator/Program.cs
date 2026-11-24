@@ -296,19 +296,21 @@ Check(ComputerUseIntentScope.TryCreate("Bấm tab Gmail", out var directClickSco
       directClickScope.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Gmail"),
     "an explicit bounded UI operation can observe only its single inferred app to locate the requested target");
 Check(ComputerUseIntentScope.TryCreate("Mở Edge rồi nhập hello vào ô Search", out var typeScope) &&
+      typeScope!.HasInteractiveUiScope &&
+      typeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       typeScope!.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "hello", null, null), "Search") &&
       typeScope.Allows(new ComputerUseUiAction("focus", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), "Search") &&
       !typeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e2", null, "hello", null, null), "Subject") &&
       !typeScope.Allows(new ComputerUseUiAction("type", "edge", "00000000000000000000000000000000", "e1", null, "other", null, null), "Search"),
     "typing is bound to the named input target and exact user-provided text");
-Check(ComputerUseIntentScope.TryCreate("Mở VS Code rồi xem PR và CI", out var vscodeScope) &&
+Check(ComputerUseIntentScope.TryCreate("Mở VS Code", out var vscodeScope) &&
       vscodeScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "VS Code", null, null)) &&
-      vscodeScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)) &&
+      !vscodeScope.Allows(new ComputerUseUiAction("observe", "vscode", null, null, null, null, null, null)) &&
       !vscodeScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
       !vscodeScope.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
       vscodeScope.AllowsFixedAction("open-vscode") && !vscodeScope.AllowsFixedAction("open-edge") &&
       !vscodeScope.AllowsFixedAction("read-github-pull-requests"),
-    "the model cannot widen an app-launch request to another installed application");
+    "opening an app authorizes its launch but does not authorize reading its UI or unrelated fixed actions");
 Check(ComputerUseIntentScope.TryCreate("Mở Notepad rồi đưa cửa sổ mới lên trước", out var notepadScope) &&
       notepadScope!.Allows(new ComputerUseUiAction("launch-installed", "desktop", null, null, null, "Notepad", null, null)) &&
       notepadScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null)) &&
@@ -339,15 +341,52 @@ Check(scopedElements.TryGetValue("00000000000000000000000000000000:e1", out var 
       edgeScope!.Allows(new ComputerUseUiAction("invoke", "edge", "00000000000000000000000000000000", "e1", null, null, null, null), observedName),
     "target binding uses the observed element label associated with its observation ID");
 scopeObservation.Dispose();
+var sensitiveUiObservation = JsonDocument.Parse("""
+    {"status":"observed","app":"edge","observationId":"00000000000000000000000000000011",
+     "windows":[{"windowId":"00000000000000000000000000000012","title":"private window title"}],
+     "elements":[{"id":"e1","type":"Edit","name":"Search","enabled":true,"value":"private field value","automationId":"private-id"},
+                  {"id":"e2","type":"Text","name":"Inbox message preview","value":"private message"}]}
+    """);
+var restrictedUiText = typeScope!.FilterObservationForModel(sensitiveUiObservation.RootElement,
+    new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null));
+using var restrictedUi = JsonDocument.Parse(restrictedUiText);
+var restrictedElements = restrictedUi.RootElement.GetProperty("elements");
+var restrictedWindow = restrictedUi.RootElement.GetProperty("windows")[0];
+Check(restrictedElements.GetArrayLength() == 1 && restrictedElements[0].GetProperty("name").GetString() == "Search" &&
+      !restrictedElements[0].TryGetProperty("value", out _) && !restrictedElements[0].TryGetProperty("automationId", out _) &&
+      !restrictedWindow.TryGetProperty("title", out _) && restrictedWindow.TryGetProperty("windowId", out _),
+    "target-only observation returns only the requested input label and opaque window IDs, not UI values or titles");
+var postActionUi = JsonDocument.Parse("""
+    {"status":"verified","actionVerified":true,"observation":{"observationId":"00000000000000000000000000000013",
+     "elements":[{"id":"e1","type":"Edit","name":"Search"},{"id":"e2","type":"Text","name":"Inbox message preview"}]}}
+    """);
+var restrictedPostActionText = typeScope.FilterObservationForModel(postActionUi.RootElement,
+    new ComputerUseUiAction("type", "edge", "00000000000000000000000000000013", "e1", null, "hello", null, null));
+using var restrictedPostAction = JsonDocument.Parse(restrictedPostActionText);
+Check(restrictedPostAction.RootElement.GetProperty("observation").GetProperty("elements").GetArrayLength() == 1 &&
+      restrictedPostAction.RootElement.GetProperty("actionVerified").GetBoolean(),
+    "post-action verification preserves status while filtering the returned UI observation to the authorized target");
+postActionUi.Dispose();
+sensitiveUiObservation.Dispose();
+Check(ComputerUseIntentScope.TryCreate("Nhập hello vào Edge", out var appAsInputScope) &&
+      !appAsInputScope!.HasInteractiveUiScope &&
+      !appAsInputScope.Allows(new ComputerUseUiAction("observe", "edge", null, null, null, null, null, null)) &&
+      !ComputerUsePolicy.ShouldExposeInteractiveUiTool(normalChat: true, hasOtherTools: false, desktopAvailable: true,
+          uiDataConsent: true, hasVerifiedRequestScope: appAsInputScope.HasInteractiveUiScope),
+    "typing into an app name without a specific field does not expose broad UI observation");
 var windowScopeObservation = JsonDocument.Parse("""{"status":"window_selection_required","windows":[{"windowId":"00000000000000000000000000000002","title":"Untitled"}]}""");
 var scopedWindows = new Dictionary<string, string>(StringComparer.Ordinal);
-ComputerUseIntentScope.RecordObservedTargets(windowScopeObservation.RootElement,
+var filteredWindowScopeText = notepadScope!.FilterObservationForModel(windowScopeObservation.RootElement,
+    new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null));
+using var filteredWindowScope = JsonDocument.Parse(filteredWindowScopeText);
+ComputerUseIntentScope.RecordObservedTargets(filteredWindowScope.RootElement,
     new ComputerUseUiAction("observe", "desktop", null, null, null, "Notepad", null, null),
     new Dictionary<string, string>(StringComparer.Ordinal), scopedWindows);
 Check(scopedWindows.TryGetValue("00000000000000000000000000000002", out var selectedWindowTarget) &&
+      !filteredWindowScope.RootElement.GetProperty("windows")[0].TryGetProperty("title", out _) &&
       !notepadScope!.Allows(new ComputerUseUiAction("activate-window", "desktop", null, null,
           "00000000000000000000000000000002", null, null, null), observedTarget: selectedWindowTarget),
-    "an existing window from a process-filtered observation cannot substitute for the newly launched window");
+    "process-filtered selection exposes only opaque window IDs and cannot substitute an existing window for a newly launched one");
 windowScopeObservation.Dispose();
 var launchedWindowResult = JsonDocument.Parse("""{"status":"verified","newWindowVerified":true,"windowId":"00000000000000000000000000000003"}""");
 ComputerUseIntentScope.RecordObservedTargets(launchedWindowResult.RootElement,

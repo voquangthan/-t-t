@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 /// <summary>
@@ -43,6 +44,9 @@ public sealed class ComputerUseIntentScope
     private static readonly Regex CurrentUiSurface = new(
         @"\b(?:cửa\s+sổ|window|tab|trang|page|giao\s+diện|ui|màn\s+hình|screen)\b.{0,32}\b(?:đang\s+mở|hiện\s+tại|đang\s+hiển\s+thị|currently\s+open|currently\s+visible|open\s+now|visible\s+now)\b|\b(?:đang\s+mở|hiện\s+tại|đang\s+hiển\s+thị|currently\s+open|currently\s+visible|open\s+now|visible\s+now)\b.{0,32}\b(?:cửa\s+sổ|window|tab|trang|page|giao\s+diện|ui|màn\s+hình|screen)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex ExplicitInputSurface = new(
+        @"\b(?:ô|trường|hộp|thanh|field|input|search\s+box|address\s+bar)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly string originalRequest;
     private readonly HashSet<string> apps;
@@ -57,12 +61,13 @@ public sealed class ComputerUseIntentScope
     private readonly bool allowNavigate;
     private readonly bool requiresNewWindow;
     private readonly bool allowCurrentUiObservation;
+    private readonly bool allowTargetOnlyObservation;
     public bool HasInteractiveUiScope { get; }
 
     private ComputerUseIntentScope(string request, HashSet<string> apps, HashSet<string> openTargets,
         HashSet<string> clickTargets, HashSet<string> typeTargets, bool wholeDesktop, bool allowInvoke, bool allowFocus,
         bool allowScroll, bool allowType, bool allowNavigate, bool requiresNewWindow,
-        bool allowCurrentUiObservation, bool hasInteractiveUiScope)
+        bool allowCurrentUiObservation, bool allowTargetOnlyObservation, bool hasInteractiveUiScope)
     {
         originalRequest = request;
         this.apps = apps;
@@ -77,6 +82,7 @@ public sealed class ComputerUseIntentScope
         this.allowNavigate = allowNavigate;
         this.requiresNewWindow = requiresNewWindow;
         this.allowCurrentUiObservation = allowCurrentUiObservation;
+        this.allowTargetOnlyObservation = allowTargetOnlyObservation;
         HasInteractiveUiScope = hasInteractiveUiScope;
     }
 
@@ -144,13 +150,17 @@ public sealed class ComputerUseIntentScope
         if (apps.Count == 0 && !(hasOpen && openTargets.Count > 0)) return false;
         var requiresNewWindow = Regex.IsMatch(request, @"(?:cửa\s+sổ\s+mới|new\s+window)",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        var allowCurrentUiObservation = apps.Count == 1 &&
-            (CurrentUiSurface.IsMatch(request) || hasClick || hasType || hasScroll || hasNavigate);
+        var allowCurrentUiObservation = apps.Count == 1 && CurrentUiSurface.IsMatch(request);
+        var hasBoundClickTarget = hasClick && clickTargets.Any(target => !apps.Any(app => IsAppTarget(app, target)));
+        var hasBoundInputTarget = hasType && ExplicitInputSurface.IsMatch(request) &&
+            typeTargets.Any(target => !apps.Any(app => IsAppTarget(app, target)));
+        var allowTargetOnlyObservation = apps.Count == 1 &&
+            (hasBoundClickTarget || hasBoundInputTarget || hasScroll);
         var hasInteractiveUiScope = wholeDesktop || openTargets.Count > 0 || allowCurrentUiObservation ||
-            hasClick || hasType || hasScroll || hasNavigate;
+            allowTargetOnlyObservation || hasNavigate;
         scope = new ComputerUseIntentScope(request, apps, openTargets, clickTargets, typeTargets, wholeDesktop,
             hasClick, FocusCue.IsMatch(request) || hasType, hasScroll, hasType, hasNavigate, requiresNewWindow,
-            allowCurrentUiObservation, hasInteractiveUiScope);
+            allowCurrentUiObservation, allowTargetOnlyObservation, hasInteractiveUiScope);
         return true;
     }
 
@@ -160,7 +170,7 @@ public sealed class ComputerUseIntentScope
         if (action.App == "desktop")
         {
             if (action.Operation == "observe")
-                return wholeDesktop || action.Text is not null && AllowsExistingUiTarget(action.Text) &&
+                return wholeDesktop || action.Text is not null && AllowsObservationTarget(action.Text) &&
                     ComputerUseUiPlanner.IsExactUserText(action.Text, originalRequest);
             if (action.Operation == "activate-window")
                 return wholeDesktop || IsScopedTarget(observedTarget, requireNewWindow: requiresNewWindow);
@@ -182,8 +192,8 @@ public sealed class ComputerUseIntentScope
 
         return action.Operation switch
         {
-            "observe" or "activate-window" => openTargets.Any(target => IsAppTarget(action.App, target)) ||
-                allowCurrentUiObservation,
+            "observe" => AllowsObservationTarget(action.App),
+            "activate-window" => AllowsWindowActivationTarget(action.App),
             "launch-installed" => openTargets.Contains(Normalize(action.Text ?? "")) &&
                 ComputerUseUiPlanner.IsExactUserText(action.Text!, originalRequest),
             "navigate" => allowNavigate && action.App == "edge" && action.Url is not null &&
@@ -196,6 +206,86 @@ public sealed class ComputerUseIntentScope
             _ => false
         };
     }
+
+    public string FilterObservationForModel(JsonElement result, ComputerUseUiAction sourceAction)
+    {
+        if (wholeDesktop || allowCurrentUiObservation)
+            return result.GetRawText();
+
+        var root = JsonNode.Parse(result.GetRawText());
+        if (root is null || !ContainsObservation(root)) return result.GetRawText();
+        RestrictObservation(root);
+        return root.ToJsonString();
+
+        static bool ContainsObservation(JsonNode? node)
+        {
+            if (node is JsonObject value)
+            {
+                if (value.ContainsKey("observationId") || value.ContainsKey("elements") || value.ContainsKey("windows")) return true;
+                return value.Any(property => ContainsObservation(property.Value));
+            }
+            return node is JsonArray items && items.Any(ContainsObservation);
+        }
+
+        void RestrictObservation(JsonNode? node)
+        {
+            if (node is not JsonObject value) return;
+            foreach (var property in new[] { "title", "windowTitle", "text", "value", "url", "screenshot", "screenText" })
+                value.Remove(property);
+
+            if (value["windows"] is JsonArray windows)
+            {
+                for (var index = windows.Count - 1; index >= 0; index--)
+                {
+                    if (windows[index] is not JsonObject window) { windows.RemoveAt(index); continue; }
+                    var id = window["windowId"]?.DeepClone();
+                    windows[index] = id is null ? new JsonObject() : new JsonObject { ["windowId"] = id };
+                }
+            }
+            if (value["elements"] is JsonArray elements)
+            {
+                for (var index = elements.Count - 1; index >= 0; index--)
+                {
+                    if (elements[index] is not JsonObject element ||
+                        !allowTargetOnlyObservation && requiresNewWindow || !IsRequestedObservationElement(element))
+                    {
+                        elements.RemoveAt(index);
+                        continue;
+                    }
+                    var safeElement = new JsonObject();
+                    foreach (var property in new[] { "id", "type", "name", "enabled", "offscreen", "invokable", "scrollDirection" })
+                        if (element[property] is { } propertyValue) safeElement[property] = propertyValue.DeepClone();
+                    elements[index] = safeElement;
+                }
+            }
+            foreach (var child in value.ToArray())
+            {
+                if (child.Value is JsonObject) RestrictObservation(child.Value);
+                else if (child.Value is JsonArray array)
+                    foreach (var item in array) RestrictObservation(item);
+            }
+        }
+
+        bool IsRequestedObservationElement(JsonObject element)
+        {
+            var name = element["name"] is JsonValue nameValue && nameValue.TryGetValue<string>(out var text)
+                ? text : null;
+            var scrollDirection = element["scrollDirection"] is JsonValue scrollValue &&
+                scrollValue.TryGetValue<string>(out var direction) ? direction : null;
+            return hasClick && MatchesClickTarget(name) || hasType && MatchesTypeTarget(name) ||
+                allowScroll && !string.IsNullOrWhiteSpace(scrollDirection);
+        }
+    }
+
+    private bool AllowsObservationTarget(string appName) => wholeDesktop ||
+        allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
+
+    private bool AllowsWindowActivationTarget(string appName) => wholeDesktop ||
+        allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
 
     public bool AllowsFixedAction(string action) => action switch
     {
@@ -302,8 +392,10 @@ public sealed class ComputerUseIntentScope
         return AllowsExistingUiTarget(appName) && (!requireNewWindow || origin == "new");
     }
 
-    private bool AllowsExistingUiTarget(string appName) => openTargets.Any(target => IsAppTarget(appName, target)) ||
-        allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName));
+    private bool AllowsExistingUiTarget(string appName) =>
+        allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
+        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
 
     private static bool IsAppTarget(string app, string target)
     {
