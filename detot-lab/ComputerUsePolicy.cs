@@ -17,7 +17,14 @@ public static class ComputerUsePolicy
 
     public static bool CanObserve(string? target) => target is not null && ObservationTargets.Contains(target);
 
-    public static bool CanNavigate(string? action) => action is not null && NavigationActions.Contains(action);
+    public static bool CanNavigate(string? action)
+    {
+        if (action is null) return false;
+        if (NavigationActions.Contains(action)) return true;
+        const string launchPrefix = "open-installed:";
+        return action.StartsWith(launchPrefix, StringComparison.Ordinal) &&
+            ComputerUseUiPlanner.IsSafeInstalledApplicationName(action[launchPrefix.Length..]);
+    }
 
     public static bool CanUseUiOperation(string? app, string? operation) =>
         app is not null && ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) &&
@@ -47,7 +54,7 @@ public static class ComputerUsePolicy
     public static object Describe() => new
     {
         observe = new[] { "approved-applications", "github-account", "github-pull-requests" },
-        navigate = new[] { "open-workspace", "open-notepad", "open-github", "open-edge", "open-vscode" },
+        navigate = new[] { "open-workspace", "open-installed:<safe app name>", "open-github", "open-edge", "open-vscode" },
         accountSelection = Array.Empty<string>(),
         ui = new
         {

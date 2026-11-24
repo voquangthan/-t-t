@@ -5,6 +5,9 @@ public static class ComputerUseChatIntent
     private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled;
     private const string Prefix = @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?";
     private const string Suffix = @"(?:\s+(?:giúp\s+(?:t|tao|tôi|mình)|cho\s+(?:t|tao|tôi|mình)|đi|nha|nhé|với|please))*\s*[.!?]*\s*$";
+    private static readonly Regex DirectInstalledAppLaunch = new(
+        Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:ứng\s+dụng\s+)?(?<app>[\p{L}\p{N}][\p{L}\p{N} &+._'-]{0,60}?)(?=\s+(?:rồi|sau\s+đó|và|and|then|để|for|to|đi|nha|nhé|với|please)\b|[,;.!?]|$)" + Suffix,
+        Options);
 
     private static readonly (string Action, Regex Pattern)[] Patterns =
     [
@@ -28,6 +31,12 @@ public static class ComputerUseChatIntent
             var match = pattern.Match(text);
             if (!match.Success) continue;
             return action;
+        }
+        var launch = DirectInstalledAppLaunch.Match(text);
+        if (launch.Success)
+        {
+            var appName = launch.Groups["app"].Value.Trim();
+            if (ComputerUseUiPlanner.IsSafeInstalledApplicationName(appName)) return "open-installed:" + appName;
         }
         return null;
     }

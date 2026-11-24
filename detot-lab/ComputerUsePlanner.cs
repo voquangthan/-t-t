@@ -84,6 +84,7 @@ public static partial class ComputerUsePlanner
     }
 
     private static bool IsAllowed(string? action) => action is not null &&
+        AllowedActionIds.Contains(action, StringComparer.Ordinal) &&
         (ComputerUsePolicy.CanNavigate(action) ||
          ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(action)));
 
@@ -98,7 +99,8 @@ public static partial class ComputerUsePlanner
 
         return action switch
         {
-            "open-notepad" => IsTrue(body, "windowVerified"),
+            _ when action == "open-notepad" || action.StartsWith("open-installed:", StringComparison.Ordinal) =>
+                IsTrue(body, "windowVerified") && IsTrue(body, "newWindowVerified") && IsTrue(body, "actionVerified"),
             "open-workspace" => IsTrue(body, "workspaceVerified"),
             "open-vscode" => IsTrue(body, "windowVerified") && IsTrue(body, "workspaceVerified"),
             "open-edge" => IsTrue(body, "windowVerified"),

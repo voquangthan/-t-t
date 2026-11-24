@@ -40,8 +40,12 @@ Check(ComputerUsePolicy.CanObserve("github-account") &&
 Check(!ComputerUsePolicy.CanObserve("desktop-screenshot"), "unlisted observation targets are denied");
 Check(ComputerUsePolicy.CanNavigate("open-notepad") &&
       ComputerUseChatIntent.DetectDirectRequest("Mở Notepad") == "open-notepad" &&
-      ComputerUseChatIntent.DetectDirectRequest("Mở Notepad rồi ghi báo cáo") is null,
-    "only the exact Notepad launch phrase is dispatched locally; content tasks remain on the smart route");
+      ComputerUseChatIntent.DetectDirectRequest("Mở Calculator") == "open-installed:Calculator" &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở Calculator rồi giải phương trình") is null &&
+      ComputerUseChatIntent.DetectDirectRequest("Mở PowerShell") is null &&
+      ComputerUsePolicy.CanNavigate("open-installed:Calculator") &&
+      !ComputerUsePolicy.CanNavigate("open-installed:PowerShell"),
+    "direct installed-app launches use the shared safe-name policy; multi-step and blocked-app requests stay on the smart route");
 Check(ComputerUsePlanner.MightBeActionRequest("Mở VS Code rồi xem các PR và CI") &&
       ComputerUsePlanner.MightBeActionRequest("Mở Edge, bấm tab Gmail, rồi cuộn xuống") &&
       ComputerUsePlanner.MightBeActionRequest("Mở Notepad") &&
@@ -58,6 +62,7 @@ Check(ComputerUsePlanner.TryParse("""{"handled":false,"actions":[]}""", out var 
       notHandledPlan is { Handled: false, Actions.Count: 0 },
     "LLM can defer ordinary questions to normal chat");
 Check(!ComputerUsePlanner.TryParse("""{"handled":true,"actions":["run-shell"]}""", out _) &&
+      !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-installed:Calculator"]}""", out _) &&
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode","open-vscode"]}""", out _) &&
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":[{"action":"open-vscode"}]}""", out _) &&
       !ComputerUsePlanner.TryParse("""{"handled":true,"actions":["open-vscode"],"command":"anything"}""", out _) &&
@@ -831,11 +836,15 @@ computerUseExecutions = 0;
 var notepadDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở Notepad", false, false, FakeComputerUseExecutor);
 Check(notepadDispatch.Dispatched && notepadDispatch.Action == "open-notepad" && computerUseExecutions == 1,
     "the exact local Notepad request dispatches without invoking the model planner");
-using (var verifiedNotepadResult = JsonDocument.Parse("""{"windowVerified":true}"""))
-using (var unverifiedNotepadResult = JsonDocument.Parse("""{"windowVerified":false}"""))
-    Check(ComputerUsePlanner.IsVerifiedActionResult("open-notepad", 200, verifiedNotepadResult.RootElement) &&
-          !ComputerUsePlanner.IsVerifiedActionResult("open-notepad", 200, unverifiedNotepadResult.RootElement),
-        "local Notepad success is reported only when its window was verified");
+computerUseExecutions = 0;
+var calculatorDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Mở Calculator", false, false, FakeComputerUseExecutor);
+Check(calculatorDispatch.Dispatched && calculatorDispatch.Action == "open-installed:Calculator" && computerUseExecutions == 1,
+    "a generic safe application launch dispatches through the same local adapter without invoking the model planner");
+using (var verifiedInstalledResult = JsonDocument.Parse("""{"windowVerified":true,"newWindowVerified":true,"actionVerified":true}"""))
+using (var missingActionEvidence = JsonDocument.Parse("""{"windowVerified":true,"newWindowVerified":true,"actionVerified":false}"""))
+    Check(ComputerUsePlanner.IsVerifiedActionResult("open-installed:Calculator", 200, verifiedInstalledResult.RootElement) &&
+          !ComputerUsePlanner.IsVerifiedActionResult("open-installed:Calculator", 200, missingActionEvidence.RootElement),
+        "installed-app launch success requires verified action and a new verified window");
 computerUseExecutions = 0;
 var normalQuestionDispatch = await ComputerUseChatDispatcher.TryDispatchAsync("Làm sao mở Edge?", false, false, FakeComputerUseExecutor);
 Check(!normalQuestionDispatch.Dispatched && computerUseExecutions == 0,
@@ -870,7 +879,20 @@ var localNotepadRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthor
 if (localNotepadRoute.ContinueToChat) routeProviderCalls++;
 Check(!localNotepadRoute.ContinueToChat && localNotepadRoute.Result == "executed:open-notepad" &&
       routeExecutorCalls == 1 && routeConsentChecks == 0 && routeProviderCalls == 0,
-    "local Notepad launch bypasses DeepSeek/OpenClaw and unrelated chat-history consent");
+    "local Notepad smoke test uses the shared local launch path before unrelated chat-history consent");
+routeExecutorCalls = 0;
+routeConsentChecks = 0;
+routeProviderCalls = 0;
+var localCalculatorRoute = await ComputerUseChatDispatcher.DispatchBeforeChatAuthorizationAsync(
+    "Mở Calculator", false, false, RouteExecutor, () =>
+    {
+        routeConsentChecks++;
+        return Task.FromResult<string?>("403");
+    });
+if (localCalculatorRoute.ContinueToChat) routeProviderCalls++;
+Check(!localCalculatorRoute.ContinueToChat && localCalculatorRoute.Result == "executed:open-installed:Calculator" &&
+      routeExecutorCalls == 1 && routeConsentChecks == 0 && routeProviderCalls == 0,
+    "a generic safe local app launch uses the shared adapter without invoking the chat provider");
 routeExecutorCalls = 0;
 routeConsentChecks = 0;
 routeProviderCalls = 0;
