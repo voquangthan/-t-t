@@ -372,6 +372,10 @@ Check(ComputerUseIntentScope.TryCreate("Mở Calculator rồi nhập 123 vào ô
           null, "999", null, null), observedElementName: "Result", observedTarget: "calculator|new") &&
       !ComputerUseUiPlanner.IsSafeTypingSurface("desktop", "Edit", "Password"),
     "generic-app typing remains bound to exact user text and excludes sensitive fields");
+Check(ComputerUseIntentScope.TryCreate("Mở Calculator", out var genericOpenOnlyScope) &&
+      !genericOpenOnlyScope!.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, "Calculator", null, null)) &&
+      !genericOpenOnlyScope.Allows(new ComputerUseUiAction("observe", "desktop", null, null, null, null, null, null)),
+    "opening an unadapted app alone does not grant permission to inspect its UI");
 Check(ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "notepad") &&
       ComputerUseUiPlanner.IsRequestedProcessTarget("VS Code", "Code") &&
       !ComputerUseUiPlanner.IsRequestedProcessTarget("Notepad", "msedge") &&

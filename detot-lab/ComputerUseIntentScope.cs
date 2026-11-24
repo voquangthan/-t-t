@@ -296,12 +296,12 @@ public sealed class ComputerUseIntentScope
     private bool AllowsObservationTarget(string appName) => wholeDesktop ||
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
-        openTargets.Any(target => IsAppTarget(appName, target));
+        (requiresNewWindow || allowTargetOnlyObservation) && openTargets.Any(target => IsAppTarget(appName, target));
 
     private bool AllowsWindowActivationTarget(string appName) => wholeDesktop ||
         allowCurrentUiObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
         allowTargetOnlyObservation && apps.Count == 1 && apps.Any(app => IsAppTarget(app, appName)) ||
-        openTargets.Any(target => IsAppTarget(appName, target));
+        requiresNewWindow && openTargets.Any(target => IsAppTarget(appName, target));
 
     public bool AllowsFixedAction(string action) => action switch
     {
