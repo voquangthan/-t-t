@@ -13,7 +13,6 @@ internal static class CompanionUiAutomation
             ["explorer"] = "File Explorer",
             ["devenv"] = "Visual Studio",
             ["notepad"] = "Notepad",
-            ["WindowsTerminal"] = "Windows Terminal"
         };
 
     private static readonly Lazy<IUiAutomation> Automation = new(() =>
@@ -24,6 +23,34 @@ internal static class CompanionUiAutomation
             .BuildServiceProvider();
         return services.GetRequiredService<IUiAutomation>();
     });
+
+    public static IUiAutomation Api => Automation.Value;
+
+    public static IReadOnlyList<int> GetInteractiveProcessIds()
+    {
+        if (!OperatingSystem.IsWindows()) return [];
+        var sessionId = Process.GetCurrentProcess().SessionId;
+        var processIds = new List<int>();
+        foreach (var process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.SessionId != sessionId || !ComputerUseUiPlanner.CanObserveDesktopProcess(process.ProcessName)) continue;
+                    var hasVisibleWindow = Automation.Value.FindWindowsByPid(process.Id).Any(window =>
+                        window.Item1 != IntPtr.Zero && IsWindowVisible(window.Item1) && !string.IsNullOrWhiteSpace(window.Item3));
+                    if (hasVisibleWindow) processIds.Add(process.Id);
+                }
+                catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or
+                    System.Runtime.InteropServices.COMException or System.Security.SecurityException)
+                {
+                    // A process may exit or deny UIA access while Windows enumerates the interactive desktop.
+                }
+            }
+        }
+        return processIds.Distinct().ToArray();
+    }
 
     public static WindowsDesktopAutomation.ApplicationObservation ObserveApprovedApplications()
     {

@@ -11,7 +11,9 @@
     <Compile Include="../DesktopOperator.cs" Link="DesktopOperator.cs" />
     <Compile Include="../DesktopCompanionProtocol.cs" Link="DesktopCompanionProtocol.cs" />
     <Compile Include="../DesktopCompanionVerification.cs" Link="DesktopCompanionVerification.cs" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp.UIAutomation" Version="0.7.0" />
+    <Compile Include="../ComputerUseUiPlanner.cs" Link="ComputerUseUiPlanner.cs" />
+    <Compile Include="../ComputerUseCommandPlanner.cs" Link="ComputerUseCommandPlanner.cs" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp.UIAutomation" Version="0.8.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
   </ItemGroup>

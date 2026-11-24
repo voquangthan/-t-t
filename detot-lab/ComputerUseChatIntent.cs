@@ -5,9 +5,15 @@ public static class ComputerUseChatIntent
     private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled;
     private const string Prefix = @"^\s*(?:(?:đệ\s+tốt|mày|bạn)\s*,?\s*)?(?:hãy\s+)?";
     private const string Suffix = @"(?:\s+(?:giúp\s+(?:t|tao|tôi|mình)|cho\s+(?:t|tao|tôi|mình)|đi|nha|nhé|với|please))*\s*[.!?]*\s*$";
+    private static readonly Regex DirectInstalledAppLaunch = new(
+        Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:ứng\s+dụng\s+)?(?<app>[\p{L}\p{N}][\p{L}\p{N} &+._'-]{0,60}?)(?=\s+(?:rồi|sau\s+đó|và|and|then|để|for|to|đi|nha|nhé|với|please)\b|[,;.!?]|$)" + Suffix,
+        Options);
+    private static readonly Regex DirectAppContinuation = new(
+        @"\s+(?:rồi|sau\s+đó|và|and|then|để|for|to)\b", Options);
 
     private static readonly (string Action, Regex Pattern)[] Patterns =
     [
+        ("open-notepad", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:ứng\s+dụng\s+)?notepad" + Suffix, Options)),
         ("open-vscode", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:vs\s*code|visual\s+studio\s+code)" + Suffix, Options)),
         ("open-edge", new(Prefix + @"(?:mở|open|launch|khởi\s+chạy)\s+(?:cái\s+)?(?:microsoft\s+)?edge" + Suffix, Options)),
         ("open-workspace", new(Prefix + @"(?:mở|open)\s+(?:project\s+)?workspace" + Suffix, Options)),
@@ -27,6 +33,13 @@ public static class ComputerUseChatIntent
             var match = pattern.Match(text);
             if (!match.Success) continue;
             return action;
+        }
+        var launch = DirectInstalledAppLaunch.Match(text);
+        if (launch.Success)
+        {
+            var appName = launch.Groups["app"].Value.Trim();
+            if (!DirectAppContinuation.IsMatch(appName) && ComputerUseUiPlanner.IsSafeInstalledApplicationName(appName))
+                return "open-installed:" + appName;
         }
         return null;
     }

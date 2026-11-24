@@ -10,18 +10,22 @@ public static partial class ComputerUsePlanner
     public const string ToolName = "detot_computer_use_plan";
     public static IReadOnlyList<string> AllowedActionIds { get; } = Array.AsReadOnly(new[]
     {
-        "open-workspace", "open-vscode", "open-edge", "open-github",
+        "open-workspace", "open-notepad", "open-vscode", "open-edge", "open-github",
         "read-github-account", "read-github-pull-requests", "read-approved-applications"
     });
 
-    [GeneratedRegex(@"\b(mở|vào|xem|kiểm\s+tra|đọc|liệt\s+kê|open|launch|check|inspect|read|list|show|verify|go\s+to)\b",
+    [GeneratedRegex(@"\b(mở|vào|xem|kiểm\s+tra|đọc|liệt\s+kê|bấm|nhấn|chọn|cuộn|nhập|gõ|điền|click|press|select|scroll|type|enter|fill|open|launch|check|inspect|read|list|show|verify|go\s+to)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ActionCue();
 
+    [GeneratedRegex(@"^\s*(?:làm\s+sao|cách\s+(?:mở|dùng|bấm)|hướng\s+dẫn|how\s+(?:do\s+i|can\s+i|to)\b)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex InstructionQuestion();
+
     public static bool MightBeActionRequest(string? message) =>
-        !string.IsNullOrWhiteSpace(message) && message.Length <= 600 &&
+        !string.IsNullOrWhiteSpace(message) && message.Length <= 1500 &&
         !message.Contains('\n') && !message.Contains('\r') && !message.Contains('`') &&
-        !message.Contains('"') && !message.Contains('\'') && ActionCue().IsMatch(message);
+        !InstructionQuestion().IsMatch(message) && ActionCue().IsMatch(message);
 
     public static object CreateToolDefinition() => new
     {
@@ -80,6 +84,7 @@ public static partial class ComputerUsePlanner
     }
 
     private static bool IsAllowed(string? action) => action is not null &&
+        AllowedActionIds.Contains(action, StringComparer.Ordinal) &&
         (ComputerUsePolicy.CanNavigate(action) ||
          ComputerUsePolicy.CanObserve(ComputerUseChatIntent.ObservationTargetForAction(action)));
 
@@ -94,6 +99,8 @@ public static partial class ComputerUsePlanner
 
         return action switch
         {
+            _ when action == "open-notepad" || action.StartsWith("open-installed:", StringComparison.Ordinal) =>
+                IsTrue(body, "windowVerified") && IsTrue(body, "newWindowVerified") && IsTrue(body, "actionVerified"),
             "open-workspace" => IsTrue(body, "workspaceVerified"),
             "open-vscode" => IsTrue(body, "windowVerified") && IsTrue(body, "workspaceVerified"),
             "open-edge" => IsTrue(body, "windowVerified"),

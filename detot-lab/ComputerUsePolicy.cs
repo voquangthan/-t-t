@@ -1,5 +1,27 @@
 public static class ComputerUsePolicy
 {
+    public const string ModelRoute = "deepseek/deepseek-flash";
+    public const string ModelConsentDestination = "DeepSeek via OpenClaw Gateway";
+    public const string DefaultChatModelRoute = "openclaw/default";
+
+    public static string SelectModelRoute(bool computerUseRequest, bool modelConsentAllowed) =>
+        computerUseRequest && modelConsentAllowed ? ModelRoute : DefaultChatModelRoute;
+
+    public static bool ShouldExposeComputerUsePlannerTool(bool normalChat, bool hasOtherTools,
+        bool desktopAvailable, bool modelConsentAllowed, ComputerUseIntentScope? requestScope,
+        bool isActionRequest) =>
+        normalChat && !hasOtherTools && desktopAvailable && modelConsentAllowed && isActionRequest &&
+        requestScope is { HasInteractiveUiScope: true };
+
+    public static bool TryAuthorizeModelAssistedFixedAction(bool modelConsentAllowed,
+        ComputerUseIntentScope? requestScope, string action, Action? onAuthorized = null)
+    {
+        if (!modelConsentAllowed || requestScope is null || string.IsNullOrWhiteSpace(action) ||
+            !requestScope.AllowsFixedAction(action)) return false;
+        onAuthorized?.Invoke();
+        return true;
+    }
+
     private static readonly HashSet<string> ObservationTargets = new(StringComparer.Ordinal)
     {
         "approved-applications",
@@ -9,7 +31,7 @@ public static class ComputerUsePolicy
 
     private static readonly HashSet<string> NavigationActions = new(StringComparer.Ordinal)
     {
-        "open-workspace",
+        "open-workspace", "open-notepad",
         "open-github",
         "open-edge",
         "open-vscode"
@@ -17,7 +39,48 @@ public static class ComputerUsePolicy
 
     public static bool CanObserve(string? target) => target is not null && ObservationTargets.Contains(target);
 
-    public static bool CanNavigate(string? action) => action is not null && NavigationActions.Contains(action);
+    public static string IsolatedGatewaySessionKey(Guid? requestId)
+    {
+        var sessionId = requestId is { } id && id != Guid.Empty ? id : Guid.NewGuid();
+        return $"agent:main:detot-computer-use-{sessionId:N}";
+    }
+
+    public static bool CanNavigate(string? action)
+    {
+        if (action is null) return false;
+        if (NavigationActions.Contains(action)) return true;
+        const string launchPrefix = "open-installed:";
+        return action.StartsWith(launchPrefix, StringComparison.Ordinal) &&
+            ComputerUseUiPlanner.IsSafeInstalledApplicationName(action[launchPrefix.Length..]);
+    }
+
+    public static bool CanUseUiOperation(string? app, string? operation) =>
+        app is not null && ComputerUseUiPlanner.AllowedApps.Contains(app, StringComparer.Ordinal) &&
+        operation is not null && ComputerUseUiPlanner.AllowedOperations.Contains(operation, StringComparer.Ordinal);
+
+    public static bool TryAuthorizeSafeTerminalCommand(bool terminalConsentAllowed,
+        ComputerUseCommandScope? scope, ComputerUseCommandAction action) =>
+        terminalConsentAllowed && scope is not null && scope.Allows(action);
+
+    public static bool ShouldExposeInteractiveUiTool(bool normalChat, bool hasOtherTools, bool desktopAvailable,
+        bool uiDataConsent, ComputerUseIntentScope? requestScope) =>
+        normalChat && !hasOtherTools && desktopAvailable && uiDataConsent &&
+        requestScope is { HasInteractiveUiScope: true };
+
+    public static bool TryAuthorizeInteractiveUiAction(ComputerUseIntentScope? scope,
+        ComputerUseUiAction action, string? observedElementName = null, string? observedTarget = null,
+        Action? onAuthorized = null)
+    {
+        if (scope is null || !scope.Allows(action, observedElementName, observedTarget)) return false;
+        onAuthorized?.Invoke();
+        return true;
+    }
+
+    public static bool TryAuthorizeModelAssistedUiAction(bool gatewayDataConsentAllowed,
+        ComputerUseIntentScope? scope, ComputerUseUiAction action, string? observedElementName = null,
+        string? observedTarget = null, Action? onAuthorized = null) =>
+        gatewayDataConsentAllowed && TryAuthorizeInteractiveUiAction(scope, action,
+            observedElementName, observedTarget, onAuthorized);
 
     // GCM's current chooser is not bound to a trusted pending Git operation, repository, or host.
     // Keep account selection denied until such transaction context can be verified end to end.
@@ -29,9 +92,16 @@ public static class ComputerUsePolicy
     public static object Describe() => new
     {
         observe = new[] { "approved-applications", "github-account", "github-pull-requests" },
-        navigate = new[] { "open-workspace", "open-github", "open-edge", "open-vscode" },
+        navigate = new[] { "open-workspace", "open-installed:<safe app name>", "open-github", "open-edge", "open-vscode" },
         accountSelection = Array.Empty<string>(),
+        ui = new
+        {
+            apps = ComputerUseUiPlanner.AllowedApps,
+            operations = ComputerUseUiPlanner.AllowedOperations,
+            restrictions = new[] { "request_scoped_ui_actions", "fresh_evidence_required", "approved_text_fields_only", "exact_user_text_only", "no_sensitive_text", "no_submit", "no_arbitrary_terminal", "no_credentials", "confirm_risky_actions" }
+        },
         write = Array.Empty<string>(),
+        terminal = new { commands = ComputerUseCommandPlanner.CommandIds, consentRequired = true, arbitraryCommand = false },
         codeExecution = false
     };
 }
