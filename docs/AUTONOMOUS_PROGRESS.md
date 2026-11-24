@@ -1,5 +1,14 @@
 # Đệ Tốt Pro — checkpoint
 
+## Computer Use — model egress and local launch (24/11/2026)
+
+- PR #5 head is `e43218ec86bdd8e4b7c1066b4c7e2d5cff15aea1` (`codex/universal-computer-agent`). Commits `e761f60` and `e43218e` add a final UI observation allowlist and an exact local Notepad-launch route; `f4cf077` corrected UIA test fixtures after CI exposed missing `type` fields.
+- UI observations sent to the configured OpenClaw model route now include only bounded status/verification metadata, opaque window IDs, and allowlisted structural controls. UI values, screenshots, titles, text-content controls, and unknown fields are omitted. Invalid/oversized observations stop the UI loop before another model call.
+- Exact “Mở Notepad” is dispatched locally through the authenticated Companion and reports success only after a new window is verified. Longer tasks do not use this local shortcut.
+- Windows CI #84 passed on `f4cf077`; Windows CI #85 passed on `e43218e`, including backend/Companion builds, desktop regressions, Google/GitHub regressions and frontend checks. Local .NET SDK is unavailable in this execution environment. Work was asked to re-review `e43218e`; no independent verdict is recorded yet.
+- **Not complete:** interactive user-session E2E remains unverified. The app uses `openclaw/default`; the active Gateway configuration selects the provider, so this code does not guarantee a specific DeepSeek model. A per-field UI-content disclosure flow is not implemented; UI content values remain blocked from model egress.
+- **Next:** obtain review feedback for exact `e43218e`, then run the Windows interactive smoke when an authenticated user-session Companion is available. Keep the implementation and user-facing claims at CI/code scope until that smoke succeeds.
+
 ## Computer Use — request-scoped authorization follow-up (24/11/2026)
 
 - Work REVISE trên PR #5 phát hiện tool call do model tự sinh có thể được ghi audit như direct user request dù lượt chat không yêu cầu thao tác desktop.
