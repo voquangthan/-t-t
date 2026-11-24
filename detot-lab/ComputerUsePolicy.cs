@@ -105,15 +105,3 @@ public static class ComputerUsePolicy
         codeExecution = false
     };
 }
-
-public static class ComputerUseRecoveryPolicy
-{
-    public const int MaximumReplansPerTurn = 2;
-    private static readonly HashSet<string> RefreshableNoSideEffectStatuses = new(StringComparer.Ordinal)
-    {
-        "stale_observation", "app_process_not_approved", "observation_incomplete", "element_not_observed",
-        "window_changed", "stale_element"
-    };
-
-    public static bool CanRefreshAndReplan(string? status) => status is not null && RefreshableNoSideEffectStatuses.Contains(status);
-}
